@@ -30,7 +30,7 @@ import pytest
 from common.logging import JSON_FIELDS
 from harness.conversation import current_history
 from harness.graph.orchestrate import _carried_opening, carried_record
-from harness.graph.state import ORCHESTRATOR_CHAIN_RESET_KEY, CarriedRef
+from harness.graph.state import ORCHESTRATOR_CARRIES_KEY, ORCHESTRATOR_CHAIN_RESET_KEY, CarriedRef
 from harness.settings import HistorySettings
 from harness.studio_state import (
     CARRIED_HISTORY_TOKEN_CAP,
@@ -40,9 +40,9 @@ from harness.studio_state import (
     history_arm,
     make_carried_history,
 )
-from harness.studio_store import Renewal, SegmentClose, StudioStore
+from harness.studio_store import Renewal, SegmentClose, StudioStore, record_closed_turn
 from harness.turn.node import TurnKey
-from harness.turn.store import TurnStatus
+from harness.turn.store import Cursor, TurnStatus
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from orchestrator.run import StoredHistory
 from pydantic import ValidationError
@@ -1089,3 +1089,37 @@ def test_an_unknown_history_setting_is_refused(
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):
         HistorySettings()
+
+
+@pytest.mark.parametrize(("carried", "marked"), [(True, True), (False, False)])
+def test_only_a_turn_that_answered_with_a_carry_is_recorded_as_close_failed(
+    carried: bool, marked: bool
+) -> None:
+    """`record_closed_turn` records a turn whose closing write failed. Only a
+    turn whose orchestrator answered with a conversation to carry
+    (`ORCHESTRATOR_CARRIES_KEY`) leaves the `close_failed` marker; a `done`
+    turn that carried nothing, such as one whose plan card was set aside,
+    leaves none, so the next turn reads `previous_turn_carried_none`."""
+    conversation = ConversationState(conversation_id="conv-close")
+    conversation.begin_turn(history=HistorySettings(studio_history="full"))
+    cursor = Cursor(
+        id=1,
+        conversation=1,
+        turn_index=1,
+        node="orchestrate",
+        node_input=None,
+        status=TurnStatus.DONE,
+        round=0,
+        pause=None,
+        owed=None,
+        inputs={},
+        state={ORCHESTRATOR_CARRIES_KEY: True} if carried else {},
+        error=None,
+        version=1,
+        record_count=0,
+        spec_digests={},
+    )
+
+    record_closed_turn(conversation, cursor)
+
+    assert (conversation.carried_history == {"turn": 1, "reset": "close_failed"}) is marked

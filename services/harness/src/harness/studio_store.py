@@ -127,6 +127,7 @@ from harness.graph.state import (
     ASK_FOR_QUESTION_KEY,
     NEW_QUESTION_KEY,
     ORCHESTRATOR_APPLIED_KEY,
+    ORCHESTRATOR_CARRIES_KEY,
     ORCHESTRATOR_CHAIN_RESET_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
@@ -1794,13 +1795,16 @@ def record_closed_turn(conversation: ConversationState, cursor: Cursor) -> str:
     `closed_turn_error`'s error. A turn that ended on a question set aside
     for the next turn (`set_aside_question`) keeps that question too, so the
     state read still hands it back to the page that never got `done`.
-    A `full` turn closed `done` drops its carry with the error, and the
+    A turn closed `done` whose orchestrator answered with a conversation to
+    carry (`ORCHESTRATOR_CARRIES_KEY`) drops it with the error, and the
     conversation keeps why in its place
     (`ConversationState.mark_carry_lost`), so the next turn's chain reset
     reads `close_failed`. Returns the error recorded."""
     keep_turn_records(conversation, cursor.state)
     error = closed_turn_error(cursor)
-    carry_lost = cursor.status is TurnStatus.DONE and conversation.turn_usage.history == "full"
+    carry_lost = (
+        cursor.status is TurnStatus.DONE and cursor.state.get(ORCHESTRATOR_CARRIES_KEY) is True
+    )
     conversation.close_turn(
         final_text="",
         error=error,

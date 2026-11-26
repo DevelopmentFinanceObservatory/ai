@@ -58,8 +58,8 @@ def given(
 
 
 def no_carried(_key: TurnKey) -> None:
-    """A conversation store that holds no carried conversation, for graphs
-    whose turns open on the digest."""
+    """A carried source for an instance that holds no state for the
+    conversation, for graphs whose turns open on the digest."""
 
 
 def opening_nodes(

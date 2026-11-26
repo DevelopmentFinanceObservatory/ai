@@ -39,6 +39,7 @@ from pydantic_ai.models import Model
 from harness.gemini_agent import RecordingState
 from harness.graph.events import AgentStatus, GraphEvent
 from harness.graph.state import (
+    ORCHESTRATOR_CARRIES_KEY,
     ORCHESTRATOR_CHAIN_RESET_KEY,
     ORCHESTRATOR_GIVEN_BACK_ASKS_KEY,
     ORCHESTRATOR_HISTORY_KEY,
@@ -222,6 +223,7 @@ def orchestrate_node(
                 return _handed_off(ctx, event)
             if isinstance(event, Answered):
                 if event.history is not None and inputs.history == "full":
+                    ctx.state[ORCHESTRATOR_CARRIES_KEY] = True
                     return Next(
                         "answered",
                         carried_record(event.history, model_name=run_model.model_name),

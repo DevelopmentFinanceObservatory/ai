@@ -126,6 +126,11 @@ ORCHESTRATOR_HISTORY_KEY = WAITING_HISTORY_KEY
 # running it holds no state for the conversation; `harness.studio_store.keep_turn_records`
 # records it as the turn's `history_chain`.
 ORCHESTRATOR_CHAIN_RESET_KEY = "orchestrator:chain_reset"
+# True on a `full` turn whose orchestrator answered with a conversation to
+# carry (the `answered` edge's output), so a turn whose closing write failed
+# is told apart from one that had nothing to carry
+# (`harness.studio_store.record_closed_turn`).
+ORCHESTRATOR_CARRIES_KEY = "orchestrator:carries"
 # spec_id -> the refusal message of a fetch or a plan step that read it and
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.
