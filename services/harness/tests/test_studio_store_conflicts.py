@@ -10,6 +10,7 @@ none retries or is refused. Two claims on one turn state still conflict.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
@@ -18,8 +19,14 @@ from executor.ledger import PlanApproval, SourcePolicy, Start, idempotency_key, 
 from google.genai import types
 from harness.conversation import current_conversation_key
 from harness.run_ledger import StudioRunLedger
-from harness.studio_state import ConversationState, _next_manifest
-from harness.studio_store import ConversationStale, Renewal, StudioStore
+from harness.studio_state import ConversationState, TurnUsage, _next_manifest
+from harness.studio_store import (
+    ConversationStale,
+    Renewal,
+    StudioStore,
+    _assign_changed,
+    _shallow_copy,
+)
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -213,8 +220,8 @@ async def test_a_load_keeps_the_stored_usage_of_a_turn_another_instance_holds(
     engines: list[AsyncEngine],
 ) -> None:
     """A noted three model calls it never saved, then lost the segment to B,
-    which noted two and saved. A's next load reads B's two, since A's unsaved
-    calls are its own only while it holds the segment."""
+    which noted two and saved. A's next load reads B's two plus its own three,
+    since the totals add."""
     clock = await StoreClock.start(engines[0])
     owner = _store(engines[0], clock=clock)
     taker = _store(engines[1], clock=clock)
@@ -236,4 +243,63 @@ async def test_a_load_keeps_the_stored_usage_of_a_turn_another_instance_holds(
 
     reloaded = await owner.load(PRINCIPAL, CONVERSATION)
     assert reloaded is not None
-    assert (reloaded.turn_usage.model_calls, reloaded.turn_usage.input_tokens) == (2, 200)
+    assert (reloaded.turn_usage.model_calls, reloaded.turn_usage.input_tokens) == (5, 500)
+
+    # A's next save stores the sum, and B reads it.
+    await clock.advance(50)
+    await owner.save(PRINCIPAL, CONVERSATION)
+    seen = await taker.load(PRINCIPAL, CONVERSATION)
+    assert seen is not None
+    assert (seen.turn_usage.model_calls, seen.turn_usage.input_tokens) == (5, 500)
+
+
+async def test_a_load_adds_the_calls_another_instance_saved_to_the_unsaved_ones(
+    engines: list[AsyncEngine],
+) -> None:
+    """A noted four calls whose save never landed, B resumed the turn, noted
+    two, saved and paused. A loads six, and a save and a load on A leave six."""
+    clock = await StoreClock.start(engines[0])
+    owner = _store(engines[0], clock=clock)
+    taker = _store(engines[1], clock=clock)
+    state = await owner.create(PRINCIPAL, CONVERSATION)
+    owner.claim_segment(PRINCIPAL, CONVERSATION)
+    state.begin_turn()
+    await owner.save(PRINCIPAL, CONVERSATION)
+    usage = types.GenerateContentResponseUsageMetadata(prompt_token_count=10)
+    for _ in range(4):
+        state.note_model_usage(usage)
+
+    await clock.advance(50)
+    adopted = await taker.load(PRINCIPAL, CONVERSATION)
+    assert adopted is not None
+    taker.claim_segment(PRINCIPAL, CONVERSATION)
+    for _ in range(2):
+        adopted.note_model_usage(usage)
+    await taker.save(PRINCIPAL, CONVERSATION)
+    await clock.advance(50)
+
+    loaded = await owner.load(PRINCIPAL, CONVERSATION)
+    assert loaded is not None
+    assert loaded.turn_usage.model_calls == 6
+    await owner.save(PRINCIPAL, CONVERSATION)
+    again = await owner.load(PRINCIPAL, CONVERSATION)
+    assert again is not None
+    assert (again.turn_usage.model_calls, again.turn_usage.input_tokens) == (6, 60)
+
+
+def test_a_canvas_write_keeps_the_model_calls_its_turn_noted_meanwhile() -> None:
+    """A canvas write commits its copy's turn usage; a model call the live
+    state noted while the copy was out adds to it and is not overwritten."""
+    live = ConversationState(conversation_id="conv-usage")
+    live.turn_usage = TurnUsage(trace_id="tr_1", model_calls=1, input_tokens=100)
+    work, base = _shallow_copy(live), _shallow_copy(live)
+    live.note_model_usage(
+        types.GenerateContentResponseUsageMetadata(prompt_token_count=50, candidates_token_count=5)
+    )
+    work.turn_usage = dataclasses.replace(work.turn_usage, carried_tokens=7)
+
+    _assign_changed(live, work, base)
+
+    assert live.turn_usage.carried_tokens == 7
+    assert (live.turn_usage.model_calls, live.turn_usage.input_tokens) == (2, 150)
+    assert live.turn_usage.output_tokens == 5

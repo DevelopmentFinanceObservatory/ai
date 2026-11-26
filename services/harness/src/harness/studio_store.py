@@ -299,12 +299,31 @@ def _assign_changed(
     the copy. A container counts as changed when it compares unequal, any
     other value when it is not the same object. A field `live` changed
     meanwhile and `work` did not keeps `live`'s value. A `TurnUsage`, which
-    `_shallow_copy` copies, counts as changed when it compares unequal too."""
+    `_shallow_copy` copies, counts as changed when it compares unequal too.
+    Its model usage totals add: `live` keeps the calls it noted since the
+    copy was taken on top of `work`'s, since a model call is noted on the
+    live state while a canvas write works on its copy."""
     for f in dataclasses.fields(ConversationState):
         value = getattr(work, f.name)
         before = getattr(base, f.name)
         if value != before if isinstance(value, (*_CONTAINERS, TurnUsage)) else value is not before:
+            if isinstance(value, TurnUsage):
+                value = _with_usage_noted_meanwhile(value, live.turn_usage, before)
             setattr(live, f.name, value)
+
+
+def _with_usage_noted_meanwhile(usage: TurnUsage, live: TurnUsage, base: TurnUsage) -> TurnUsage:
+    """`usage` with the model usage `live` counted past `base` added to its
+    totals, when all three are the same turn's."""
+    if not usage.trace_id or not (usage.trace_id == live.trace_id == base.trace_id):
+        return usage
+    return dataclasses.replace(
+        usage,
+        **{
+            name: getattr(usage, name) + max(getattr(live, name) - getattr(base, name), 0)
+            for name in _MODEL_USAGE_FIELDS
+        },
+    )
 
 
 def _shallow_copy(state: ConversationState) -> ConversationState:
@@ -805,17 +824,20 @@ _MODEL_USAGE_FIELDS = (
 )
 
 
-def _keep_held_model_usage(usage: TurnUsage, held: TurnUsage) -> None:
-    """Keep on `usage`, a turn's usage as a load read it, the model usage
-    `held`, the same turn's usage this process held, counted past it, as
-    calls noted after this process's last save do. Counts only grow, so the
-    side that counted more calls is the later view of the turn: this
-    process's unsaved calls, or another instance's segment since this
-    process last saved. All five figures come from that side, so they
-    describe the same calls."""
-    if held.model_calls > usage.model_calls:
-        for name in _MODEL_USAGE_FIELDS:
-            setattr(usage, name, getattr(held, name))
+def _unsaved_model_usage(held: TurnUsage, stored: Any) -> dict[str, int]:
+    """The model usage `held`, a turn's live usage, counted past `stored`, the
+    usage of the same turn this process last wrote or read (its baseline's
+    `turn_usage`): the calls noted since the last successful save. The
+    totals are additive, so a load adds this to what the row now holds and
+    no side is chosen over the other. `stored` holding no usage of the turn
+    means none of the turn's calls were saved."""
+    base = stored if isinstance(stored, dict) and stored.get("trace_id") == held.trace_id else {}
+    pending: dict[str, int] = {}
+    for name in _MODEL_USAGE_FIELDS:
+        saved = base.get(name)
+        saved = saved if isinstance(saved, int) and not isinstance(saved, bool) else 0
+        pending[name] = max(getattr(held, name) - saved, 0)
+    return pending
 
 
 def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
@@ -2202,6 +2224,12 @@ class StudioStore:
         entry.read_stamp = stamp
         entry.seq_reserved, entry.claimed_reserved = row.seq_reserved, None
         held = entry.state.turn_usage if entry.state is not None else None
+        # Calls the turn noted since this process's last successful save of it.
+        pending = (
+            _unsaved_model_usage(held, entry.baseline.get(_KEY_TURN_USAGE))
+            if held is not None
+            else {}
+        )
         if entry.state is None:
             durable.lock = entry.lock
             entry.state = durable
@@ -2221,11 +2249,10 @@ class StudioStore:
                 entry.state.note_spec_use("fetched", spec_id)
             for spec_id in held.drawn_specs:
                 entry.state.note_spec_use("drawn", spec_id)
-            # Model usage noted past the last save is this process's only
-            # while no other instance holds the segment; under another's, the
-            # stored figures are the later view.
-            if not elsewhere:
-                _keep_held_model_usage(entry.state.turn_usage, held)
+            # Model usage adds: what the row holds, plus the calls this
+            # process noted since its last save of the turn.
+            for name, count in pending.items():
+                setattr(entry.state.turn_usage, name, getattr(entry.state.turn_usage, name) + count)
         if segment is None or elsewhere:
             entry.held = None
         if entry.state.turn_index and not entry.state.turn_recorded:
