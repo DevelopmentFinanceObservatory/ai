@@ -83,7 +83,10 @@ class PlannerModel(Protocol):
     switch of a planner decision on the plan card opens: the option the user
     picked, which the drafted plan has to state. A refused pick entry's
     `refused` also carries `reason`, one sentence for the user, as `revise`'s
-    does.
+    does. `restart` is set on the entry that drafts the question again from
+    the start because the plan on record could not be read or rests on a
+    stale whole (`harness.graph.planning`). The planner drops whatever plan
+    it recorded for the question before drafting, `amendment` or no.
 
     `ctx` is the planner node's own `NodeCtx`: a planner that runs a model
     reads and writes the turn's state through it, appends its run's records
@@ -110,6 +113,7 @@ class PlannerModel(Protocol):
         conversation_digest: dict[str, Any] | None = None,
         pick: DecisionPick | None = None,
         answer: dict[str, Any] | None = None,
+        restart: bool = False,
     ) -> dict[str, Any]: ...
 
     async def revise(
