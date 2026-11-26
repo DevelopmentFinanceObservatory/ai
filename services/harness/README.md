@@ -263,5 +263,5 @@ Setting explicit environment variables for `DATA_MCP_URL`, `ANALYSIS_MCP_URL`, o
 
 `model_name` drives the orchestrator agent and the Edit Card's model call (`harness.generative.GeminiEdit`). The planner reads its own model from `AgentSettings` in `planner.settings`, which this service and the eval agents share.
 
-- `planner_model_name`: Model the planner runs, pinned to `gemini-4-hydrogen`. Override with `PLANNER_MODEL_NAME`; it must map to the same surface as `MODEL_NAME`. It pins a concrete version, which keeps an eval score attributable to one model.
-- `planner_thinking_level`: Reasoning effort of the planner, read case-insensitively (`LOW` by default). Override with `PLANNER_THINKING_LEVEL`. The Pydantic AI planner runs a Gemini model only, and the adapter refuses another at construction.
+- `planner_model_name`: Model the planner runs, pinned to `gemini-4-hydrogen`. Override with `PLANNER_MODEL_NAME`; it must map to the same surface as `MODEL_NAME`. It pins a concrete version, which keeps an eval score attributable to one model. The Pydantic AI planner runs a Gemini model only, and the adapter refuses another at construction.
+- `planner_thinking_level`: Reasoning effort of the planner, read case-insensitively (`LOW` by default). Override with `PLANNER_THINKING_LEVEL`.

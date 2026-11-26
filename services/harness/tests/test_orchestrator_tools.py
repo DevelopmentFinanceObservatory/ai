@@ -684,21 +684,23 @@ _YEARS_OUT = {"code": "year_unavailable", "text": "You asked for 1960 to 1970."}
             f"{orchestrator_tools.NEXT_STEP_YEAR_UNAVAILABLE}",
             False,
         ),
-        # A reason the user's words may repair keeps its `text` search beside it.
+        # A window outside the data's years offers no `text` search, whatever the
+        # reason: the user's words repeat the years.
         (
             "unsupported",
             "no_observations",
             [_YEARS_OUT],
             orchestrator_tools.NEXT_STEP_YEAR_UNAVAILABLE,
-            True,
+            False,
         ),
         (
             "no_data",
             "role_not_resolved",
             [_YEARS_OUT],
             orchestrator_tools.NEXT_STEP_YEAR_UNAVAILABLE,
-            True,
+            False,
         ),
+        ("no_data", None, [_YEARS_OUT], orchestrator_tools.NEXT_STEP_YEAR_UNAVAILABLE, False),
         ("no_data", None, [], None, True),
         ("definite", "qualifier_not_bound", [_YEARS_OUT], None, False),
     ],

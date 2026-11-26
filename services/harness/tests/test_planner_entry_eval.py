@@ -35,12 +35,14 @@ from compiler.surface import ToolSurfaceUnavailableError
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from google.genai import Client, errors, types
 from harness.graph import planning
+from harness.settings import ThinkingLevelName
 from harness.turn.store import AgentRecord
 from harness.turn_events import PLANNER_ASK
 from langfuse.api import DatasetItem, NotFoundError
 from mcp.types import TextContent
 from planner import session
 from planner.plan import EvidenceRequirement
+from planner.settings import agent_thinking_config
 from planner.skills import GET_SKILL
 from planner.tools import PENDING_ASK_STATE_KEY
 from planner.workflow import ToolId
@@ -1231,10 +1233,10 @@ async def test_a_resume_under_another_experiment_is_refused(tmp_path: Path) -> N
 
 
 def test_a_run_at_another_planner_thinking_level_is_another_experiment(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, hydrogen_studio: None
 ) -> None:
-    def digest(level: str) -> str:
-        monkeypatch.setenv("PLANNER_THINKING_LEVEL", level)
+    def digest(level: ThinkingLevelName) -> str:
+        monkeypatch.setattr(run, "AGENT_THINKING_CONFIG", agent_thinking_config(level))
         return run.experiment("baseline", model="m", revision="r", run_timeout=300.0)
 
     assert digest("LOW") != digest("HIGH")

@@ -1255,7 +1255,8 @@ _TEXT_SEARCH_RAN = "*"
 # answer carries this sentence as `retry_with_text`: every part Search found
 # no data for or could not support (`_RETRY_STATUSES`), except, on the
 # `hydrogen` surface, one whose reason the user's words cannot repair
-# (`_reason_step`), with the one delay `_repaired_first` states. A part Search
+# (`_reason_step`) or whose years the data lacks (`_years_unavailable`), with
+# the one delay `_repaired_first` states. A part Search
 # answered, definite or with candidates, offers no such search, whatever it
 # left out.
 RETRY_WITH_TEXT = (
@@ -1312,6 +1313,14 @@ def _reason_step(reading: Mapping[str, Any]) -> str | None:
     return _NEXT_STEPS.get(str(reading.get("reason"))) if _names_next_step(reading) else None
 
 
+def _years_unavailable(reading: Mapping[str, Any]) -> bool:
+    """Whether a part `reading` carries a `year_unavailable` departure."""
+    return any(
+        isinstance(departure, Mapping) and departure.get("code") == "year_unavailable"
+        for departure in reading.get("departures") or ()
+    )
+
+
 def _next_step(reading: Mapping[str, Any]) -> str | None:
     """The `next_step` of a part `reading` Search found no data for or could
     not support, for a cause the user's own words cannot repair; None for any
@@ -1321,10 +1330,7 @@ def _next_step(reading: Mapping[str, Any]) -> str | None:
     if not _names_next_step(reading):
         return None
     steps = [_reason_step(reading)]
-    if any(
-        isinstance(departure, Mapping) and departure.get("code") == "year_unavailable"
-        for departure in reading.get("departures") or ()
-    ):
+    if _years_unavailable(reading):
         steps.append(NEXT_STEP_YEAR_UNAVAILABLE)
     return " ".join(step for step in steps if step) or None
 
@@ -1404,6 +1410,8 @@ def _offer_text_retries(
     refused: list[str] = []
     for index, reading in enumerate(readings):
         if reading.get("status") not in _RETRY_STATUSES or _reason_step(reading):
+            continue
+        if _names_next_step(reading) and _years_unavailable(reading):
             continue
         reason = reading.get("reason")
         if reason in repaired_first:

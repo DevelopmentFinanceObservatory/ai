@@ -242,11 +242,18 @@ def _no_owed_work_left() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_studio_surface() -> Any:
+def _reset_studio_surface(monkeypatch: pytest.MonkeyPatch) -> Any:
     """`harness.surface` holds one surface per process, so a surface a test
     sets, directly or through `create_app` or an eval's studio, must not reach a
     later test. The next `studio_surface()` resolves it again from settings.
+
+    Every test also starts without `MODEL_NAME` and `PLANNER_MODEL_NAME`, so a
+    shell that sets them cannot change the surface a test that pins none gets.
+    Autouse fixtures run before the others, so `flash_studio`,
+    `hydrogen_studio` and a test's own `setenv` still win.
     """
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    monkeypatch.delenv("PLANNER_MODEL_NAME", raising=False)
     yield
     set_studio_surface(None)
 

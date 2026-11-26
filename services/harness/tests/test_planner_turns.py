@@ -163,8 +163,7 @@ async def test_a_planned_turns_config_is_sent_in_wire_order(
     the order, since the key sorts. The stored config is compared as the text it
     dumps to, which keeps its order. Only a model that takes an explicit cache
     sends a create, so the create is recorded on Flash."""
-    if cached:
-        request.getfixturevalue("flash_studio")
+    request.getfixturevalue("flash_studio" if cached else "hydrogen_studio")
     surface = FixtureSurface(schemas=[])
     specs = _proposals()(adapter_specs(surface=surface, translate=build_translate(surface=surface)))
     caches = _Caches()

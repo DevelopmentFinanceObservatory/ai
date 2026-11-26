@@ -12,9 +12,9 @@ recorded in `tests/fixtures/orchestrator_requests`
 
 With `variant="hydrogen"` (`harness.surface.Surface`), the parameter
 descriptions `harness.orchestrator_tools` states for it
-(`HYDROGEN_PARAM_DESCRIPTIONS`) replace the tool's own. With `descriptions="minimal"`, the tool's description and each
-parameter description come from `orchestrator.minimal_surface`, and the
-name, types, enums, required fields and structure stay as built. A text the
+(`HYDROGEN_PARAM_DESCRIPTIONS`) replace the tool's own. With `descriptions="minimal"`, the
+tool's description and each parameter description come from `orchestrator.minimal_surface`, and
+the name, types, enums, required fields and structure stay as built. A text the
 minimal surface lacks keeps the full one, logged once per process, unless
 `MINIMAL_FULL_PATHS` keeps it on purpose.
 """

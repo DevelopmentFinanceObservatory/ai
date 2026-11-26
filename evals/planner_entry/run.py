@@ -52,7 +52,7 @@ from harness.surface import (
 )
 from harness.wiring import build_stated_scope_reader
 from langfuse import Langfuse
-from planner.settings import AgentSettings
+from planner.settings import AGENT_THINKING_CONFIG, AgentSettings
 from summarise import latest, read_records, write_records, write_summary
 
 RESULTS_DIR = EVAL_DIR / ".results"
@@ -101,7 +101,7 @@ def experiment(arm: str, *, model: str, revision: str, run_timeout: float) -> st
         "model_first_chunk_s": settings.model_first_chunk_s,
         "prefix_cache": settings.studio_prefix_cache and studio_surface().explicit_cache,
         "planner_runner": PLANNER_RUNNER,
-        "planner_thinking_level": AgentSettings().planner_thinking_level,
+        "planner_thinking_level": AGENT_THINKING_CONFIG.thinking_level,
     }
     return hashlib.sha256(json.dumps(treatment, sort_keys=True).encode()).hexdigest()[:16]
 
