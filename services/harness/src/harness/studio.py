@@ -72,6 +72,7 @@ from planner.plan import (
     plan_revision,
     stored_plan,
 )
+from planner.stated_scope import LICENCE_STATE_KEY
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.types import Receive, Scope
@@ -720,6 +721,11 @@ def _turn_opening(
     ledger = conversation.prior_ledger_state()
     if ledger:
         state[ORCHESTRATOR_PRIOR_LEDGER_KEY] = ledger
+    # The conversation's licence to read partly reported and projected
+    # years, which the turn's read of the user's words updates and
+    # `keep_turn_records` keeps back.
+    if conversation.licence:
+        state[LICENCE_STATE_KEY] = dict(conversation.licence)
     if body.apply_choice is not None:
         # `graph.seed` applies the chip, and the turn neither searches nor plans.
         state[APPLY_CHOICE_STATE_KEY] = body.apply_choice.model_dump(mode="json")

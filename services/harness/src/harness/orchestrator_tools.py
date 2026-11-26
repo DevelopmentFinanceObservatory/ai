@@ -61,6 +61,7 @@ from analysis_mcp.frame_ref_resolution import read_derived_marker
 from analysis_mcp.identity import OP_SPEC_HASH_PREFIX
 from analysis_mcp.runner_client import read_graph_nodes
 from common.breakdown_labels import CellLabels, label_cells
+from common.held_note import held_lines
 from common.materialisation import FrameRef
 from common.materialisation import get_store as get_frame_store
 from common.place_type import (
@@ -85,6 +86,7 @@ from dfo_frame_grammar.rolling import RollingError
 from mcp import MCPError
 from mcp.types import REQUEST_TIMEOUT
 from orchestrator.call import HANDED_OFF, OrchestratorCall
+from planner.licence import Licence, closed_range, include_for, pin_block_held_back
 from planner.parties import (
     PartyRole,
     column_party_roles,
@@ -104,6 +106,12 @@ from planner.plan import (
     with_blocks,
 )
 from planner.skills import GET_SKILL
+from planner.stated_scope import (
+    StatedScopeReader,
+    read_stated_scope,
+    settle_stated_scope_read,
+    turn_licence,
+)
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 from submission.prices_choice import measure_key
 from translator.discovery import (
@@ -609,6 +617,94 @@ def _period_note_entry(held: Mapping[str, Any]) -> dict[str, str]:
     entry a `fetch` result carries; empty when `held` states none."""
     note = held.get("period_note")
     return {"period_note": note} if note else {}
+
+
+def _held_entry(surface: ToolSurface | None, data: Mapping[str, Any]) -> dict[str, list[str]]:
+    """The `held` lines of a `get_data` outcome as the entry a `fetch` result
+    carries: one data line per partial or projected run the manifests of its
+    frames state that their windows reach (`common.held_note.held_lines`), the
+    lines data-mcp's get_data digest shows, read from the manifests `surface`
+    recorded (`retrieval_manifest`). The line naming the `include` that serves
+    a run left out is not among them, since `fetch` sets `include` from the
+    user's words (`_licensed_window`). Empty when no run is reached or
+    `surface` records no manifests."""
+    manifest_of = getattr(surface, "retrieval_manifest", None)
+    if manifest_of is None:
+        return {}
+    manifests = [
+        manifest
+        for ref in data.get("frame_refs") or ()
+        if (manifest := manifest_of(frame_ref=ref)) is not None
+    ]
+    lines = held_lines(manifests)
+    return {"held": lines} if lines else {}
+
+
+# What a fetch result says of the held-back classes it left out of the window.
+_LEFT_OUT = {"partial": "partly reported", "projected": "projected"}
+
+
+async def _turn_licence(call: OrchestratorCall, reader: StatedScopeReader | None) -> Licence:
+    """The licence the turn holds (`planner.stated_scope.turn_licence`), once the
+    read Studio started as the turn opened (`harness.graph.seed.seed_node`) is
+    taken (`settle_stated_scope_read`) and the words read with `reader` where one
+    is configured. `read_stated_scope` answers a held reading or failure without
+    calling Search, except that it reads a first failure that can pass once more.
+    A read that raises, such as a reading outside the reader's contract, is logged
+    and licenses nothing for the fetch, which goes on without `include`."""
+    try:
+        await settle_stated_scope_read(call.state)
+        if reader is not None:
+            await read_stated_scope(call.state, reader)
+    except Exception:
+        logger.exception("fetch: the turn's words were not read; nothing is licensed")
+        return Licence()
+    return turn_licence(call.state)
+
+
+async def _licensed_window(
+    call: OrchestratorCall,
+    window: Mapping[str, Any],
+    block: Mapping[str, Any] | None,
+    reader: StatedScopeReader | None,
+) -> tuple[dict[str, Any], str | None]:
+    """`window` with the `include` the turn's licence grants, and the note the
+    fetch result carries, `None` for none.
+
+    `include` serves a source's partly reported or projected years
+    (`common.held_back`). Whatever the model or Search wrote, it is replaced by
+    the one a plan's retrieval of the same years would carry
+    (`planner.licence.include_for`, over the runs `block`, the spec block, states
+    and the licence `_turn_licence` reads). Only a range with both ends carries
+    one (`planner.licence.closed_range`). A chip's turn reads the licence
+    unchanged, and a typed turn whose words could not be read licenses none.
+    The note names the classes `window`'s own `include` asked for that the
+    licence does not grant and the read reaches a run of, or, where no block
+    states the runs, every such class.
+    """
+    asked = include if isinstance(include := window.get("include"), list) else []
+    narrowed = {key: value for key, value in window.items() if key != "include"}
+    years = closed_range(window)
+    if years is None:
+        note = (
+            "Fetched without `include`: only a range with a start and an end year "
+            "serves partly reported or projected years."
+        )
+        return narrowed, note if asked else None
+    start, end = years
+    licence = await _turn_licence(call, reader)
+    runs = None if block is None else pin_block_held_back(block)
+    if granted := include_for(start, end, licence=licence, runs=runs):
+        narrowed["include"] = list(granted)
+    held = {run.kind for run in runs or () if run.start_year <= end and start <= run.end_year}
+    left_out = [kind for kind in asked if kind not in granted and (runs is None or kind in held)]
+    if not left_out:
+        return narrowed, None
+    words = " or ".join(_LEFT_OUT.get(kind, str(kind)) for kind in left_out)
+    return narrowed, (
+        f"Fetched without the {words} years, which the user's words have not licensed, so "
+        "the figures end at the newest complete year."
+    )
 
 
 def _covering_selects(
@@ -2146,6 +2242,7 @@ def build_orchestrator_tools(
     canvas_series: Callable[[], list[str]] | None = None,
     canvas_cards: Callable[[], list[dict[str, Any]]] | None = None,
     remove_cards: Callable[..., Awaitable[CardRemoval]] | None = None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> list[Any]:
     """The orchestrator's tools, bound to this server's resolver, executor and tool surface.
 
@@ -2164,7 +2261,9 @@ def build_orchestrator_tools(
     `harness.studio_state.make_canvas_cards` returns; left unset, only the
     cards drawn this turn are known to be on the canvas. `remove_cards` is the callable
     `harness.studio_state.make_remove_cards` returns; left unset, the tool
-    says it is not available.
+    says it is not available. `stated_scope` reads the turn's words for the
+    licence a `fetch` window's `include` is computed from (`_licensed_window`);
+    left unset, a typed turn the planner read no words of licenses none.
     """
     # One lock per turn, held by a make_charts call from its budget
     # check to its count, so concurrent calls draw one after another and each
@@ -2280,7 +2379,8 @@ def build_orchestrator_tools(
         them, which answers a broader question), a part worth one more search with the user's words says so in `retry_with_text`, what
         it resolved to in words, its
         warnings, its `departures` from what was asked when search states
-        any, its `group_readings` when it reads a named group as the
+        any, its `held` lines on partly reported or projected years the
+        window reaches, its `group_readings` when it reads a named group as the
         group's published total, and the window it covers. A definite part
         whose count search chose among others states it as `counted_as`,
         with other counts under `alternatives` and the same count in other
@@ -2380,7 +2480,10 @@ def build_orchestrator_tools(
         Returns a one-line summary and the frames the data landed in, each
         with an id to chart and a view listing its dimensions and their
         values, and a `period_note` when a newer year holds data, the year
-        served is not the elected year, or a fuller earlier year is named; or
+        served is not the elected year, or a fuller earlier year is named, the
+        `held` lines of partly reported or projected years the data holds, and a
+        `window_note` when the window's `include` asked for years the user's
+        words do not, which were left out; or
         a refusal with its `code` and reason, and the platform's
         `retry_mode` and `fix` (its details and the values to change to) when
         it gave them. The code `capability_unavailable` means this deployment
@@ -2437,6 +2540,20 @@ def build_orchestrator_tools(
                 source = source_from_spec_block(block)
             except ValueError:
                 logger.warning("fetch: spec block for %s is not readable as a source", spec_id)
+        window = (
+            scope.window
+            if scope is not None and scope.window is not None
+            else (((block or {}).get("definition") or {}).get("identity") or {}).get(
+                "requested_window"
+            )
+        )
+        window_note: dict[str, str] = {}
+        if isinstance(window, Mapping):
+            licensed, note = await _licensed_window(call, window, block, stated_scope)
+            if licensed != window:
+                args["scope"] = {**args.get("scope", {}), "window": licensed}
+                shaped["scope"] = args["scope"]
+            window_note = {"window_note": note} if note else {}
         if reading:
             args["stat_vars"] = reading
         elif source is not None and is_family(source):
@@ -2454,8 +2571,10 @@ def build_orchestrator_tools(
                     "spec_id": spec_id,
                     "summary": earlier["summary"],
                     **_period_note_entry(earlier),
+                    **({"held": earlier["held"]} if earlier.get("held") else {}),
                     "frames": [{"frame": f, "view": frames[f]["view"]} for f in earlier["frames"]],
                     "same_data_as": earlier["spec_id"],
+                    **window_note,
                 }
             )
             _attach_fetch(call, found, served=earlier.get("served"), args=shaped)
@@ -2529,7 +2648,9 @@ def build_orchestrator_tools(
             "spec_id": spec_id,
             "summary": data.get("summary"),
             **_period_note_entry(data),
+            **_held_entry(surface, data),
             "frames": register_frames(call.state, described, fetch_args=args),
+            **window_note,
         }
         if unavailable:
             found["frames_unavailable"] = unavailable
@@ -2539,6 +2660,7 @@ def build_orchestrator_tools(
                 "spec_id": spec_id,
                 "summary": found["summary"],
                 **_period_note_entry(found),
+                **({"held": found["held"]} if found.get("held") else {}),
                 "frames": [entry["frame"] for entry in found["frames"]],
                 **({"served": data["served"]} if data.get("served") else {}),
             }

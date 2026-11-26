@@ -204,6 +204,10 @@ _PLANNING = (
     "when nothing can. Decide the methodology and leave the mechanics "
     "alone. Which data and which operations carry your decisions out is "
     "worked out separately, after you propose, so name no tool.\n\n"
+    "Years a Search result holds back, a source's partly reported year or "
+    "its projections, exist and are served when the user names them or "
+    "asks about the future, so they are no reason to decline, and the "
+    "closing line of a reply that draws a card states them.\n\n"
     "A `share_of` stating `denominator_scope='pooled'` divides by a total "
     "over entities nobody named, so cite a `Decision` whose `fixes` names "
     "`denominator_scope`.\n\n"
@@ -411,7 +415,11 @@ _HYDROGEN_PLANNING = (
     "threshold that reads them, newest at offset 0 and five years before at -5, "
     'inside the years the requirement and any decision it cites state. "Since '
     '2015" keeps 2015 fixed and rolls only the end. Named years ("from 2015 to '
-    '2020") stay fixed, with no `rolling` or `period_end_open`.\n\n'
+    '2020") stay fixed, with no `rolling` or `period_end_open`.\n'
+    "- Years a result holds back, a source's partly reported year or its "
+    "projections, exist and are served when the user names them or asks about the "
+    "future: they are no reason to decline, and the closing line of a reply that "
+    "draws a card states them.\n\n"
     "# Requirements\n\n"
     "State one dataset requirement per measure and source the answer needs, naming "
     "every entity it needs for that measure, and one derived requirement per "

@@ -47,6 +47,7 @@ from harness.wire import STUDIO_FRAME_ADAPTER
 from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import orchestrator_agent
 from orchestrator.model import orchestrator_model
+from planner.stated_scope import StatedScopeReader
 from pydantic_ai.models.google import GoogleModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -116,6 +117,7 @@ def orchestrator_app(
     run_ledger: Any = None,
     definition_surface: Any = None,
     early_mints: Any = None,
+    stated_scope: StatedScopeReader | None = None,
     heartbeat_seconds: float | None = None,
     provenance: ProvenanceStore | None = None,
 ) -> tuple[FastAPI, ScriptLlm]:
@@ -143,7 +145,8 @@ def orchestrator_app(
     fixture's); one of the two is required. A stream renews its lease every
     `heartbeat_seconds`, the server's interval by default. The turn store
     keeps the lineage `provenance` holds of each frame a turn names, none
-    by default.
+    by default. `stated_scope` reads the user's words for the turn's licence
+    and admission, none by default.
     """
     if store is None:
         if engine is None:
@@ -166,6 +169,7 @@ def orchestrator_app(
             surface=surface_recorder,
             definition_surface=definition_surface,
             recall_part=make_recall_part(store),
+            stated_scope=stated_scope,
         )
         return studio_graph(
             planner=planner_model,
@@ -180,6 +184,7 @@ def orchestrator_app(
             max_concurrent_steps=resolved_settings.executor_max_concurrent_steps,
             fetch_series_stats=scripted_fetch_series_stats,
             early_mints=early_mints,
+            stated_scope=stated_scope,
         )
 
     studio = StudioRunner(

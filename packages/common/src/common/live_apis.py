@@ -234,12 +234,16 @@ class StatedScopeReading:
     which a dataset reads as its own summing option (`provider:contributions` on DAC1).
     `mentions` are the provider options the text names, in order of first mention,
     both options of a text naming two, which therefore has no provider entry,
-    included."""
+    included. `named_years` are the calendar years the text names, ascending.
+    `projection` says the text asks about the future or about projections. A
+    reading from an apis that predates both fields has `()` and `False`."""
 
     entries: tuple[StatedScopeEntry, ...]
     total: bool
     sums_providers: bool
     mentions: tuple[str, ...]
+    named_years: tuple[int, ...] = ()
+    projection: bool = False
 
 
 @dataclass
@@ -399,11 +403,17 @@ def _stated_scope_reading(value: object) -> StatedScopeReading | None:
         return None
     entries, total, mentions = value.get("entries"), value.get("total"), value.get("mentions")
     sums_providers = value.get("sums_providers")
+    years, projection = value.get("named_years", []), value.get("projection", False)
     if (
         not isinstance(entries, list)
         or not isinstance(total, bool)
         or not isinstance(sums_providers, bool)
+        or not isinstance(projection, bool)
+        or not isinstance(years, list)
     ):
+        return None
+    named_years = [year for year in years if type(year) is int]
+    if len(named_years) != len(years):
         return None
     named = [_text(mention) for mention in mentions] if isinstance(mentions, list) else None
     if named is None or None in named:
@@ -422,6 +432,8 @@ def _stated_scope_reading(value: object) -> StatedScopeReading | None:
         total=total,
         sums_providers=sums_providers,
         mentions=tuple(m for m in named if m is not None),
+        named_years=tuple(named_years),
+        projection=projection,
     )
 
 

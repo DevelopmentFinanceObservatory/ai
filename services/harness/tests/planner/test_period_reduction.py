@@ -2755,6 +2755,7 @@ def test_the_one_year_each_refusal_offers_is_admitted(
     windowed, minted = _window_pins(
         _recorded(_model_plan(requirements, cited, asks=asks, answered=answered)),
         shown=pins,
+        copies={},
         definition_lookup=None,
         narrowed=(),
     )

@@ -96,6 +96,7 @@ _PROVENANCE = {
         "data_through": "2023",
         "last_refreshed": "2026-06-30",
         "partial_period": False,
+        "held": [],
     },
     "warnings": [],
     "generated_at": "2026-01-01T00:00:00Z",

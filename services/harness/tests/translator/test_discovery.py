@@ -61,6 +61,7 @@ from planner.plan import (
     keep_found_sources,
     pin_sources,
     plan_revision,
+    save_found_sources,
     save_pin_sources,
     save_pin_verdicts,
     save_windowed_pins,
@@ -1482,6 +1483,135 @@ async def test_a_copy_with_no_end_year_is_read_from_the_year_the_plan_retrieves_
     assert resolving.calls == [{"spec_id": spec_id, "identity": identity}]
     assert result["status"] == "definite"
     assert spec_id in load_log(context.state).sources["annual_debt_service"]
+
+
+@pytest.mark.parametrize("held_in", ["shown", "found"])
+async def test_a_copy_opting_into_a_partial_year_is_honoured_wherever_its_origins_block_is_held(
+    surface: McpSurface,
+    search_calls: list[dict[str, Any]],
+    draft: DraftFactory,
+    pinning_decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+    held_in: str,
+) -> None:
+    # The user named 2010 and 2023, so admission minted the copy over 2010 to
+    # 2023 with `include: ["partial"]` (`licensed_include`, from the words
+    # alone). The origin's block is the planner's shown one, or one a scope
+    # read found. Either way the copy is the requirement's source, with no
+    # `search` call.
+    answered = copy.deepcopy(_KENYA_OVER["2010-2023"])
+    spec_id, identity = windowed_identity(
+        answered["definition"]["identity"],
+        {"kind": "range", "start_year": 2010, "end_year": 2023, "include": ["partial"]},
+    )
+    answered["spec_id"] = answered["definition"]["spec_id"] = spec_id
+    answered["definition"]["identity"] = identity
+    context = context_holding(
+        draft(
+            decisions=[pinning_decision(spec_id)],
+            evidence_requirements=[
+                requirement(source_spec_id=spec_id, period=Period(start=2010, end=2023)),
+                derived_requirement(),
+            ],
+            named_years=(2010, 2023),
+        )
+    )
+    earlier = _KENYA_OVER["2015-2023"]["spec_id"]
+    origin = copy.deepcopy(_KENYA_OVER["2015-2023"])
+    origin["resolved"]["coverage"]["held_back"] = [
+        {"kind": "partial", "source": "dc/oecd_crs", "start_year": 2023, "end_year": 2023}
+    ]
+    if held_in == "shown":
+        _shown(context, earlier, origin)
+    else:
+        save_found_sources(context.state, {earlier: origin})
+    save_windowed_pins(
+        context.state, [WindowedPin(spec_id=spec_id, identity=identity, windowed_from=earlier)]
+    )
+    resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[answered])
+
+    result = await _discover(_SearchAndResolve(surface, resolving), context)
+
+    assert search_calls == []
+    assert resolving.calls == [{"spec_id": spec_id, "identity": identity}]
+    assert result["status"] == "definite"
+
+
+class _SearchAnswering(_SearchAndResolve):
+    """`_SearchAndResolve` whose `search` answers every part with `envelope`."""
+
+    def __init__(self, envelope: dict[str, Any], resolving: DataMcpDefinitions) -> None:
+        super().__init__(unreachable_surface(), resolving)
+        self._envelope = envelope
+        self.searched = 0
+
+    async def call_tool(
+        self,
+        *,
+        tool: ToolId,
+        arguments: Any,
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolCallResult:
+        if tool.name != "search":
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        self.searched += 1
+        return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: self._envelope})
+
+
+def _over(window: dict[str, Any], *held_back: dict[str, Any]) -> dict[str, Any]:
+    """Search's Kenya block re-windowed to `window`, its coverage stating `held_back`."""
+    block = copy.deepcopy(_KENYA_OVER["2015-2023"])
+    spec_id, identity = windowed_identity(block["definition"]["identity"], window)
+    block["spec_id"] = block["definition"]["spec_id"] = spec_id
+    block["definition"]["identity"] = identity
+    block["resolved"]["coverage"]["held_back"] = list(held_back)
+    return block
+
+
+async def test_an_unpinned_search_opting_into_a_year_the_user_did_not_name_is_cut(
+    draft: DraftFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+    context_holding: ContextHolding,
+) -> None:
+    """ "Aid to Kenya since 2015" names 2015 alone. The planner reads 2015 to
+    2025 with no pin, and Search reads that time phrase as opting into CRS's
+    partly reported 2025. Discovery resolves the source again over 2015 to 2025
+    with no `include`, so the retrieval leaves 2025 out."""
+    crs = {"kind": "partial", "source": "dc/oecd_crs", "start_year": 2025, "end_year": 2025}
+    years = {"kind": "range", "start_year": 2015, "end_year": 2025}
+    searched = _over({**years, "include": ["partial"]}, {**crs, "served": True})
+    licensed = _over(years, crs)
+    context = context_holding(
+        draft(
+            evidence_requirements=[
+                requirement(period=Period(start=2015, end=2025)),
+                derived_requirement(),
+            ],
+            named_years=(2015,),
+        )
+    )
+    resolving = DataMcpDefinitions(InMemoryDefinitionStore(), served=[licensed])
+    surface = _SearchAnswering(
+        {
+            "schema_version": 1,
+            "status": "definite",
+            "parts": [{"status": "definite", "spec": searched}],
+        },
+        resolving,
+    )
+
+    result = await _discover(surface, context)
+
+    assert surface.searched == 1
+    assert resolving.calls == [
+        {"spec_id": licensed["spec_id"], "identity": licensed["definition"]["identity"]}
+    ]
+    assert result["status"] == "definite"
+    assert [found["spec_id"] for found in result["sources"]] == [licensed["spec_id"]]
+    assert set(load_log(context.state).sources["annual_debt_service"]) == {licensed["spec_id"]}
 
 
 @pytest.mark.parametrize("axis_open", [True, False], ids=["axis-open", "axis-closed"])

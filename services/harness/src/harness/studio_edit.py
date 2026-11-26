@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncGenerator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -65,6 +65,7 @@ from harness.studio_state import (
     _next_manifest,
     _replace_block,
     _turn_component_entry,
+    card_runs,
     drawn_series_ids,
 )
 from harness.studio_store import StudioStore
@@ -75,6 +76,7 @@ from harness.studio_translate import (
     failure_detail,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal, resolver_digest
+from harness.turn_records import TURN_CARD_RUNS, held_back_line
 from harness.unit_offer import unit_words
 from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit
 from harness.wire import (
@@ -122,11 +124,15 @@ class EditClosed:
     """The edit ends on `text`, its reply, and `done`. A reply that is not
     `shown` is kept in the turn's record only, and the stream sends no
     `message.complete`. `user_display` is the line a state read shows as the
-    user's message, when the record's own line is written for a model."""
+    user's message, when the record's own line is written for a model.
+    `held_line` is the code's sentences on the partial and projected years
+    the card draws or left out (`harness.turn_records.held_back_line`),
+    shown after `text` and recorded under its own key."""
 
     text: str
     shown: bool = True
     user_display: str | None = None
+    held_line: str | None = None
 
 
 @dataclass(frozen=True)
@@ -292,6 +298,7 @@ def _closed_frames(conversation: ConversationState, closed: EditClosed) -> list[
             suggestions=True,
             say=closed.shown,
             user_display=closed.user_display,
+            held_line=closed.held_line,
         )
     ]
 
@@ -547,6 +554,8 @@ async def _edit_flow(
             caught_up = _is_no_op(component, current_revision)
             frames: list[EditEvent] = [revised]
             title = _block_title(component) if caught_up else patch.get("title")
+            lineage = recorder.card_lineage(component)
+            runs = card_runs(component, lineage)
 
             def revise(work: ConversationState) -> bool:
                 if token:
@@ -557,13 +566,20 @@ async def _edit_flow(
                     component=component,
                     revision=revised.revision,
                     title=title,
+                    runs=runs,
                 )
                 return _refresh_block(
                     work, component_id=component_id, revision=revised.revision, title=title
                 )
 
-            frames.append(CanvasChange(revise, lineage=recorder.card_lineage(component)))
-            frames.extend(_close(text or "Done -- the card was updated."))
+            frames.append(CanvasChange(revise, lineage=lineage))
+            held_line = _held_line(
+                conversation,
+                component_id=component_id,
+                runs=runs,
+                reframed=_reframes(stored, _merge_patch(stored, patch)),
+            )
+            frames.append(EditClosed(text or "Done -- the card was updated.", held_line=held_line))
         for frame in frames:
             yield frame
         return
@@ -604,6 +620,7 @@ async def _edit_flow(
         step_id="e2",
         step_label=step_label,
         closed=EditClosed(closing),
+        reframed=_reframes(stored, intent),
     )
 
 
@@ -620,6 +637,7 @@ def _swapped(
     also: Callable[[ConversationState], None] | None = None,
     retitle: Callable[[str], str] | None = None,
     gone: tuple[ActivityStep, EditClosed] | None = None,
+    reframed: bool = False,
 ) -> CardSwap:
     """The swap of `component`, a card written to take card
     `old_component_id`'s slot, ending the edit on `closed`: the step
@@ -636,7 +654,9 @@ def _swapped(
     hints. Given `gone`, the swap needs the old card's slot: a canvas that
     no longer holds it, read under the write's lock, takes only the new
     card's write token, so the conversation keeps the card it wrote off the
-    canvas, and the edit ends on `gone`."""
+    canvas, and the edit ends on `gone`. A `closed` that is shown carries the
+    held line (`_held_line`), `reframed` saying whether the new card draws
+    another window or frame than the old."""
     created = component_created(component, step_id=step_id)
     token = recorder.write_token(component)
     lineage = recorder.card_lineage(component)
@@ -647,6 +667,12 @@ def _swapped(
         )
         created.unit_change = card_unit_change(card, block)
     kept = card.as_json() if card is not None and created.unit_change is not None else None
+    runs = card_runs(component, lineage)
+    if closed.shown:
+        held_line = _held_line(
+            conversation, component_id=old_component_id, runs=runs, reframed=reframed
+        )
+        closed = replace(closed, held_line=held_line)
 
     def swap(work: ConversationState) -> SwapLanded:
         if token:
@@ -668,6 +694,7 @@ def _swapped(
                 title=_block_title(component),
                 action="recreated",
                 window=entry.get("time"),
+                runs=runs,
             )
         )
         if also is not None:
@@ -717,6 +744,44 @@ def _step(
 
 def _close(text: str) -> list[EditEvent]:
     return [EditClosed(text)]
+
+
+def _held_line(
+    conversation: ConversationState,
+    *,
+    component_id: str,
+    runs: Mapping[str, Any],
+    reframed: bool,
+) -> str | None:
+    """The sentences on the partial and projected years the edited card
+    draws or left out (`harness.turn_records.held_back_line` over its
+    `runs`, `harness.studio_state.card_runs`), as a turn drawing the card
+    closes. They are said only where the edit changed what the card reads:
+    its window or frame (`reframed`), or the runs it states, against the
+    latest turn entry of card `component_id`. A title-only edit reads no
+    data and says none."""
+    if not reframed and runs.get(TURN_CARD_RUNS) == _entry_runs(conversation, component_id):
+        return None
+    return held_back_line([runs], projection_asked=False)
+
+
+def _entry_runs(conversation: ConversationState, component_id: str) -> Any:
+    """The runs (`TURN_CARD_RUNS`) of the latest turn entry of card
+    `component_id`, the open turn's last; `None` when no entry states any."""
+    records = [record.get("cards") or [] for record in conversation.turns]
+    entries = [
+        card
+        for cards in [*records, conversation.turn_components]
+        for card in cards
+        if isinstance(card, Mapping) and card.get("component_id") == component_id
+    ]
+    return entries[-1].get(TURN_CARD_RUNS) if entries else None
+
+
+def _reframes(stored: Mapping[str, Any], intent: Mapping[str, Any]) -> bool:
+    """Whether `intent` draws another window or frame than the card's
+    `stored` intent."""
+    return any(intent.get(key) != stored.get(key) for key in ("window", "frame_ref"))
 
 
 def _refused(step_id: str, label: str, lead: str, result: dict[str, Any]) -> list[EditEvent]:
@@ -856,9 +921,12 @@ def _record_revision(
     component: dict[str, Any],
     revision: int,
     title: str | None,
+    runs: Mapping[str, Any] | None = None,
 ) -> None:
     """Bring a landed revise's digest entry up to `revision` and add its turn
-    record. `title` is the card's new title, None when the edit left it. The
+    record, with the card's partial and projected runs (`runs`,
+    `harness.studio_state.card_runs`). `title` is the card's new title, None
+    when the edit left it. The
     entry is a new dict, since the store runs this on a one-level copy of the
     live state (`StudioStore.change_canvas`)."""
     entry = dict(conversation.components.get(component_id) or _digest_entry(component))
@@ -875,6 +943,7 @@ def _record_revision(
             title=entry.get("title"),
             action="revised",
             window=entry.get("time"),
+            runs=runs,
         )
     )
 

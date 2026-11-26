@@ -109,6 +109,22 @@ Returns a `ToolResult` with the following items.
 - With `path`, text content with one page of the file, and no `resource_link` blocks. A page holds at most 32,000 characters from `offset` and ends at the last line break in its second half, or at 32,000 characters when there is none. A page that stops short of the end closes with a line naming the exact next call, with its `offset` and `digest="sha256:…"`. The digest sits in the text because the combined server strips structured content.
 - With `path`, structured content `{uri, path, size, digest, offset, next_offset}`, with `next_offset` null on the last page.
 
+### Skill read log line
+
+Each logical skill read writes one INFO line from the `data_mcp.skill_read_log` logger. The JSON fields are:
+
+- `event`: `skill.read`.
+- `skill_id` and `path`: the skill and file the Skills API served, `SKILL.md` for a load and `_manifest` for a manifest read. Both are set when the API served the file; `skill_id` alone is set on `skill_resource_not_found` and `upstream_version_changed`, where the skill exists but the caller received no file; both are null on every other refusal, since a refused id or path is caller text the API did not confirm.
+- `kind`: `load` for `get_skill` without a path, `skills/get` and `SKILL.md`; `manifest` for a `skill://{id}/_manifest` resource read; `file` for any other path, including `_manifest` passed to the tool.
+- `outcome`: `ok`, or the refusal code.
+- `surface`: `studio` when `common.mcp_telemetry.is_loopback_request()` holds, else `external`.
+- `caller`: `current_caller()`.
+- `turn`: `current_turn()` on loopback requests, null otherwise.
+- `client`: `current_mcp_client()`.
+- `via`: `tool` for `get_skill`, `resource` for a `skill://` read, `extension` for `skills/get`.
+
+A paged file read logs once, from its offset-0 call; the calls that read on log nothing.
+
 ### Skill refusals
 
 `get_skill` refuses with these codes.

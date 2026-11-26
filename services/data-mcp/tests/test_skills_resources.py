@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx2
 import pytest
@@ -237,3 +238,45 @@ async def test_an_unmounted_skills_api_is_confirmed_by_its_healthz_probe() -> No
     await _refused(handler, f"skill://{SKILL_ID}/SKILL.md")
 
     assert [request.url.path for request in requests][-1] == "/api/skills/healthz"
+
+
+@pytest.mark.parametrize(
+    ("uri", "kind", "path"),
+    [
+        (f"skill://{SKILL_ID}/SKILL.md", "load", "SKILL.md"),
+        (f"skill://{SKILL_ID}/_manifest", "manifest", "_manifest"),
+        (f"skill://{SKILL_ID}/references/core-oda.md", "file", "references/core-oda.md"),
+    ],
+    ids=["load", "manifest", "file"],
+)
+async def test_a_resource_read_logs_one_skill_read_line_by_kind(
+    read_lines: Callable[[], list[dict[str, Any]]], uri: str, kind: str, path: str
+) -> None:
+    await _read(serving_skill(), uri)
+
+    [line] = read_lines()
+    assert (line["event"], line["via"], line["kind"], line["path"], line["outcome"]) == (
+        "skill.read",
+        "resource",
+        kind,
+        path,
+        "ok",
+    )
+    assert line["skill_id"] == SKILL_ID
+
+
+@pytest.mark.parametrize(
+    ("uri", "outcome", "skill_id"),
+    [
+        ("skill://no-such-skill/SKILL.md", "skill_not_found", None),
+        (f"skill://{SKILL_ID}/references/guessed.md", "skill_resource_not_found", SKILL_ID),
+    ],
+    ids=["unknown_skill", "unknown_file"],
+)
+async def test_a_refused_resource_read_logs_only_the_ids_the_api_confirmed(
+    read_lines: Callable[[], list[dict[str, Any]]], uri: str, outcome: str, skill_id: str | None
+) -> None:
+    await _refused(serving_skill(), uri)
+
+    [line] = read_lines()
+    assert (line["outcome"], line["skill_id"], line["path"]) == (outcome, skill_id, None)

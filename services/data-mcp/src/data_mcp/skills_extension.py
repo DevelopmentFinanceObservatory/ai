@@ -21,6 +21,8 @@ failure, an unmounted Skills API or an index still building among them, with
 prose `skills_resources.refusal_prose` writes, the form the skill resources'
 errors and the registering server's own extension errors take.
 
+Each `skills/get` writes one `skill.read` line (`data_mcp.skill_read_log`).
+
 A mounted server's extensions do not reach the server that mounts it, so the
 server an outside client connects to registers this one. `guard` wraps each
 handler as that server needs.
@@ -36,6 +38,7 @@ from mcp.server.context import ServerRequestContext
 from mcp.shared.exceptions import MCPError
 from mcp_types import INTERNAL_ERROR, INVALID_PARAMS, RequestParams
 
+from data_mcp.skill_read_log import log_skill_read
 from data_mcp.skills_client import (
     SKILL_MAIN_FILE,
     Cacheable,
@@ -114,6 +117,13 @@ async def _skills_get(
 ) -> dict[str, Any]:
     parsed = parse_skill_uri(params.uri)
     if parsed is None or parsed[1] != SKILL_MAIN_FILE:
+        log_skill_read(
+            via="extension",
+            kind="load",
+            outcome=ToolErrorCode.REQUEST_INVALID,
+            skill_id=None,
+            path=None,
+        )
         raise MCPError(
             code=INVALID_PARAMS,
             message=(
@@ -125,7 +135,17 @@ async def _skills_get(
     try:
         skill = await fetch_skill(skill_id)
     except SkillReadRefused as refused:
+        log_skill_read(
+            via="extension",
+            kind="load",
+            outcome=refused.refusal.code,
+            skill_id=None,
+            path=None,
+        )
         _fail(refused, skill_id=skill_id)
+    log_skill_read(
+        via="extension", kind="load", outcome="ok", skill_id=skill.value.id, path=SKILL_MAIN_FILE
+    )
     return _complete(skill, skill=skill_entry(skill.value))
 
 

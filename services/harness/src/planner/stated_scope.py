@@ -4,16 +4,30 @@ Search's reader (`POST /api/search/stated-scope`, `common.live_apis.LiveApisClie
 reads a text's scope words with no model and no graph: the provider option it states, at
 most one, whether it asks for a total, and every provider option it names.
 `read_stated_scope` reads the turn's words (`harness.conversation.current_user_message`) once
-a turn and holds the reading in session state (`STATED_SCOPE_STATE_KEY`). The planner
+a turn and holds the reading in session state (`STATED_SCOPE_STATE_KEY`). Studio starts the
+read as the turn opens (`harness.graph.seed.seed_node`, `start_stated_scope_read`) and goes on
+without waiting; the first read of the turn awaits it and takes its outcome
+(`settle_stated_scope_read`), so every later read of the turn takes the held reading. The planner
 declares the provider option each dataset requirement counts
 (`planner.plan.DatasetRequirement.scope_options`), and admission compares the declarations
 with what is held (`stated_scope_record`, `submission.service._provider_records`), so a figure
 counted otherwise than the user's words name reads so on the plan card.
 
-A read that fails records nothing, so `propose_plan` admits a plan only on a reading it
-holds. Each read retries on its own (`_READ_ATTEMPTS`), so nothing carries from one read
-to the next. A read that still fails ends the entry: on `STATED_SCOPE_UNAVAILABLE`, which
-asks the user to try again shortly, where the failure can pass, and on
+The same reading names the calendar years the words name and whether they ask about
+the future. They set the user's licence to read partly reported and projected years
+(`planner.licence`), one record for the conversation (`LICENCE_STATE_KEY`, updated once
+per read of the turn's words) that the planner's plans, admission and the orchestrator's
+`fetch` all read (`turn_licence`). Studio keeps the record on the conversation between
+turns (`harness.studio_state.ConversationState.licence`).
+
+A read that fails holds no reading, so `propose_plan` admits a plan only on a reading it
+holds. The read retries on its own (`_READ_ATTEMPTS`), and one that still fails is
+recorded for the turn's words (`UNREAD_STATE_KEY`). A failure that can pass, such as a
+5xx or a timeout, is read again by the next read of the turn, once, so a planner entry
+opening after Search recovers is served. Every other outcome, and the second such
+failure, is answered from the record without calling Search again. A failed read ends
+the entry: on `STATED_SCOPE_UNAVAILABLE`, which asks the user to try again shortly,
+where the failure can pass, and on
 `STATED_SCOPE_UNREADABLE`, a fault in the system, where it cannot. An apis that serves
 no stated-scope route (`StatedScopeNotServedError`), one deployed before the route or
 rolled back past it, holds no reading of the turn's words, so admission compares
@@ -29,17 +43,22 @@ proposal does not post again.
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import logging
 import time
 from collections.abc import Callable, Sequence
-from typing import NamedTuple, Protocol
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, NamedTuple, Protocol
 
 from common.apis_auth import apis_auth_provider
 from common.live_apis import LiveApisClient, LiveApisError, StatedScopeReading
 from harness.conversation import current_user_message
 from harness.scope_choices import PROVIDER_AXIS
 
-from planner.plan import SessionState
+from planner.licence import Licence
+from planner.plan import MAX_NAMED_YEARS, SessionState
 from planner.records import StrictModel
 from planner.tool_results import Outcome, ProblemCode, problem
 
@@ -48,6 +67,12 @@ logger = logging.getLogger(__name__)
 # The session-state slot holding the turn's words and Search's reading of each
 # text read this turn (`StatedScopeRecord`).
 STATED_SCOPE_STATE_KEY = "planner:stated_scope"
+
+# The session-state slot holding the turn's words Search's reader did not read, with
+# the refusal a read of them answers this turn (`None` for a route not served) and
+# whether the next read calls Search again (`retry`, set after the first failure that
+# can pass), as `{"words", "refusal", "retry"}`.
+UNREAD_STATE_KEY = "planner:stated_scope_unread"
 
 # The session-state slot holding each pin Search refused to compile on the provider
 # option a requirement declares, with that option and Search's answer, as
@@ -58,9 +83,6 @@ UNCOMPILED_STATE_KEY = "planner:stated_scope_uncompiled"
 # calculation's axis together that Search refused for good this turn, as
 # `[spec_id, option_ids, code, reason, unanswered]` (`combined_refused`).
 COMBINED_REFUSED_STATE_KEY = "planner:stated_scope_combined_refusals"
-
-# The most texts Search's reader takes in one call (`StatedScopeRequest` in dfo-apis).
-_MAX_TEXTS = 64
 
 # The most characters of the turn's words one read sends. The route takes at most its
 # `max_query_chars` per text (2,000 by default), so this must not exceed it. Studio
@@ -85,16 +107,20 @@ class TextReading(StrictModel):
 
     `provider` is the provider option it states, at most one. `total` says it asks
     for a total, and `mentions` are the provider options it names, both options of
-    a text naming two, which states neither, included.
+    a text naming two, which states neither, included. `named_years` are the
+    calendar years it names, ascending, and `projection` says it asks about the
+    future or about projections.
     """
 
     provider: tuple[StatedOption, ...] = ()
     total: bool = False
     mentions: tuple[str, ...] = ()
+    named_years: tuple[int, ...] = ()
+    projection: bool = False
 
     @classmethod
     def of(cls, reading: StatedScopeReading) -> TextReading:
-        """The provider part of Search's `reading`."""
+        """The provider and year parts of Search's `reading`."""
         return cls(
             provider=tuple(
                 StatedOption(
@@ -107,6 +133,8 @@ class TextReading(StrictModel):
             ),
             total=reading.total,
             mentions=reading.mentions,
+            named_years=reading.named_years,
+            projection=reading.projection,
         )
 
     @property
@@ -243,6 +271,64 @@ def stated_scope_record(state: SessionState) -> StatedScopeRecord | None:
     return StatedScopeRecord.model_validate(raw) if raw else None
 
 
+# The session-state slot holding the user's licence to read partly reported and
+# projected years (`LicenceRecord`), kept for the conversation.
+LICENCE_STATE_KEY = "planner:licence"
+
+
+class LicenceRecord(StrictModel):
+    """The licence the conversation holds: the calendar years the user's words name,
+    ascending, and whether they ask about the future."""
+
+    named_years: tuple[int, ...] = ()
+    projection: bool = False
+
+    @property
+    def licence(self) -> Licence:
+        return Licence(named=self.named_years, projection=self.projection)
+
+
+def licence_record(state: SessionState) -> LicenceRecord:
+    """The licence `LICENCE_STATE_KEY` holds; an empty one where none is held."""
+    raw = state.get(LICENCE_STATE_KEY)
+    return LicenceRecord.model_validate(raw) if raw else LicenceRecord()
+
+
+def turn_licence(state: SessionState) -> Licence:
+    """The licence the current turn holds: the one the read of the turn's words
+    sets (`_licence_read`), or the conversation's record (`LICENCE_STATE_KEY`)
+    where they set none. It writes nothing. `read_stated_scope` updates the
+    record once per read, so every reader of the turn gets the same licence.
+
+    A turn with no words of the user's, as a chip's or a plan-card switch's, reads
+    the record. A typed turn whose words hold no reading, because no reader is
+    configured, the apis serves no stated-scope route, or the read failed, licenses
+    nothing, and the record stays for later turns.
+    """
+    words = _turn_words(current_user_message.get())
+    if words is None:
+        return licence_record(state).licence
+    record = stated_scope_record(state)
+    reading = record.readings.get(words) if record is not None else None
+    if reading is None:
+        return Licence()
+    read = _licence_read(reading)
+    return read.licence if read is not None else licence_record(state).licence
+
+
+def _licence_read(reading: TextReading) -> LicenceRecord | None:
+    """The licence `reading`, the turn's words as Search read them, sets, or
+    `None` where it sets none. A reading that names years or asks about the
+    future sets one; past `MAX_NAMED_YEARS` years, the newest are kept. One
+    naming neither carries the conversation's, as "and for Uganda?" does, so a
+    turn whose words read "just show 2015 to 2020" withdraws an earlier
+    projection ask."""
+    if not (reading.named_years or reading.projection):
+        return None
+    named = tuple(sorted(set(reading.named_years))[-MAX_NAMED_YEARS:])
+    return LicenceRecord(named_years=named, projection=reading.projection)
+
+
 def _turn_words(words: str | None) -> str | None:
     """The turn's words as the reader takes them: the last `_MAX_TEXT_CHARS`
     characters, where a long message and its amendments run past them, as Search
@@ -255,8 +341,9 @@ def _turn_words(words: str | None) -> str | None:
 async def read_stated_scope(
     state: SessionState, reader: StatedScopeReader
 ) -> dict[str, object] | None:
-    """Read the turn's words with `reader` once a turn, and hold the reading
-    (`STATED_SCOPE_STATE_KEY`).
+    """Read the turn's words with `reader`, hold the reading
+    (`STATED_SCOPE_STATE_KEY`) and update the conversation's licence from it
+    (`LICENCE_STATE_KEY`, `_licence_read`).
 
     A turn with no words of the user's holds nothing, so admission compares nothing. An
     apis that serves no stated-scope route (`StatedScopeNotServedError`) holds no
@@ -264,38 +351,177 @@ async def read_stated_scope(
     A read Search did not answer, after the reader's own retries, holds nothing new and
     returns the `STATED_SCOPE_UNAVAILABLE` refusal where the failure can pass
     (`LiveApisError.retryable`) and the `STATED_SCOPE_UNREADABLE` refusal where it
-    cannot. Both end the entry.
+    cannot. Both end the entry. Anything else the reader raises, such as a reading
+    outside its contract, propagates. A read that found no route or failed is recorded for
+    the words (`UNREAD_STATE_KEY`), so a later call this turn answers the same and
+    calls Search no more, except that the first failure that can pass is read again
+    by the next call, once.
+
+    A read the turn started as it opened (`start_stated_scope_read`) is awaited and its
+    outcome taken first (`settle_stated_scope_read`), so this call reads Search only where
+    that read left a first failure that can pass.
     """
+    await settle_stated_scope_read(state)
+    return await _read(state, reader)
+
+
+async def _read(state: SessionState, reader: StatedScopeReader) -> dict[str, object] | None:
+    """`read_stated_scope` with no pending read taken first."""
     words = _turn_words(current_user_message.get())
     if words is None:
         state[STATED_SCOPE_STATE_KEY] = None
         return None
     held = stated_scope_record(state)
-    readings = dict(held.readings) if held is not None else {}
-    wanted = [words] if words not in readings else []
-    try:
-        for start in range(0, len(wanted), _MAX_TEXTS):
-            texts = wanted[start : start + _MAX_TEXTS]
-            read = await reader(texts)
-            readings.update(zip(texts, read, strict=True))
-    except StatedScopeNotServedError:
-        state[STATED_SCOPE_STATE_KEY] = None
+    if held is not None and words in held.readings:
         return None
+    unread = state.get(UNREAD_STATE_KEY)
+    held_unread = unread if isinstance(unread, dict) and unread.get("words") == words else None
+    if held_unread is not None and not held_unread.get("retry"):
+        return held_unread.get("refusal")
+    try:
+        (reading,) = await reader([words])
     except LiveApisError as exc:
         logger.warning(
-            "stated scope not read: status=%s code=%s retryable=%s texts=%d",
+            "stated scope not read: status=%s code=%s retryable=%s",
             exc.status,
             exc.code,
             exc.retryable,
-            len(wanted),
         )
-        if exc.retryable:
-            return _stated_scope_unavailable(status=exc.status, code=exc.code)
-        return _stated_scope_unreadable(status=exc.status, code=exc.code)
+        refusal = (
+            _stated_scope_unavailable(status=exc.status, code=exc.code)
+            if exc.retryable
+            else _stated_scope_unreadable(status=exc.status, code=exc.code)
+        )
+        state[UNREAD_STATE_KEY] = {
+            "words": words,
+            "refusal": refusal,
+            "retry": exc.retryable and held_unread is None,
+        }
+        return refusal
+    except StatedScopeNotServedError:
+        # A route not served holds no reading and no retry changes it, so the
+        # words license nothing and every later read of the turn answers the
+        # same without calling Search.
+        state[STATED_SCOPE_STATE_KEY] = None
+        state[UNREAD_STATE_KEY] = {"words": words, "refusal": None, "retry": False}
+        return None
+    readings = {**(held.readings if held is not None else {}), words: reading}
     state[STATED_SCOPE_STATE_KEY] = StatedScopeRecord(words=words, readings=readings).model_dump(
         mode="json"
     )
+    if (read := _licence_read(reading)) is not None:
+        state[LICENCE_STATE_KEY] = read.model_dump(mode="json")
     return None
+
+
+# The session-state slots a read of the turn's words writes (`_read`).
+_READ_KEYS = (STATED_SCOPE_STATE_KEY, UNREAD_STATE_KEY, LICENCE_STATE_KEY)
+
+
+@dataclass(frozen=True)
+class _PendingRead:
+    """A read of `words` running as `task`, which returns the slots it wrote
+    (`_READ_KEYS`)."""
+
+    words: str
+    task: asyncio.Task[dict[str, Any]]
+
+
+# The read the turn started as it opened (`start_stated_scope_read`), for the
+# turn's task and every task it starts.
+_pending_read: ContextVar[_PendingRead | None] = ContextVar(
+    "planner_stated_scope_pending_read", default=None
+)
+
+
+def start_stated_scope_read(state: SessionState, reader: StatedScopeReader) -> None:
+    """Start the read of the turn's words with `reader` as a task, and return at once.
+
+    The read runs on a copy of `state`'s read slots (`_READ_KEYS`). The first use of
+    the turn's licence or reading awaits it and takes its outcome
+    (`settle_stated_scope_read`, which `read_stated_scope` calls), so a turn that never
+    needs either never waits on Search. A read that raises past `read_stated_scope`'s
+    own handling is logged and records nothing, so the words license nothing. The task
+    is cancelled when the task that started it ends, so a turn that ends, pauses or is
+    cut leaves none running. A turn with no words of the user's records that at once,
+    as `read_stated_scope` does, and starts nothing.
+    """
+    words = _turn_words(current_user_message.get())
+    if words is None:
+        state[STATED_SCOPE_STATE_KEY] = None
+        return
+    absent = object()
+    scratch = {
+        key: copy.deepcopy(value)
+        for key in _READ_KEYS
+        if (value := state.get(key, absent)) is not absent
+    }
+
+    async def run() -> dict[str, Any]:
+        try:
+            await _read(scratch, reader)
+        except Exception:
+            logger.exception("stated scope not read as the turn opened")
+            return {}
+        return scratch
+
+    previous = _pending_read.get()
+    if previous is not None:
+        previous.task.cancel()
+    task = asyncio.create_task(run(), name="stated scope read")
+    owner = asyncio.current_task()
+    if owner is not None:
+        owner.add_done_callback(lambda _: task.cancel())
+    _pending_read.set(_PendingRead(words=words, task=task))
+
+
+async def settle_stated_scope_read(state: SessionState) -> None:
+    """Await the read the turn started (`start_stated_scope_read`) and write what it
+    recorded into `state`, where `state` holds no outcome for the turn's words yet.
+    Nothing where no read of these words is pending, or it was cancelled. A caller
+    cancelled while it waits leaves the read running for the next."""
+    pending = _owed_read(state)
+    if pending is None:
+        return
+    await asyncio.shield(pending.task)
+    _take(state, pending)
+
+
+def take_finished_stated_scope_read(state: SessionState) -> None:
+    """Write what the read the turn started recorded into `state`, as
+    `settle_stated_scope_read` does, where that read has finished; nothing,
+    and no wait, where it runs still."""
+    pending = _owed_read(state)
+    if pending is not None and pending.task.done():
+        _take(state, pending)
+
+
+def _owed_read(state: SessionState) -> _PendingRead | None:
+    """The pending read of the turn's words whose outcome `state` lacks; `None`
+    where none is pending, it was cancelled, or `state` holds an outcome."""
+    pending = _pending_read.get()
+    words = _turn_words(current_user_message.get())
+    if pending is None or pending.words != words or pending.task.cancelled():
+        return None
+    return None if _holds_outcome(state, pending.words) else pending
+
+
+def _take(state: SessionState, pending: _PendingRead) -> None:
+    """Write the slots `pending`, a finished read, wrote into `state`, unless
+    `state` came to hold an outcome while it was awaited."""
+    if _holds_outcome(state, pending.words):
+        return
+    for key, value in pending.task.result().items():
+        state[key] = copy.deepcopy(value)
+
+
+def _holds_outcome(state: SessionState, words: str) -> bool:
+    """Whether `state` holds a reading of `words` or a failed read of them."""
+    record = stated_scope_record(state)
+    if record is not None and words in record.readings:
+        return True
+    unread = state.get(UNREAD_STATE_KEY)
+    return isinstance(unread, dict) and unread.get("words") == words
 
 
 def _stated_scope_unreadable(*, status: int | None, code: str | None) -> dict[str, object]:
