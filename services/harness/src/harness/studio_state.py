@@ -94,6 +94,7 @@ from harness.wire import (
 if TYPE_CHECKING:
     from harness.provenance import CardLineage
     from harness.studio_store import StudioStore
+    from harness.turn.node import TurnKey
 
 logger = logging.getLogger(__name__)
 
@@ -729,7 +730,9 @@ class ConversationState:
     # "model"}`, where `turn` is the turn's number and the rest is the turn's
     # `harness.graph.orchestrate.carried_record`. `close_turn` sets it from
     # `turn_carried`, or to None when the turn closed with no conversation to
-    # carry or on an error, which breaks the chain (`carried_opening`).
+    # carry or on an error, which breaks the chain (`carried_opening`). It is
+    # the one stored copy: the next turn's inputs name it by reference
+    # (`harness.graph.state.CarriedRef`).
     carried_history: dict[str, Any] | None = None
     # The history arm stored with the conversation, `{"arm", "turn"}`: the arm
     # `STUDIO_HISTORY=split` assigned it (`history_arm`) and the number of the
@@ -779,11 +782,11 @@ class ConversationState:
     # the frame.
     turn_approved: list[dict[str, Any]] = field(default_factory=list)
     # The turn's orchestrator conversation once its run closed on the reply
-    # (`harness.graph.state.ORCHESTRATOR_CARRIED_KEY`), as the turn's cursor
-    # state holds it: `harness.studio_store.keep_turn_records` sets it from
-    # that state, None when the state holds none, and `close_turn` takes it.
-    # Not durable: every close path keeps the cursor's records first, so a
-    # turn carries only what its own cursor holds.
+    # (`harness.graph.orchestrate.carried_record`), set by the Studio
+    # translator from the `answered` edge's output once the write that closed
+    # the turn committed, and taken by `close_turn`. Not durable, and no
+    # cursor holds it: each segment starts with none, so a turn carries only
+    # what its own orchestrator closed on in this process.
     turn_carried: dict[str, Any] | None = None
     turn_recorded: bool = False
     # Who asked the current turn and the specs it used; set by `begin_turn`.
@@ -1651,6 +1654,20 @@ def make_recall_part(store: StudioStore) -> Any:
         return conversation.recall_part(part=part, turn=turn, component_id=component_id, runs=runs)
 
     return recall_part
+
+
+def make_carried_history(store: StudioStore) -> Any:
+    """The callable the `orchestrate` node reads a `full` turn's carried
+    conversation through (`harness.graph.orchestrate.CarriedSource`): the
+    stored `ConversationState.carried_history` of the conversation the turn's
+    key names, as this instance holds it, with no database access. None
+    when this instance holds no state for it."""
+
+    def carried_history(key: TurnKey) -> dict[str, Any] | None:
+        conversation = store.current(key.principal, key.conversation_id)
+        return conversation.carried_history if conversation is not None else None
+
+    return carried_history
 
 
 def make_canvas_series(store: StudioStore) -> Any:

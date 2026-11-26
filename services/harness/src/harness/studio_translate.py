@@ -1868,6 +1868,11 @@ class _Translator:
             case ToolsAnswered(answers=answers, state=state):
                 keep_turn_records(self._conversation, state)
                 return await self._agent_answers(self._answered(answers), records)
+            case NodeDone(node="orchestrate", label="answered", output=dict() as carried):
+                # A `full` turn's conversation as its run closed on the reply
+                # (`harness.graph.orchestrate.carried_record`), handed on once
+                # the write that closed the turn committed.
+                self._conversation.turn_carried = carried
             case NodeDone(node="orchestrate", label=label) if label in HAND_OFF_EDGES.values():
                 # A hand-off no `ToolsAnswered` drew: the response made the
                 # hand-off call alone.

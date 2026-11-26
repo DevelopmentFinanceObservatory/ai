@@ -39,7 +39,7 @@ from harness.scripted import (
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.settings import HistorySettings, Settings
 from harness.studio import StudioRunner, create_studio_router
-from harness.studio_state import make_recall_part
+from harness.studio_state import make_carried_history, make_recall_part
 from harness.studio_store import StudioStore
 from harness.turn.store import FrameLineage, TurnStore
 from harness.turn_budget import TurnBudget, current_turn_budget
@@ -178,6 +178,7 @@ def orchestrator_app(
             planner=planner_model,
             orchestrator=orchestrator_agent(tools, include_content=content_on_spans()),
             model=lambda: model.model(budget=current_turn_budget.get()),
+            carried=make_carried_history(store),
             tools=tools,
             executor=recorder,
             tool_surface=surface_recorder,

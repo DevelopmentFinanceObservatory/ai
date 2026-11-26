@@ -28,7 +28,7 @@ from harness.graph.state import ORCHESTRATOR_SPECS_KEY
 from harness.graph.workflow import EDGES, START
 from harness.turn.events import NodeDone, TurnEvent
 from harness.turn.loop import END, Graph
-from harness.turn.node import Next, Node, NodeCtx
+from harness.turn.node import Next, Node, NodeCtx, TurnKey
 from orchestrator.agent import Orchestrator
 
 from .data_mcp_definitions import DataMcpDefinitions
@@ -57,6 +57,11 @@ def given(
     return Node(run=run)
 
 
+def no_carried(_key: TurnKey) -> None:
+    """A conversation store that holds no carried conversation, for graphs
+    whose turns open on the digest."""
+
+
 def opening_nodes(
     orchestrator: Orchestrator,
     models: ScriptedModels,
@@ -80,7 +85,9 @@ def opening_nodes(
             resume=resume,
             fetch=fetch,
         ),
-        "orchestrate": orchestrate_node(orchestrator=orchestrator, model=models.orchestrator_model),
+        "orchestrate": orchestrate_node(
+            orchestrator=orchestrator, model=models.orchestrator_model, carried=no_carried
+        ),
         "ask": ask_node(definition_surface=surface),
     }
 

@@ -127,8 +127,7 @@ from harness.graph.state import (
     ASK_FOR_QUESTION_KEY,
     NEW_QUESTION_KEY,
     ORCHESTRATOR_APPLIED_KEY,
-    ORCHESTRATOR_CARRIED_KEY,
-    ORCHESTRATOR_HISTORY_KEY,
+    ORCHESTRATOR_CHAIN_RESET_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
@@ -248,9 +247,9 @@ _APPROVAL_ITEM_PREFIX = "approval:"
 
 # Identity, the process-local runtime objects, and the turn's spec blocks
 # (`turn_specs`, held by the open turn's `turn_specs` rows,
-# `harness.turn.store.TurnStore.specs`), and the open turn's carried
-# conversation (`turn_carried`, held by its cursor's state), which
-# `_serialize_durable` and `_apply_delta` skip.
+# `harness.turn.store.TurnStore.specs`), and the conversation the open turn's
+# orchestrator closed on (`turn_carried`), which `_serialize_durable` and
+# `_apply_delta` skip.
 _PROCESS_LOCAL_FIELDS = frozenset(
     {
         "conversation_id",
@@ -1743,14 +1742,13 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
     """Keep the plan records, search readings, spec blocks and applied chip
     `state`, a turn's state, holds, for `ConversationState.close_turn` to
     store with the turn, whether the read of the turn's own words asked about
-    projections (`ConversationState.turn_projection_asked`), and the
+    projections (`ConversationState.turn_projection_asked`), the
     conversation's licence that read left (`ConversationState.licence`), and
-    on the `full` history arm the orchestrator's conversation as the turn's
-    reply left it (`ConversationState.turn_carried`). Each key holds the
-    whole value, so the latest write replaces. The carried conversation is
-    set whether or not `state` holds one, so a turn resumed on an instance
-    that carried an earlier turn closes on its own cursor's, or none. The
-    blocks stay in process (`turn_specs`) until the turn closes."""
+    on the `full` history arm a reset of the chain its orchestrator met as
+    it opened (`ORCHESTRATOR_CHAIN_RESET_KEY`) as the turn's
+    `history_chain`. Each key holds the whole value, so the latest write
+    replaces. The blocks stay in process (`turn_specs`) until the turn
+    closes."""
     if LICENCE_STATE_KEY in state:
         conversation.licence = dict(state[LICENCE_STATE_KEY] or {}) or None
     if ORCHESTRATOR_PLAN_RECORDS_KEY in state:
@@ -1766,84 +1764,9 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
         conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY] or {})
     if ORCHESTRATOR_APPLIED_KEY in state:
         conversation.turn_applied_choice = dict(state[ORCHESTRATOR_APPLIED_KEY] or {})
-    carried = state.get(ORCHESTRATOR_CARRIED_KEY)
-    conversation.turn_carried = dict(carried) if carried else None
-
-
-# The keys `drop_carried_copies_on` strips from the conversation's closed
-# cursors: the conversation a `full` turn's orchestrator opened from
-# (`TurnInput.carried_history`, in `inputs`), and in `state` the one it
-# stored (`ORCHESTRATOR_CARRIED_KEY`) and the run history a paused turn
-# held (`ORCHESTRATOR_HISTORY_KEY`), which an abandoned turn leaves behind.
-_CARRIED_INPUT_KEYS = ("carried_history",)
-_CARRIED_STATE_KEYS = (ORCHESTRATOR_CARRIED_KEY, ORCHESTRATOR_HISTORY_KEY)
-
-# The closed cursors whose columns mention a stripped key. A text match
-# cannot fail on a value jsonb refuses, as a string holding `\u0000`.
-_CARRIED_COPY_ROWS = text(
-    "SELECT id, CAST(inputs AS text) AS inputs, CAST(state AS text) AS state "
-    "FROM turn_cursors "
-    "WHERE conversation = :conversation AND turn_index < :turn_index "
-    "AND status NOT IN ('running', 'paused') "
-    "AND (CAST(inputs AS text) LIKE ANY(:input_patterns) "
-    "OR CAST(state AS text) LIKE ANY(:state_patterns))"
-)
-_WRITE_STRIPPED = text(
-    "UPDATE turn_cursors SET inputs = CAST(:inputs AS json), "
-    "state = CAST(:state AS json) WHERE id = :id"
-)
-
-
-def _stripped(raw: str, keys: tuple[str, ...]) -> str | None:
-    """`raw`, a JSON object's text, without `keys`, or None when it holds
-    none of them. Raises ValueError when it does not parse."""
-    document = json.loads(raw)
-    if not isinstance(document, dict) or not any(key in document for key in keys):
-        return None
-    for key in keys:
-        document.pop(key, None)
-    return json.dumps(document)
-
-
-async def drop_carried_copies_on(
-    conn: AsyncConnection, conversation: int, *, turn_index: int
-) -> None:
-    """Drop the carried conversations the closed cursors of the
-    `conversations` row `conversation` before turn `turn_index` hold, on
-    `conn` in the caller's transaction. A `full` turn's cursor keeps the
-    conversation it opened from and the one it closed on, each up to the
-    carried chain's cap, and closed cursors are kept. Once a later turn
-    begins, the conversation's record holds the latest chain
-    (`ConversationState.carried_history`), the one durable copy, and no
-    reader goes back to an earlier cursor's: a turn left open is recorded
-    from its cursor before the next one begins. A cursor that does not
-    parse is logged and left as it is."""
-    rows = await conn.execute(
-        _CARRIED_COPY_ROWS,
-        {
-            "conversation": conversation,
-            "turn_index": turn_index,
-            "input_patterns": [f'%"{key}"%' for key in _CARRIED_INPUT_KEYS],
-            "state_patterns": [f'%"{key}"%' for key in _CARRIED_STATE_KEYS],
-        },
-    )
-    for cursor_id, inputs, state in rows.all():
-        try:
-            new_inputs = _stripped(inputs, _CARRIED_INPUT_KEYS)
-            new_state = _stripped(state, _CARRIED_STATE_KEYS)
-        except ValueError:
-            logger.warning("studio history: cursor %s does not parse, kept as is", cursor_id)
-            continue
-        if new_inputs is None and new_state is None:
-            continue
-        await conn.execute(
-            _WRITE_STRIPPED,
-            {
-                "id": cursor_id,
-                "inputs": new_inputs if new_inputs is not None else inputs,
-                "state": new_state if new_state is not None else state,
-            },
-        )
+    if reset := state.get(ORCHESTRATOR_CHAIN_RESET_KEY):
+        conversation.turn_usage.history_chain = f"reset:{reset}"
+        conversation.turn_usage.carried_tokens = None
 
 
 def set_aside_question(cursor: Cursor) -> str | None:

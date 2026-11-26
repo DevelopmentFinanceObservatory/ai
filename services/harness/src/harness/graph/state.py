@@ -43,7 +43,7 @@ from harness.tool_contracts import (
     reading_facts,
 )
 from harness.turn.events import APPROVE_UNIT_OFFERS_KEY
-from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
+from harness.turn.store import SPECS_KEY, WAITING_HISTORY_KEY, FrameKey, FrameKeys
 from harness.turn_records import Origin, PricesForm, SearchReading, open_prices, prices_form
 from harness.unit_offer import offered_unit_refusal, unit_offer
 from harness.wire import UnitChoice, UnitOffer
@@ -118,17 +118,13 @@ ORCHESTRATOR_UNIT_REREAD_KEY = "orchestrator:unit_reread"
 ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
 # The orchestrator's conversation while its run waits on a hand-back, as
 # `orchestrator.run.StoredHistory` JSON, written and taken by the
-# `orchestrate` node.
-ORCHESTRATOR_HISTORY_KEY = "orchestrator:history"
-# On a turn of the `full` history arm (`TurnInput.history`), the
-# orchestrator's conversation once its run closed on the turn's reply,
-# `{"history", "tokens", "model"}`: the `orchestrator.run.StoredHistory` JSON
-# as text, so a JSONB column cannot reorder its keys, the tokens its largest
-# call reported, and the model that wrote it
-# (`harness.graph.orchestrate.carried_record`). Written by the `orchestrate`
-# node and kept with the conversation for the next turn's opening
-# (`harness.studio_store.keep_turn_records`).
-ORCHESTRATOR_CARRIED_KEY = "orchestrator:carried"
+# `orchestrate` node. The write that closes the turn drops it.
+ORCHESTRATOR_HISTORY_KEY = WAITING_HISTORY_KEY
+# On a `full` turn whose orchestrator could not open on the conversation
+# its inputs name (`TurnInput.carried_from`), the reason, `unloadable`, it
+# opened from the whole digest instead; `harness.studio_store.keep_turn_records`
+# records it as the turn's `history_chain`.
+ORCHESTRATOR_CHAIN_RESET_KEY = "orchestrator:chain_reset"
 # spec_id -> the refusal message of a fetch or a plan step that read it and
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.
@@ -202,6 +198,30 @@ ORCHESTRATOR_PLAN_FAILED_STATUS = "Reading why no plan was made"
 ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 
 
+class CarriedRef(BaseModel):
+    """The previous turn's conversation a `full` turn opens on, as the
+    conversation stores it (`harness.studio_state.ConversationState.
+    carried_history`): the number of turns recorded when it was stored, and
+    the sha256 of its `StoredHistory` JSON text, in hex."""
+
+    turn: int
+    sha256: str
+
+    @classmethod
+    def of(cls, *, turn: int, history: str) -> CarriedRef:
+        """The reference to `history`, stored as turn `turn` closed."""
+        return cls(turn=turn, sha256=hashlib.sha256(history.encode()).hexdigest())
+
+    def history_in(self, carried: Mapping[str, Any] | None) -> str | None:
+        """The `StoredHistory` JSON text of `carried`, a stored carried
+        conversation, when it is the one this names: the same turn and the
+        same text. None otherwise."""
+        history = carried.get("history") if carried is not None else None
+        if carried is None or carried.get("turn") != self.turn or not isinstance(history, str):
+            return None
+        return history if CarriedRef.of(turn=self.turn, history=history) == self else None
+
+
 class TurnInput(BaseModel):
     """What a turn opens with, fixed for the turn: the user's `message`, the
     canvas and conversation digests, as the JSON text the conversation wrote
@@ -213,21 +233,23 @@ class TurnInput(BaseModel):
 
     `history` is the turn's history arm (`harness.studio_state.TurnUsage.history`),
     fixed as the turn began, so a turn resumed on another process, or after
-    `STUDIO_HISTORY` changed, keeps it. A `full` turn's orchestrator stores its
-    conversation once its run closes on the reply (`ORCHESTRATOR_CARRIED_KEY`).
-    A `full` turn that extends the previous turn's conversation holds it as
-    `carried_history` (`orchestrator.run.StoredHistory` JSON text) and the
-    conversation digest's tail without its `turns` as `conversation_tail`,
-    which the orchestrator reads in place of `conversation_digest`; the
-    planner still reads the digest. `history` is absent from the dumped inputs
-    when `digest`, and the other two when unset."""
+    `STUDIO_HISTORY` changed, keeps it. A `full` turn's orchestrator hands on
+    its conversation once its run closes on the reply
+    (`harness.graph.orchestrate.carried_record`). A `full` turn that extends
+    the previous turn's conversation names it as `carried_from`, the
+    conversation's one stored copy (`harness.studio_state.ConversationState.
+    carried_history`) by reference, and holds the conversation digest's tail
+    without its `turns` as `conversation_tail`, which the orchestrator reads
+    in place of `conversation_digest`; the planner still reads the digest.
+    `history` is absent from the dumped inputs when `digest`, and the other
+    two when unset."""
 
     message: str
     canvas_digest: str | None = None
     conversation_digest: str | None = None
     seeds: list[Any] | dict[str, Any] | None = None
     history: StudioHistory = Field(default="digest", exclude_if=lambda value: value == "digest")
-    carried_history: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    carried_from: CarriedRef | None = Field(default=None, exclude_if=lambda value: value is None)
     conversation_tail: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 

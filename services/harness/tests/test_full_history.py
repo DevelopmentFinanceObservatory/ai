@@ -28,6 +28,7 @@ import pytest
 from common.logging import JSON_FIELDS
 from harness.conversation import current_history
 from harness.graph.orchestrate import carried_record
+from harness.graph.state import CarriedRef
 from harness.settings import HistorySettings
 from harness.studio_state import (
     CARRIED_HISTORY_TOKEN_CAP,
@@ -35,7 +36,6 @@ from harness.studio_state import (
     TurnUsage,
     history_arm,
 )
-from harness.studio_store import StudioStore, drop_carried_copies_on
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from orchestrator.run import StoredHistory
 from pydantic import ValidationError
@@ -162,18 +162,28 @@ def _history_fields(line: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-async def _cursor_copies(engine: AsyncEngine) -> list[tuple[int, bool, bool]]:
-    """Each cursor's turn, whether its inputs hold the conversation it opened
-    from, and whether its state holds the one it closed on."""
+# A carried conversation's copies a cursor could hold: the text in its inputs,
+# and in its state the conversation it closed on or the one a pause waits with.
+_COPY_KEYS = ("carried_history", "orchestrator:carried", "orchestrator:history")
+
+
+async def _cursors(engine: AsyncEngine) -> list[tuple[int, str, str, str, str]]:
+    """Each cursor's turn, status, inputs and state as stored text, and its
+    row version stamp (xmin), by turn."""
     async with engine.connect() as connection:
         rows = await connection.execute(
             text(
-                "SELECT turn_index, CAST(inputs AS jsonb) ? 'carried_history', "
-                "CAST(state AS jsonb) ? 'orchestrator:carried' FROM turn_cursors "
-                "ORDER BY turn_index"
+                "SELECT turn_index, status, CAST(inputs AS text), CAST(state AS text), "
+                "xmin::text FROM turn_cursors ORDER BY turn_index"
             )
         )
         return [tuple(row) for row in rows]
+
+
+def _copies(cursor: tuple[int, str, str, str, str]) -> list[str]:
+    """The carried-conversation keys `cursor`'s inputs or state hold."""
+    _, _, inputs, state, _ = cursor
+    return [key for key in _COPY_KEYS if f'"{key}"' in inputs or f'"{key}"' in state]
 
 
 async def _stored(engine: AsyncEngine, conversation_id: str, key: str) -> Any:
@@ -213,15 +223,88 @@ async def test_a_follow_up_s_first_request_extends_the_previous_turn_s_last_whol
     assert '"turns"' not in tail
     assert question == "And Uganda?"
     assert len(_contents(second)) == len(_contents(last)) + 3
-    # The conversation's row holds the one durable copy of the chain: each
-    # turn's claim drops the copies the earlier turns' cursors held, and the
-    # latest turn's cursor keeps its own until the next turn begins.
+    # The conversation's row holds the one copy of the chain. A follow-up's
+    # inputs name the turn it extends, and no cursor holds a copy.
     assert (await _stored(pg_engine, CONVERSATION, "carried_history"))["turn"] == 3
-    assert await _cursor_copies(pg_engine) == [
-        (1, False, False),
-        (2, False, False),
-        (3, True, True),
+    cursors = await _cursors(pg_engine)
+    assert [
+        json.loads(inputs).get("carried_from", {}).get("turn") for _, _, inputs, _, _ in cursors
+    ] == [
+        None,
+        1,
+        2,
     ]
+    assert [_copies(cursor) for cursor in cursors] == [[], [], []]
+
+
+@pytest.mark.usefixtures("full_history")
+async def test_no_closed_cursor_holds_a_carried_conversation_and_none_is_rewritten(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Three full turns, then a fourth left paused on a question, whose
+    cursor holds the conversation its run waits with, and a fifth that
+    abandons it. Every cursor closes holding no copy of a carried
+    conversation, and the fifth turn's claim writes no earlier turn's row
+    but the one it closes."""
+    asking = call_part(
+        "ask_user",
+        {"questions": [{"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]},
+    )
+    app, _ = orchestrator_app(
+        *_TURN_1,
+        _UGANDA,
+        text_part("Both rose."),
+        asking,
+        text_part("Done."),
+        resolver=CannedSearch(definite_envelope()),
+        engine=pg_engine,
+    )
+    await _turns(app, "Life expectancy in Kenya?", "And Uganda?", "Compare them")
+    async with studio_client(app) as client:
+        paused = await stream(client, "/api/studio/turn", turn_body("And Rwanda?"))
+    assert paused[-1]["event"] == "elicitation.request"
+    before = await _cursors(pg_engine)
+    assert _copies(before[3]) == ["orchestrator:history"]
+
+    await _turns(app, "Something else")
+
+    after = await _cursors(pg_engine)
+    assert [(turn, status) for turn, status, *_ in after] == [
+        (1, "done"),
+        (2, "done"),
+        (3, "done"),
+        (4, "abandoned"),
+        (5, "done"),
+    ]
+    assert [_copies(cursor) for cursor in after] == [[]] * 5
+    assert after[:3] == before[:3]
+
+
+@pytest.mark.usefixtures("full_history")
+async def test_a_follow_up_whose_carried_conversation_changed_since_its_claim_opens_from_the_digest(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim names the stored conversation by its hash; one the
+    orchestrator reads under another hash, as one stored after the claim,
+    resets the chain `unloadable` and the turn opens from the digest."""
+    app, model = orchestrator_app(
+        *_TURN_1, _UGANDA, resolver=CannedSearch(definite_envelope()), engine=pg_engine
+    )
+    await _turns(app, "Life expectancy in Kenya?")
+
+    class _Changed(CarriedRef):
+        @classmethod
+        def of(cls, *, turn: int, history: str) -> CarriedRef:
+            return CarriedRef(turn=turn, sha256=hashlib.sha256(b"another").hexdigest())
+
+    monkeypatch.setattr("harness.studio.CarriedRef", _Changed)
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        await _turns(app, "And Uganda?")
+
+    request = model.requests[-1]
+    assert len(_contents(request)) == 2
+    assert '"turns": [' in _opening_texts(request, 2)[0]
+    assert [line["history_chain"] for line in _turn_lines(caplog)] == ["reset:unloadable"]
 
 
 @pytest.mark.usefixtures("full_history")
@@ -798,76 +881,3 @@ def test_an_unknown_history_setting_is_refused(
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):
         HistorySettings()
-
-
-async def _insert_cursor(
-    engine: AsyncEngine, conversation: int, turn: int, *, status: str, inputs: str, state: str
-) -> None:
-    error = "'{}'" if status == "abandoned" else "NULL"
-    async with engine.begin() as connection:
-        await connection.execute(
-            text(
-                "INSERT INTO turn_cursors "
-                "(conversation, turn_index, node, status, inputs, state, error) "
-                f"VALUES (:c, :t, 'orchestrate', :s, CAST(:i AS json), CAST(:st AS json), {error})"
-            ),
-            {"c": conversation, "t": turn, "s": status, "i": inputs, "st": state},
-        )
-
-
-async def _closed_cursor_columns(engine: AsyncEngine) -> dict[int, tuple[str, str, str]]:
-    """Each cursor's inputs and state text and its row version stamp (xmin)."""
-    async with engine.connect() as connection:
-        rows = await connection.execute(
-            text(
-                "SELECT turn_index, CAST(inputs AS text), CAST(state AS text), xmin::text "
-                "FROM turn_cursors"
-            )
-        )
-        return {row[0]: (row[1], row[2], row[3]) for row in rows}
-
-
-async def test_dropping_carried_copies_strips_the_keys_without_a_jsonb_cast(
-    pg_engine: AsyncEngine,
-) -> None:
-    """A closed cursor whose carried history holds a NUL string (which jsonb
-    refuses) does not fail the claim and is stripped, the paused turn's
-    abandoned run history goes with it, and a cursor without the keys is not
-    rewritten."""
-    await StudioStore(pg_engine).create(_PRINCIPAL, "conv-drop")
-    async with pg_engine.connect() as connection:
-        pk = (
-            await connection.execute(
-                text("SELECT id FROM conversations WHERE conversation_id = 'conv-drop'")
-            )
-        ).scalar_one()
-    nul = json.dumps({"history": "a\u0000b"})
-    await _insert_cursor(
-        pg_engine,
-        pk,
-        1,
-        status="done",
-        inputs=f'{{"message": "hi", "carried_history": {nul}}}',
-        state=f'{{"orchestrator:carried": {nul}, "keep": 1}}',
-    )
-    await _insert_cursor(
-        pg_engine,
-        pk,
-        2,
-        status="abandoned",
-        inputs='{"message": "hi"}',
-        state=f'{{"orchestrator:history": {nul}, "keep": 2}}',
-    )
-    await _insert_cursor(
-        pg_engine, pk, 3, status="done", inputs='{"message": "hi"}', state='{"keep": 3}'
-    )
-    before = await _closed_cursor_columns(pg_engine)
-
-    async with pg_engine.begin() as connection:
-        await drop_carried_copies_on(connection, pk, turn_index=4)
-
-    after = await _closed_cursor_columns(pg_engine)
-    assert json.loads(after[1][0]) == {"message": "hi"}
-    assert json.loads(after[1][1]) == {"keep": 1}
-    assert json.loads(after[2][1]) == {"keep": 2}
-    assert after[3] == before[3]

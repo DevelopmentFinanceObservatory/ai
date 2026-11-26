@@ -41,6 +41,10 @@ returns each block decoded from the JSON it stored, or the cursor's own
 decoded block where the digest did not change, so every `Cursor.state`
 holds the state as stored, whether the next node runs live or reruns.
 
+The write that closes a turn drops the state keys a turn holds only while
+it is open (`WAITING_HISTORY_KEY`), so a closed cursor keeps none of
+them and no later write goes back to it.
+
 A close `cancelled` ends the conversation's unfinished runs in its own
 transaction (`harness.run_ledger.end_unfinished`), so a cancelled turn
 leaves no run computing. A close reads no Stop. Closing the turn a Stop
@@ -110,6 +114,13 @@ logger = logging.getLogger(__name__)
 # The state key whose mapping, spec blocks by spec id, the store keeps as
 # `turn_specs` rows, outside the stored state.
 SPECS_KEY = "orchestrator:specs"
+# The state key holding the agent's conversation while its run waits on a
+# hand-back (`harness.graph.state.ORCHESTRATOR_HISTORY_KEY`). A turn closed
+# while it waits, abandoned, stopped or rejected, has no run to resume, so
+# the closing write drops it (`_close_on`).
+WAITING_HISTORY_KEY = "orchestrator:history"
+# The state keys the write that closes a turn drops.
+_OPEN_TURN_KEYS = (WAITING_HISTORY_KEY,)
 # The longest the one read of a turn's stored frame lineage may take
 # (`TurnStore.restore_frame_lineage`), the bound a card's stored lineage read
 # has (`harness.mcp_client._LINEAGE_READ_BUDGET_S`). The read is best effort
@@ -1320,8 +1331,10 @@ async def finish_on(
     caller's transaction, appending `records`, and delete the turn's frame
     lineage rows in the same transaction. `FAILED` and `ABANDONED`
     take an `error` and the others none. `state`, its spec blocks included,
-    replaces the stored state when given. A paused turn's pause is dropped,
-    so no answer can reach it. A close `CANCELLED` records failed every
+    replaces the stored state when given, and either way the closed state
+    holds no key only an open turn holds (`WAITING_HISTORY_KEY`). A
+    paused turn's pause is dropped, so no answer can reach it. A close
+    `CANCELLED` records failed every
     unfinished run of the conversation in the same transaction
     (`end_unfinished`), stamped `now`, so when that fails the turn stays
     open as stored. A close reads no Stop. `TurnStore.finish` runs it in a
@@ -1391,7 +1404,12 @@ async def _close_on(
     records: Sequence[AgentRecord] = (),
 ) -> Cursor:
     """`finish_on`'s close after its fence, recording `segment_id` as the
-    writer (`None` for `close_unleased_on`)."""
+    writer (`None` for `close_unleased_on`). The state written, `state` or
+    else the stored state `cursor` holds, drops `_OPEN_TURN_KEYS`; a stored
+    state that holds none of them is left as it is."""
+    held = state if state is not None else cursor.state
+    if any(key in held for key in _OPEN_TURN_KEYS):
+        state = {key: value for key, value in held.items() if key not in _OPEN_TURN_KEYS}
     closed = await _swap(
         conn,
         cursor,

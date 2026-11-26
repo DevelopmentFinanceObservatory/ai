@@ -73,6 +73,7 @@ from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import (
     make_canvas_cards,
     make_canvas_series,
+    make_carried_history,
     make_recall_part,
     make_remove_cards,
 )
@@ -715,6 +716,7 @@ def create_app(
                 surface=surface,
             ),
             model=model,
+            carried=make_carried_history(store),
             tools=tools,
             executor=recorder,
             # The recorded wrapper, not the bare `tool_surface` above: the

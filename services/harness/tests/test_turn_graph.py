@@ -104,7 +104,7 @@ async def test_an_answered_turn_shows_its_status_streams_the_run_and_ends(
     assert ORCHESTRATOR_SPECS_KEY not in await _stored_state(pg_engine, run.cursor.id)
 
 
-async def test_a_plan_hand_off_leaves_on_the_plan_edge_with_the_action_and_keeps_the_run(
+async def test_a_plan_hand_off_leaves_on_the_plan_edge_with_the_action(
     pg_engine: AsyncEngine,
 ) -> None:
     models = scripted_models(orchestrator=[reply(plan_call("rank donors", "the top 5"))])
@@ -121,7 +121,11 @@ async def test_a_plan_hand_off_leaves_on_the_plan_edge_with_the_action_and_keeps
         brief="rank donors", asks=["the top 5"]
     )
     assert ORCHESTRATOR_PENDING_KEY not in run.cursor.state
-    assert run.cursor.state[ORCHESTRATOR_HISTORY_KEY]["schema_version"] == 1
+    # This graph has no `plan_start`, so the plan edge ends the turn, and a
+    # closed turn has no run to resume: its closing write drops the
+    # conversation the hand-off kept (`harness.turn.store.WAITING_HISTORY_KEY`).
+    # The next test reads it across a pause.
+    assert ORCHESTRATOR_HISTORY_KEY not in run.cursor.state
 
 
 async def test_an_ask_pauses_and_another_instance_hands_the_answer_back_to_the_waiting_call(

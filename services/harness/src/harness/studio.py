@@ -99,6 +99,7 @@ from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
+    CarriedRef,
     TurnInput,
 )
 from harness.provenance import ProvenanceStore
@@ -143,7 +144,6 @@ from harness.studio_store import (
     TurnMoved,
     TurnStanding,
     asked_for_question,
-    drop_carried_copies_on,
     pause_entry,
     record_closed_turn,
     retry_delays,
@@ -761,7 +761,11 @@ def _turn_opening(
         canvas_digest=json.dumps(digest) if digest else None,
         conversation_digest=json.dumps(history) if history else None,
         seeds=seeds,
-        carried_history=carried[0] if carried is not None else None,
+        carried_from=(
+            CarriedRef.of(turn=len(conversation.turns), history=carried[0])
+            if carried is not None
+            else None
+        ),
         conversation_tail=json.dumps(carried[1]) if carried is not None else None,
     )
     state: dict[str, Any] = {"surface": body.surface.value}
@@ -1174,8 +1178,11 @@ class _SegmentWork:
     def begin(self) -> None:
         """Make the segment's `renew_now` the conversation's, and keep the
         turn's records so far, for a segment that resumes a turn another
-        instance began."""
+        instance began. The turn carries only a conversation this segment's
+        orchestrator closes on (`_Translator`), so one an earlier turn left
+        in process is dropped."""
         self._conversation.renew_now = self._renew_now
+        self._conversation.turn_carried = None
         keep_turn_records(self._conversation, self._cursor.state)
         for approved in self._restored:
             self._conversation.record_approved(approved)
@@ -2811,10 +2818,6 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             work.turns[left_record]["error"] = ErrorCode.CANCELLED.value
                     else:
                         await abandon_on(conn, left_open, segment_id=segment_id)
-                # The turn left open is recorded on `work` by now, so the
-                # record this save stores is the one durable copy of the
-                # carried conversation.
-                await drop_carried_copies_on(conn, pk, turn_index=work.turn_index)
                 if not editing:
                     inputs, state, text = _turn_opening(
                         work, body, chip_label, model_name=studio.model_name
