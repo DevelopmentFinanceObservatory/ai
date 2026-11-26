@@ -41,6 +41,7 @@ from harness.graph.state import (
     ORCHESTRATOR_RETRY_NOTE_KEY,
     PICK_REPLAN_KEY,
     STALE_WHOLE_NOTE,
+    STALE_WHOLE_UNPLANNED_NOTE,
     UNREADABLE_PLAN_NOTE,
     UNREADABLE_PLAN_UNPLANNED_NOTE,
     conversation_readings,
@@ -124,7 +125,8 @@ async def _draft(
     the plan before drafting. A plan `approve` cleared for resting on a whole
     an earlier release compiled (`"stale_whole"`) is drafted the same way,
     under `STALE_WHOLE_NOTE`. The `"refused"` edge's text opens with
-    `UNREADABLE_PLAN_UNPLANNED_NOTE`.
+    `UNREADABLE_PLAN_UNPLANNED_NOTE`, or `STALE_WHOLE_UNPLANNED_NOTE` for a
+    stale whole.
 
     The first draft after `plan_done` gave the plan call back carries the
     note it left (`ORCHESTRATOR_RETRY_NOTE_KEY`) as `refusal_note`, naming the
@@ -278,6 +280,7 @@ async def _draft(
             amendment=amendment,
             answer=answer,
             unreadable=unreadable,
+            stale_whole=stale_whole,
         )
     planner_plan = PlannerPlan.model_validate(drafted["plan"])
     ctx.state["plan"] = planner_plan.model_dump_json()
@@ -320,6 +323,7 @@ def _refused_entry(
     amendment: Any,
     answer: Mapping[str, Any] | None,
     unreadable: bool,
+    stale_whole: bool,
 ) -> Next:
     """Where an entry the planner refused goes (`_draft`): `new_question`
     for an amendment read as a different question, `pending_refusal` to
@@ -365,7 +369,8 @@ def _refused_entry(
             },
         )
     if unreadable:
-        text = f"{UNREADABLE_PLAN_UNPLANNED_NOTE} {text}".rstrip()
+        lead = STALE_WHOLE_UNPLANNED_NOTE if stale_whole else UNREADABLE_PLAN_UNPLANNED_NOTE
+        text = f"{lead} {text}".rstrip()
     return Next(
         "refused",
         {"text": text, "final": bool(refused.get("final")), "code": refused.get("code")},
