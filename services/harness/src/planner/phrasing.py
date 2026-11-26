@@ -107,8 +107,8 @@ def entities_phrase(
     naming the place party reads `EVERY_PLACE`, since such a retrieval holds
     every level of place and its count spans them all, or "every {level}"
     when a filter downstream of it keeps `level` (`kept_level`): "every
-    country". A `DatasetRequirement` always names an entity or states
-    `across`, so one of the two is set. An entity with `members` set reads
+    country". With no entity and no `across` word, as a whole (`whole_of`)
+    states, the phrase is empty. An entity with `members` set reads
     "each member of {name}", so a card tells the set's members from the set's
     own figure.
     """
@@ -125,8 +125,8 @@ def entities_phrase(
             parts.append(f"all {count:,} {pluralize(singular(word))}")
         else:
             parts.append(f"every {singular(word)}")
-    if len(parts) == 1:
-        return parts[0]
+    if len(parts) <= 1:
+        return "".join(parts)
     return ", ".join(parts[:-1]) + f" and {parts[-1]}"
 
 

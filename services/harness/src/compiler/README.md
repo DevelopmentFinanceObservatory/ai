@@ -195,8 +195,9 @@ its whole, so two sides in different units, or one unit against none, are
 with `quotient_of` among the permitted repairs. A share's denominator also has to
 hold its numerator: on the donor and recipient sides, a denominator that shows it
 does not hold a party the numerator keeps is `share_part_outside_whole`
-(`compiler.sources.parties_outside`, the check `planner.source_reads.compile_whole`
-makes of a compiled whole). Its permitted repairs are a `whole_of` of the
+(`compiler.sources.parties_outside`). A denominator Search derived as the numerator's
+whole (`whole_of`) is not checked, since Search refuses a whole that does not hold its
+part. Its permitted repairs are a `whole_of` of the
 numerator's requirement, where the denominator's sources hold another population,
 and a `quotient_of`, where the plan narrowed the denominator to a figure that does
 not hold the numerator, such as each donor's aid over one donor's total. A `quotient_of`

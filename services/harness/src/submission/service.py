@@ -81,13 +81,13 @@ from harness.scope_choices import (
     MULTILATERAL_REPORTERS,
     PROVIDER_AXIS,
     PROVIDER_STREAMS,
+    DerivedWhole,
     Option,
     PartScope,
     ProviderMoney,
     ProviderScope,
     ProviderStream,
     ScopeChoice,
-    SlotBinding,
     block_dataset,
     holds_streams,
     option_axis,
@@ -5029,8 +5029,8 @@ class Realignment(NamedTuple):
     alignment moves it there, beside any calculation's move.
 
     With `whole_axis` set, the input is a declared whole
-    (`DatasetRequirement.whole_of`): `spec_id` is its part's pin, compiled
-    with its choice on `whole_axis` left open, `option_ids` is empty, and
+    (`DatasetRequirement.whole_of`): `spec_id` is its part's pin, whose whole
+    Search derives on `whole_axis`, `option_ids` is empty, and
     `requirement_id` and `step_id` both name the whole (`_declared_wholes`).
     """
 
@@ -5541,8 +5541,8 @@ def _aligned_bases(
     guaranteed for it.
 
     A whole the planner declared (`DatasetRequirement.whole_of`) is pinned
-    to its part's dataset with the declared axis left open, compiled with
-    no search and whatever pin the planner wrote on it (`_declared_wholes`).
+    to the total Search derives from its part on the declared axis, asked for
+    with no search whatever pin the planner wrote on it (`_declared_wholes`).
     A part with no pin is searched for first. A declared whole is left
     out of alignment. Its calculation's other inputs are aligned among themselves
     first, and the whole is then compiled from its part's final pin, the
@@ -5550,8 +5550,8 @@ def _aligned_bases(
     Nothing reads a whole but the denominator of a share or quotient of its
     part (`planner.plan.whole_of_fault`), so alignment never reaches it
     through another input. A whole not compiled yet answers `BASES_UNALIGNED` naming it
-    (`Realignment.whole_axis`), and a part Search cannot leave the axis open
-    on answers `SHARE_WHOLE_UNDERIVABLE`. A share
+    (`Realignment.whole_axis`), and a part whose whole Search does not derive
+    answers `SHARE_WHOLE_UNDERIVABLE`. A share
     declaring nothing is left as written, and its inputs are aligned as any
     calculation's are.
 
@@ -5741,7 +5741,6 @@ def _aligned_bases(
         wholes = _declared_wholes(
             declared,
             realigned=realigned,
-            shown=shown,
             compiled=[pin for pin in aligned if pin.whole_axis is not None],
         )
     except _Unservable as exc:
@@ -6914,10 +6913,11 @@ def _providers_unaligned(
     counted on.
 
     The planner can repair it: declare a share's total the part over every
-    sector, donor or recipient (`DatasetRequirement.whole_of`), or pin an input counted on that
-    scope. Declaring each input's own option is named only for a user who asked for
-    that input's source, so the planner does not take it as a way past the
-    refusal. Where no repair applies, the calculation is declined: `permit`
+    provider, donor or recipient (`DatasetRequirement.whole_of`), or pin an
+    input counted on that scope. A total over every sector has no `whole_of`,
+    so the planner pins it as a total of its own. Declaring each input's own
+    option is named only for a user who asked for that input's source, so the
+    planner does not take it as a way past the refusal. Where no repair applies, the calculation is declined: `permit`
     records an `unsupported_ask` decline as optional, so the decline is earned
     and a repaired plan owes none. `detail.requirement_id` names the input, as
     every refusal about one requirement does, for its sentence
@@ -6929,9 +6929,10 @@ def _providers_unaligned(
         f"{step.id!r} subtracts, divides or adds its inputs, so they count one provider scope, "
         f"{basis.label(target)}, and {basis.requirement_id!r}'s dataset counts "
         f"{basis.label(basis.choice.active)} and is not served that way. Align them: when "
-        f"{step.id!r} is a share of a figure in its total over every sector, donor or "
-        "recipient, state that total with `whole_of` naming its part and that axis; otherwise "
-        "pin for "
+        f"{step.id!r} is a share of a figure in its total over every provider, donor or "
+        "recipient, state that total with `whole_of` naming its part and that axis. A total "
+        "over every sector takes no `whole_of`: pin it as a total of its own. Otherwise pin "
+        "for "
         f"{basis.requirement_id!r} a dataset counted as {basis.label(target)}. Declare "
         f"each input's own option in `scope_options` only when the user asked for "
         f"{basis.requirement_id!r}'s source as it stands. When none of these applies, record "
@@ -7733,7 +7734,7 @@ def _whole_parts(
                     whole_id=whole.id,
                     part_spec_id=None,
                     reason=f"Search settled {part.id!r} on no one dataset",
-                    cause="part_unpinned",
+                    cause=PART_UNPINNED,
                 )
             )
     return declared
@@ -7743,24 +7744,22 @@ def _declared_wholes(
     declared: Sequence[tuple[DatasetRequirement, DatasetRequirement, str]],
     *,
     realigned: Mapping[str, AlignedPin],
-    shown: Mapping[str, PinSource],
     compiled: Sequence[AlignedPin],
 ) -> dict[str, AlignedPin]:
     """The compile of each declared whole of `declared` (`_whole_parts`), by requirement id (`_aligned_bases`).
 
-    A declared whole is its part's final pin, the one alignment moved the
-    part to (`realigned`) else its own, with the declared axis left open
-    (`whole_axis_held`, `planner.source_reads.compile_whole`) and every other choice
-    held. `compiled` holds the wholes compiled so far
-    (`AlignedPin.key`), so wholes declaring one part and axis share one
-    compile. One on record with no spec block is compiled again in its place
-    (`AlignedPin.complete`).
+    A declared whole is the whole Search derives from its part's final pin,
+    the one alignment moved the part to (`realigned`) else its own, on the
+    declared axis (`planner.source_reads.compile_whole`). `compiled` holds the
+    wholes compiled so far (`AlignedPin.key`), so wholes declaring one part and
+    axis share one compile. Every whole `compiled` holds states Search's derived
+    whole (`planner.plan.aligned_pins` leaves out one an earlier release
+    compiled), so one compiled is held as it is, and one not on record is asked
+    for.
 
     Raises:
         _Unservable: With `BASES_UNALIGNED`, naming each whole not compiled
-            yet, once per part pin and axis (`Realignment.whole_axis`),
-            or `SHARE_WHOLE_UNDERIVABLE` when Search's scope records for a
-            part's pin hold nothing on the axis to leave open.
+            yet, once per part pin and axis (`Realignment.whole_axis`).
     """
     pins = {pin.key: pin for pin in compiled}
     wanted: dict[tuple[str, str], Realignment] = {}
@@ -7768,17 +7767,8 @@ def _declared_wholes(
     for whole, part, axis in declared:
         moved = realigned.get(part.id)
         pin = moved.spec_id if moved is not None else cast(str, part.source_spec_id)
-        block = _pin_block(pin, shown)
-        scope = part_scope(pin, block)
-        if scope is None or not whole_axis_held(scope, axis):
-            reason, cause = unread_part(pin, axis, source=shown.get(pin), block=block, scope=scope)
-            raise _Unservable(
-                share_whole_underivable(
-                    whole_id=whole.id, part_spec_id=pin, reason=reason, cause=cause
-                )
-            )
         held = pins.get((pin, (), axis))
-        if held is not None and held.complete:
+        if held is not None:
             wholes[whole.id] = held
         else:
             wanted.setdefault(
@@ -7795,20 +7785,16 @@ def _whole_sums(
     """The aggregate each compiled whole of `wholes` takes over the side it opens
     (`planner.plan.WholeSum`), in plan order.
 
-    Search's answer for the whole (`AlignedPin.block`, which every pin
-    `_declared_wholes` returns holds; one without is logged and given no sum)
-    either binds that side to one total, as
-    DAC2a binds developing countries, and the whole is read as it is, or
-    leaves it open with one row per party there, as the CRS does over every
-    donor. The block's open axes say which (`compiler.sources.open_side_column`
-    over `compiler.sources.open_entity_axes_of`), read as the compiler reads
-    them off the whole's source when it checks the pair again
-    (`compiler.compile._Build._check_whole_sum`). That reading never fails on
-    a block, so a block whose other fields this release cannot read is summed
-    as Search serves it, and the compiler refers the whole back as it reads
-    the source (`translator.discovery._settled_whole`). An open side is summed
-    by period under the first free id of `{whole}_sum`, `{whole}_sum_2` and on
-    (`planner.plan.whole_sum`).
+    The whole's spec block either binds that side to one total, as DAC2a binds
+    developing countries, and the whole is read as it is, or leaves it open
+    (`compiler.sources.open_side_column`), as the CRS does over every donor, and
+    it is summed over its members. `compile_whole` refuses a block that
+    disagrees with Search's statement of how it derived the whole
+    (`planner.source_reads._whole_fault`). The compiler holds the plan's sum to
+    the same axes on the whole's source, which every answer for its spec_id
+    states (`compiler.compile._Build._check_whole_sum`), and refers the whole
+    back where they disagree. An open side is summed by period under the first
+    free id of `{whole}_sum`, `{whole}_sum_2` and on (`planner.plan.whole_sum`).
     """
     by_id = {requirement.id: requirement for requirement in requirements}
     taken = set(by_id)
@@ -7825,19 +7811,8 @@ def _whole_sums(
         role = opened_role(requirement, part)
         if role is None:
             continue
-        block = pin.block
-        if block is None:
-            # `_declared_wholes` compiles such a pin again, so none reaches here. The
-            # compiler refers back a whole whose open side has no sum.
-            logger.warning(
-                "whole %r's compile %s holds no spec block, so no sum is added for it",
-                requirement.id,
-                pin.spec_id,
-            )
-            continue
-        resolved = block.get("resolved")
-        axes = open_entity_axes_of(resolved if isinstance(resolved, Mapping) else {})
-        if open_side_column(axes, role) is None:
+        resolved = (pin.block or {}).get("resolved") or {}
+        if open_side_column(open_entity_axes_of(resolved), role) is None:
             continue
         stem = requirement.id[: MAX_IDENTIFIER_CHARS - len("_sum_99")]
         sum_id = next(
@@ -7932,20 +7907,25 @@ def _whole_decisions(
     """The decision each whole compiled from its part (`AlignedPin.whole_axis`) states,
     by the whole's requirement id, `wholes` holding each one's compile.
 
-    It says, in reader words, that the share (or quotient, as the
-    calculation reading the whole is one) divides by the total of its
-    part's own dataset over the axis left open (`_whole_total`), and what
-    both sides count alike (`_whole_shares`), naming the part's dataset by
-    its title where that fits the rationale's limit (`_fitting_rationale`). The part is
-    the pin the whole was compiled from (`AlignedPin.origin`), the one
-    alignment moved its part to, its block read off `shown`, the blocks on
-    record (`planner.plan.held_sources`). It is the planner's, qualifies the answer
-    (`Decision.caveat` `derived_whole`), and is cited by the whole's
-    requirement as a scope decision is (`_scope_decisions`).
+    It says, in reader words, that the share (or quotient, as the calculation
+    reading the whole is one) divides by the total Search derived from its
+    part's own dataset (`derived_whole`, `_whole_total`), and what both sides
+    count alike (`_whole_shares`), naming the part's dataset by its title where
+    that fits the rationale's limit (`_fitting_rationale`). The part is the pin
+    the whole was compiled from (`AlignedPin.origin`), the one alignment moved
+    its part to, its block read off `shown`, the blocks on record
+    (`planner.plan.held_sources`). It is the planner's, qualifies the answer
+    (`Decision.caveat` `derived_whole`), and is cited by the whole's requirement
+    as a scope decision is (`_scope_decisions`). A whole stating no derived
+    whole, which `_declared_wholes` never returns, states none.
     """
     by_id = {requirement.id: requirement for requirement in requirements}
     decisions: dict[str, tuple[Decision, ...]] = {}
     for requirement_id, whole in wholes.items():
+        whole_held = _block_scope(whole.block)
+        derived = whole_held.derived if whole_held is not None else None
+        if derived is None:
+            continue
         over_whole = requirements_over(requirement_id, by_id)
         divides = (
             "quotient"
@@ -7957,12 +7937,10 @@ def _whole_decisions(
             else "share"
         )
         part_block = _pin_block(whole.origin, shown)
-        whole_block = whole.block
-        part_held, whole_held = _block_scope(part_block), _block_scope(whole_block)
+        part_held = _block_scope(part_block)
         dataset = _dataset_title(part_block)
-        axis = cast(str, whole.whole_axis)
-        total = _whole_total(axis, whole_block)
-        alike = _whole_shares(axis, part_block, part_held, whole_held)
+        total = _whole_total(derived, whole.block, whole_held)
+        alike = _whole_shares(derived, part_block, part_held, whole_held)
         chosen = f"the {dataset} {total}" if dataset is not None else f"the {total}"
         if len(chosen) > MAX_OPTION_CHARS:
             chosen = f"the {total}"
@@ -8003,10 +7981,10 @@ def _whole_decisions(
     return decisions
 
 
-# What a whole and its part can count alike, by the axis the whole leaves open
-# (`planner.plan.WholeOf.axis`), besides the providers (`_whole_shares`).
+# What a whole and its part can count alike, by the axis Search derived the whole on
+# (`DerivedWhole.axis`), besides the providers (`_whole_shares`).
 _WHOLE_ALIKE: Mapping[str, tuple[str, ...]] = {
-    "sector": ("donors", "recipients", "measure basis"),
+    "provider": ("donors", "recipients", "sectors", "measure basis"),
     "donor": ("recipients", "sectors", "measure basis"),
     "recipient": ("donors", "sectors", "measure basis"),
 }
@@ -8016,61 +7994,115 @@ _ALIKE_COLUMNS: Mapping[str, str] = {"donors": "origin", "recipients": "destinat
 _ALIKE_AXES: Mapping[str, str] = {"sectors": "sector", "measure basis": "measure_basis"}
 
 
-def _whole_total(axis: str, block: Mapping[str, Any] | None) -> str:
-    """The total a whole over every `axis` is, `block` its compiled spec block, as
-    its caveat names it: "total over every sector"; over a donor or recipient, the
-    set Search binds on that role's column (`WHOLE_COLUMNS`), "total for official
-    donors (DAC)", else, or where Search's groups are not readable, "total over every
-    donor"."""
-    column = WHOLE_COLUMNS.get(axis)
-    label = next(
+def _whole_total(
+    derived: DerivedWhole, block: Mapping[str, Any] | None, scope: PartScope | None
+) -> str:
+    """The total Search derived (`derived`), `block` the whole's spec block and `scope`
+    its scope record, as its caveat names it: on the provider axis the option the
+    whole counts, "total counting bilateral plus core contributions", and the set
+    Search moved another side to beside it, ", for all recipients (DAC)"; a side's
+    published total by the set Search binds on that role's column (`WHOLE_COLUMNS`),
+    "total for official donors (DAC)", else "total over every donor"; a side summed
+    over its members "sum over every donor"."""
+    if derived.axis == PROVIDER_AXIS:
+        option = _option_of(scope, derived.whole.provider)
+        total = (
+            f"total counting {option.label}" if option is not None else "total over every provider"
+        )
+        rebound = _rebound_axis(derived)
+        if rebound is None:
+            return total
+        label = _group_label(block, WHOLE_COLUMNS[rebound])
+        return f"{total}, for {label if label is not None else f'every {rebound}'}"
+    if derived.kind == SUM_OF_MEMBERS:
+        return f"sum over every {derived.axis}"
+    label = _group_label(block, WHOLE_COLUMNS.get(derived.axis))
+    return f"total for {label}" if label is not None else f"total over every {derived.axis}"
+
+
+def _rebound_axis(derived: DerivedWhole) -> str | None:
+    """The donor or recipient axis Search moved beside the axis it derived the whole
+    on (`DerivedWhole.rebind`), as DAC2a's provider whole moves the recipients to all
+    recipients; `None` where it moved none, or one this release does not name."""
+    if derived.rebind is None:
+        return None
+    axis = option_axis(derived.rebind)
+    return axis if axis in WHOLE_COLUMNS else None
+
+
+def _group_label(block: Mapping[str, Any] | None, column: str | None) -> str | None:
+    """The label of the named set `block`, a spec block, states on the role column
+    `column`, `None` where it states none there or its sets do not read."""
+    return next(
         (group.label for group in readable_groups(block or {}) or () if group.role == column),
         None,
     )
-    return f"total for {label}" if label is not None else f"total over every {axis}"
+
+
+def _option_of(scope: PartScope | None, option_id: str | None) -> Option | None:
+    """The provider option `option_id` names in the scope record `scope`, `None` where
+    either is missing or the record lists no such option."""
+    choice = _provider_choice(scope)
+    if choice is None or option_id is None:
+        return None
+    return next((option for option in choice.options if option.option_id == option_id), None)
 
 
 def _whole_shares(
-    axis: str,
+    derived: DerivedWhole,
     part_block: Mapping[str, Any] | None,
     part_scope_held: PartScope | None,
     whole_scope_held: PartScope | None,
 ) -> str:
-    """What a whole over every `axis` and its part count alike, as the end of its
-    caveat's rationale: ", so both sides count the same donors, recipients, measure
-    basis and providers." `part_block` is the part's spec block, and
+    """What a whole and its part count alike, as the end of its caveat's rationale:
+    ", so both sides count the same donors, recipients, measure basis and providers."
+    `derived` is Search's derived whole, `part_block` the part's spec block, and
     `part_scope_held` and `whole_scope_held` the scope records of the part and the
     whole. It names only what the part's dataset has (`_dataset_holds`), so a DAC1
-    donor total names no recipients or sectors, and the providers only where both
-    hold the same provider option. Where they hold different options, or one states
-    none, it says what each counts (`_providers_counted`), and where they share
-    nothing else it says they count different providers only where both state
-    one. Where nothing is known alike and neither states a provider option, it
-    says nothing of what they count."""
+    donor total names no recipients or sectors, and never the side Search moved
+    beside the widened axis (`DerivedWhole.rebind`), which the total names
+    (`_whole_total`), and the providers only where both
+    count the same provider option (`DerivedSide.provider`). Where they count
+    different options, or one states none, it says what each counts
+    (`_providers_counted`, which says nothing where neither option reads), and
+    where they share nothing else it says they count different providers only
+    where both state one. Where nothing is known alike
+    and neither states a provider option, it says nothing of what they count."""
+    rebound = _rebound_axis(derived)
+    moved = WHOLE_COLUMNS[rebound] if rebound is not None else None
     alike = [
-        name for name in _WHOLE_ALIKE[axis] if _dataset_holds(part_block, part_scope_held, name)
+        name
+        for name in _WHOLE_ALIKE[derived.axis]
+        if (moved is None or _ALIKE_COLUMNS.get(name) != moved)
+        and _dataset_holds(part_block, part_scope_held, name)
     ]
-    part, whole = (
-        _active_option(part_scope_held, PROVIDER_AXIS),
-        _active_option(whole_scope_held, PROVIDER_AXIS),
-    )
-    same = part is not None and whole is not None and part.option_id == whole.option_id
+    part, whole = derived.part.provider, derived.whole.provider
+    same = part is not None and part == whole
     if same:
         alike.append("providers")
     named = ", ".join(alike[:-1]) + f" and {alike[-1]}" if len(alike) > 1 else "".join(alike)
     if same or (part is None and whole is None):
         return f", so both sides count the same {named}." if named else "."
-    providers = _providers_counted(whole, part)
+    # A part with no scope record of its own names its option as the whole's
+    # record labels it: both records list every option of the provider choice.
+    providers = _providers_counted(
+        _option_of(whole_scope_held, whole),
+        _option_of(part_scope_held, part) or _option_of(whole_scope_held, part),
+    )
+    said = f" {providers}" if providers is not None else ""
     if named:
-        return f", so both sides count the same {named}. {providers}"
+        return f", so both sides count the same {named}.{said}"
     if part is not None and whole is not None:
-        return f", so both sides count different providers. {providers}"
-    return f". {providers}"
+        return f", so both sides count different providers.{said}"
+    return f".{said}"
 
 
-def _providers_counted(whole: Option | None, part: Option | None) -> str:
+def _providers_counted(whole: Option | None, part: Option | None) -> str | None:
     """The sentence saying which providers a whole and its part count, `whole` and
-    `part` the provider options they hold, `None` for one that states none."""
+    `part` the provider options they hold, `None` for one that states none; no
+    sentence where neither states one."""
+    if whole is None and part is None:
+        return None
     if whole is None:
         return (
             f"The total does not say which providers it counts, and the part counts "
@@ -8080,7 +8112,7 @@ def _providers_counted(whole: Option | None, part: Option | None) -> str:
         return (
             f"The total counts {whole.label}, and the part does not say which providers it counts."
         )
-    return f"The total counts {whole.label}, the part {part.label}."
+    return f"The total counts {whole.label}, and the part counts {part.label}."
 
 
 def _dataset_holds(block: Mapping[str, Any] | None, scope: PartScope | None, name: str) -> bool:
@@ -8467,17 +8499,6 @@ def _pin_block(pin: str, shown: Mapping[str, PinSource]) -> Mapping[str, Any] | 
     return source.spec_block(pin) if source is not None else None
 
 
-def axis_slot(scope: PartScope, axis: str) -> str | None:
-    """The identity slot `scope`'s choice on `axis` binds, `None` when it offers no
-    choice on `axis` binding one slot of its base identity."""
-    choice = next((c for c in scope.choices if c.axis == axis), None)
-    if choice is None:
-        return None
-    slots = {o.binding.slot for o in choice.options if isinstance(o.binding, SlotBinding)}
-    held = {slot.get("property") for slot in scope.base.identity.get("slots") or ()}
-    return next(iter(slots)) if len(slots) == 1 and slots <= held else None
-
-
 def bound_parties(scope: PartScope, column: str) -> tuple[str, ...]:
     """The parties the part `scope` records binds on the role column `column`: those
     of the identity its active options compile to (`PartScope.compiled`), so a party
@@ -8499,84 +8520,92 @@ def block_parties(
     return tuple((identity.get("entities") or {}).get(column) or ())
 
 
-def whole_axis_held(scope: PartScope, axis: str) -> bool:
-    """Whether the part `scope` records binds something on `axis` a declared whole can
-    leave open: for the sector, a choice binding one slot (`axis_slot`); for a donor
-    or recipient, a party on that role's column (`WHOLE_COLUMNS`, `bound_parties`)."""
-    column = WHOLE_COLUMNS.get(axis)
-    if column is None:
-        return axis_slot(scope, axis) is not None
-    return bool(bound_parties(scope, column))
+def derived_whole(pin: AlignedPin) -> DerivedWhole | None:
+    """The whole Search derived from its part that the compiled whole `pin` holds
+    (`PartScope.derived`), `None` where its block states none."""
+    scope = _block_scope(pin.block)
+    return scope.derived if scope is not None else None
 
 
-def unread_part(
-    part_pin: str,
-    axis: str,
-    *,
-    source: PinSource | None,
-    block: Mapping[str, Any] | None,
-    scope: PartScope | None,
-) -> tuple[str, str]:
-    """Why a declared whole's part pinned `part_pin` gives no choice on `axis` to
-    leave open, as a clause and its `share_whole_underivable` cause: the first
-    missing of its pin source (`part_not_shown`), that source's block
-    (`part_block_missing`), the block's scope choices (`scope_unreadable`) and
-    what the whole leaves open on `axis` (`whole_axis_held`, `axis_not_held`).
-    `_declared_wholes` and `planner.source_reads.compile_whole` both name a failure by it."""
-    if source is None:
-        return f"{part_pin} is not among the datasets Search showed this turn", "part_not_shown"
-    if block is None:
-        return f"no record of {part_pin} from Search is held", "part_block_missing"
-    if scope is None:
-        return (
-            f"Search's scope choices for {part_pin} are missing or unreadable",
-            "scope_unreadable",
-        )
-    if axis in WHOLE_COLUMNS:
-        return f"Search binds no {axis} on {part_pin} to leave open", "axis_not_held"
-    return f"Search offers no {axis} choice on {part_pin} to leave open", "axis_not_held"
+# The `DerivedWhole.kind` of a whole Search leaves open on its widened side, to be
+# summed over its members.
+SUM_OF_MEMBERS = "sum_of_members"
+
+
+# The causes of a `SHARE_WHOLE_UNDERIVABLE` the harness states: before Search is
+# asked for the whole, the part has no pin (`_declared_wholes`), no definition of its
+# pin is held, or its named sets cannot be read; after, Search's answer holds no one
+# derived whole, or one this release does not read as the whole asked for
+# (`planner.source_reads.compile_whole`). None is Search refusing the whole, so none
+# earns an `unsupported_ask` decline.
+PART_UNPINNED = "part_unpinned"
+PART_UNREAD = "part_unread"
+GROUPS_UNREADABLE = "groups_unreadable"
+WHOLE_REFUSED = "whole_refused"
+PART_MOVED = "part_moved"
+HARNESS_WHOLE_CAUSES = frozenset(
+    {PART_UNPINNED, PART_UNREAD, GROUPS_UNREADABLE, WHOLE_REFUSED, PART_MOVED}
+)
 
 
 def share_whole_underivable(
-    *, whole_id: str, part_spec_id: str | None, reason: str, cause: str
+    *,
+    whole_id: str,
+    part_spec_id: str | None,
+    reason: str,
+    cause: str | None,
+    alternatives: Sequence[tuple[str, str]] = (),
 ) -> dict[str, object]:
-    """Return the `SHARE_WHOLE_UNDERIVABLE` problem for a declared whole that cannot be counted from its part's dataset.
+    """Return the `SHARE_WHOLE_UNDERIVABLE` problem for a declared whole Search does not derive from its part.
 
-    The planner can repair it: pin the part to a dataset Search offers the
-    choice on, or pin a total of the whole's own and drop `whole_of`.
-    `part_spec_id` is the part's pin, `None` where it has none, `reason`
-    says why no whole was compiled, as a clause, and `cause` names that
-    reason as a code:
-
-    - `part_unpinned`: the part has no pin.
-    - `part_not_shown`, `part_block_missing`, `scope_unreadable`,
-      `axis_not_held`: the part's pin gives no choice on the axis to leave
-      open (`unread_part`).
-    - `groups_unreadable`: the part names a set on a role the whole keeps that
-      this release cannot read.
-    - `whole_refused`: Search refuses the whole, its code in `reason`
-      (`requested_option_unavailable` where it cannot hold an option the part
-      holds), answers with no one dataset or with no spec block, or a compile
-      held within the call is asked for again (`planner.source_reads.with_source_reads`).
-    - `part_outside_whole`, `whole_members_unstated`: Search's whole does not
-      hold, or does not show it holds, a party the part names
-      (`planner.source_reads._uncontained`).
-
-    `_declared_wholes` answers the first two kinds, and
-    `planner.source_reads.compile_whole` every other kind but `part_unpinned`.
-    `detail.requirement_id` names the whole for the refusal's sentence
-    (`harness.sentences`).
+    The planner can repair it: drop `whole_of` and leave the whole unpinned,
+    so `propose_plan` searches for its total (`pin_by_search`), on the scope
+    an alternative names where Search offers one, or, where Search refused the
+    whole, decline the share, a decline the refusal earns
+    (`planner.source_reads.with_source_reads`). `part_spec_id` is the
+    part's pin, `None` where it has none, `reason` says why no whole was
+    compiled, as a clause, and `cause` names that reason as a code: Search's
+    own cause for refusing the whole (`part_outside_whole`, `part_is_whole`,
+    `whole_moves_provider`, `option_not_covered` and the others its whole
+    request states), `None` where an older Search states none; or, before
+    Search is asked, `part_unpinned` (the part has no pin), `part_unread` (no
+    definition of its pin is on record) or `groups_unreadable` (it names a set
+    this release cannot read); or `whole_refused` where Search answers with no
+    one derived whole, or one whose summed side its block does not leave open
+    (`planner.source_reads._whole_fault`); or `part_moved` where Search derived
+    the whole of another part, or on another axis. A refusal the harness states
+    (`HARNESS_WHOLE_CAUSES`) offers no decline. `alternatives` are the options
+    Search offers as the whole in place of the one refused, each `(ref, label)`, named as what Search would count;
+    the planner cannot ask for one as the whole, so it searches for a total
+    counted that way. `detail.requirement_id` names the whole for the
+    refusal's sentence (`harness.sentences`).
     """
+    counted = (
+        f" Search would count the whole as {', '.join(label for _, label in alternatives)} instead."
+        if alternatives
+        else ""
+    )
     return problem(
         ProblemCode.SHARE_WHOLE_UNDERIVABLE,
-        f"{whole_id!r} states `whole_of`, a total counted from its part's own dataset with "
-        "its sector, donor or recipient left open, so both count everything else alike. "
-        f"{reason}. Pin the part to a dataset Search offers that choice on, or "
-        f"drop `whole_of` and pin a total for {whole_id!r} of its own.",
+        f"{whole_id!r} states `whole_of`, the total Search derives from its part on one "
+        f"axis, every other choice held. {reason}.{counted} Drop `whole_of` from "
+        f"{whole_id!r}, state the parties its total covers, and leave it unpinned so a "
+        f"search finds that total{' counted that way' if alternatives else ''}"
+        + (
+            "."
+            if cause in HARNESS_WHOLE_CAUSES
+            else "; or record the share in `declined` with code "
+            f"{UnsupportedOperation.UNSUPPORTED_ASK.value!r}."
+        ),
         outcome=Outcome.INVALID_INPUT,
         detail={
             "requirement_id": whole_id,
-            "whole": {"whole_id": whole_id, "part_spec_id": part_spec_id, "cause": cause},
+            "whole": {
+                "whole_id": whole_id,
+                "part_spec_id": part_spec_id,
+                "cause": cause,
+                "alternatives": [{"ref": ref, "label": label} for ref, label in alternatives],
+            },
         },
     )
 

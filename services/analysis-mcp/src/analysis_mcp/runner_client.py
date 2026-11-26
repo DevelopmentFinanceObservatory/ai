@@ -78,7 +78,7 @@ and its `/file`, for a caller that needs its recipe or its rows. Each raises
 
 Every call carries the Cloud Run ID token (`common.apis_auth`) and the headers
 that name its caller (`common.caller.vouched_caller_headers`), which hold when
-this process has the caller principal. For an `ip:` caller the website named,
+this process has the caller principal. For an `ip:` or `user:` caller the website named,
 they are `x-dfo-caller-principal`, `x-dfo-caller`, `x-dfo-surface: mcp`, and
 `x-dfo-user-agent`, the whole User-Agent clipped to 256 characters, and
 `x-dfo-mcp-client`, the name in the client's `clientInfo` when the call carries

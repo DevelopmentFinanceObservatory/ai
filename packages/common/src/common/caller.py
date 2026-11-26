@@ -3,7 +3,9 @@
 A caller is an opaque string with a kind prefix, carried in the
 `x-dfo-caller` request header: `conversation:<digest>` from the harness
 (`conversation_caller`), and
-`ip:`, `key:` or `user:` from the website's edge. A request without the
+`ip:` from the website's edge: 32 hex digits of an HMAC digest of the
+client's address, never the address itself. `user:` names the account an API
+key belongs to in the same shape (`WEBSITE_CALLER`). A request without the
 header has no caller, and `current_caller` returns `None` for it. Nothing
 here generates an identity in its place.
 
@@ -59,10 +61,17 @@ TURN = re.compile(r"tr_[0-9a-f]{16}")
 # The form of a caller the website named by its client's address.
 ADDRESS_CALLER = re.compile(r"ip:[0-9a-f]{32}")
 
+# The forms of a caller the website may name: `ip:` for its client's address
+# (`ADDRESS_CALLER`) and `user:` for the account behind an API key, each 32
+# lowercase hex digits. dfo-apis accepts no other external form beside
+# `CALLER_PRINCIPAL_HEADER`, so `vouched_caller_headers` forwards a website
+# caller only when it matches.
+WEBSITE_CALLER = re.compile(r"(?:ip|user):[0-9a-f]{32}")
+
 # The form of the caller `conversation_caller` builds for a Studio conversation.
 CONVERSATION_CALLER = re.compile(r"conversation:[0-9a-f]{32}")
 
-# Sent beside `CALLER_PRINCIPAL_HEADER` for an `ADDRESS_CALLER`: the surface the
+# Sent beside `CALLER_PRINCIPAL_HEADER` for a `WEBSITE_CALLER`: the surface the
 # caller reached dfo-apis through. A `conversation:` caller sends none, since
 # dfo-apis reads Studio from the caller's prefix. Shared work sends its own
 # surface with no caller (`current_shared_surface`).
@@ -76,12 +85,12 @@ WEBSITE_SURFACE = "website"
 # `SURFACE_HEADER` (`dfo_platform.caller.DeliverySurface`).
 SHARED_SURFACES = frozenset({STUDIO_SURFACE, WEBSITE_SURFACE, MCP_SURFACE})
 
-# Sent beside `CALLER_PRINCIPAL_HEADER` for an `ADDRESS_CALLER`: the MCP client's
+# Sent beside `CALLER_PRINCIPAL_HEADER` for a `WEBSITE_CALLER`: the MCP client's
 # `User-Agent` (`current_user_agent`). Distinct from x-dfo-client, which carries a
 # dfo SDK client's label.
 USER_AGENT_HEADER = "x-dfo-user-agent"
 
-# Sent beside `USER_AGENT_HEADER` for an `ADDRESS_CALLER`: the name the MCP client
+# Sent beside `USER_AGENT_HEADER` for a `WEBSITE_CALLER`: the name the MCP client
 # gave in its `clientInfo` (`current_mcp_client`), such as `Anthropic/ClaudeAI` or
 # `claude-code`. Distinct from x-dfo-client, which dfo-apis parses as a dfo SDK
 # client's `<name>/<version>` label. A call carries it only when the client's
@@ -263,7 +272,7 @@ def current_surface() -> str | None:
 
     The shared surface inside shared work or on a caller-less harness request
     (`current_shared_surface`). Otherwise `STUDIO_SURFACE` for a
-    `CONVERSATION_CALLER`, `MCP_SURFACE` for an `ADDRESS_CALLER`, and `None` for
+    `CONVERSATION_CALLER`, `MCP_SURFACE` for a `WEBSITE_CALLER`, and `None` for
     any other caller or none.
     """
     caller = current_caller()
@@ -271,7 +280,7 @@ def current_surface() -> str | None:
         return current_shared_surface()
     if CONVERSATION_CALLER.fullmatch(caller):
         return STUDIO_SURFACE
-    if ADDRESS_CALLER.fullmatch(caller):
+    if WEBSITE_CALLER.fullmatch(caller):
         return MCP_SURFACE
     return None
 
@@ -283,14 +292,16 @@ def vouched_caller_headers(
 
     Sent when this process holds `principal`, the secret dfo-apis shares with
     its first-party callers, and the caller has a form dfo-apis accepts beside
-    it. For an `ADDRESS_CALLER`, an MCP client the website named by address:
+    it. For a `WEBSITE_CALLER`, an MCP client the website named by address
+    (`ip:`), or by the account behind its API key (`user:`):
     `CALLER_PRINCIPAL_HEADER`, `CALLER_HEADER`, `SURFACE_HEADER` as
     `MCP_SURFACE`, `USER_AGENT_HEADER` when `current_user_agent` finds one, and
     `MCP_CLIENT_HEADER` when `current_mcp_client` finds the client's name (or
     `invalid`), which only a call whose `clientInfo` reached the server carries.
-    dfo-apis counts that client's allowance. For a `CONVERSATION_CALLER` from the
-    harness: `CALLER_PRINCIPAL_HEADER` and `CALLER_HEADER`, and `TURN_HEADER`
-    when `current_turn` names the turn, with no surface, user agent or MCP client, since
+    dfo-apis counts that client's or account's allowance. For a
+    `CONVERSATION_CALLER` from the harness: `CALLER_PRINCIPAL_HEADER` and
+    `CALLER_HEADER`, and `TURN_HEADER` when `current_turn` names the turn,
+    with no surface, user agent or MCP client, since
     dfo-apis reads Studio from the caller's prefix and the User-Agent is the
     harness's own. For shared work (`current_shared_surface`):
     `CALLER_PRINCIPAL_HEADER` and `SURFACE_HEADER` as the shared surface, with
@@ -315,7 +326,7 @@ def vouched_caller_headers(
             return {}
         return {CALLER_PRINCIPAL_HEADER: principal, SURFACE_HEADER: surface}
     headers = {CALLER_PRINCIPAL_HEADER: principal, CALLER_HEADER: caller}
-    if ADDRESS_CALLER.fullmatch(caller):
+    if WEBSITE_CALLER.fullmatch(caller):
         headers[SURFACE_HEADER] = MCP_SURFACE
         if (user_agent := current_user_agent()) is not None:
             headers[USER_AGENT_HEADER] = user_agent

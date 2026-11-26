@@ -155,7 +155,11 @@ class SearchOperation(BaseModel):
     phrase: str = Field(
         min_length=1,
         max_length=_MAX_OPERATION_PHRASE_CHARS,
-        description="the user's wording for it, on one line, e.g. 'top 5 creditors'",
+        description=(
+            "the user's wording for it, on one line, e.g. 'top 5 creditors'. With "
+            "`share_of`, `variable` names the share's numerator measure alone, without "
+            "the share wording (e.g. 'bilateral ODA')"
+        ),
     )
     over: Literal["place", "origin", "destination", "category", "year"] | None = Field(
         default=None,
@@ -646,7 +650,9 @@ async def search(
     "Who are Kenya's top 5 creditors?" is `{"variable": "external debt",
     "entities": [{"text": "Kenya", "role": "debtor"}], "open_roles":
     ["creditor"], "operations": [{"verb": "rank",
-    "phrase": "top 5 creditors", "over": "origin"}]}`. A rank over place,
+    "phrase": "top 5 creditors", "over": "origin"}]}`. With `share_of`, `variable`
+    names the share's numerator measure alone, without the share wording (e.g.
+    'bilateral ODA'). A rank over place,
     category or year has no flow side. A worldwide country
     ranking is a rank `over` "place" with no entity. A donor or creditor
     ranking uses `origin`; a recipient or debtor ranking uses `destination`.

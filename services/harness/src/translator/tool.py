@@ -447,7 +447,8 @@ _PERMITTED_REPAIRS: Mapping[CompileIssueCode, str] = {
     ),
     CompileIssueCode.FAMILY_UNSUMMABLE: (
         "set the requirement's `stat_vars` to 'separate', or ask for a measure that names one "
-        "value on each axis the reason lists"
+        "value on each axis the reason lists; where it lists none, ask for a measure whose "
+        "source binds one StatVar"
     ),
     CompileIssueCode.SUM_UNITS_DIFFER: (
         "state the same unit on both sides' requirements, or on neither"

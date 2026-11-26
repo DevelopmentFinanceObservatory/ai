@@ -153,7 +153,7 @@ TOOL_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
     "get_skill": ("skill_id", "path", "offset", "digest"),
     "sources": ("ref",),
     "export_data": ("frame_ref", "format", "bundle"),
-    "resolve_definition": ("spec_id", "identity", "entity_groups", "scope_entries"),
+    "resolve_definition": ("spec_id", "identity", "entity_groups", "scope_entries", "whole"),
     "catalogue_counts": (),
 }
 
@@ -550,11 +550,16 @@ class ToolRefusal:
         detail: str | None,
         retry_after_s: float | None,
         service_failure: bool,
+        cause: str | None = None,
+        alternatives: Sequence[Mapping[str, str]] = (),
         trace_id: str | None = None,
         capability_version: str | None = None,
     ) -> Self:
         """An upstream call that failed. `service_failure` is true when the service
-        itself failed, and `fix.kind` then says so (`SERVICE_FAILURE`)."""
+        itself failed, and `fix.kind` then says so (`SERVICE_FAILURE`). `cause` and
+        `alternatives` are the refusal's own `cause.code` and `alternatives`
+        (`{ref, label}`), carried in `fix` where it states them, as a whole request's
+        refusal does."""
         message = (
             f"Upstream call failed ({upstream_code or 'unclassified'}): {detail}. "
             f"Retry after {retry_after_s:.1f}s."
@@ -565,7 +570,12 @@ class ToolRefusal:
         return cls(
             code=ToolErrorCode.UPSTREAM_ERROR,
             message=message,
-            fix={"detail": detail, **({"kind": SERVICE_FAILURE} if service_failure else {})},
+            fix={
+                "detail": detail,
+                **({"kind": SERVICE_FAILURE} if service_failure else {}),
+                **({"cause": cause} if cause else {}),
+                **({"alternatives": [dict(a) for a in alternatives]} if alternatives else {}),
+            },
             upstream_code=upstream_code,
             retry_after_s=retry_after_s,
             trace_id=trace_id,
@@ -1857,6 +1867,31 @@ def from_upstream_error(exc: UpstreamError, *, tool: str) -> ToolRefusal:
         detail=exc.detail,
         retry_after_s=retry_after_s,
         service_failure=service_failure,
+        cause=_refusal_cause(exc),
+        alternatives=_ref_alternatives(exc.extensions.get("alternatives")),
         trace_id=exc.trace_id,
         capability_version=exc.capability_version,
     )
+
+
+def _refusal_cause(exc: UpstreamError) -> str | None:
+    """The code of the `cause` extension (`{code, entities}`) of the refusal `exc`
+    carries, `None` where it states none. A failed operation's cause names the refusal
+    that failed it, which `refusal_code` already reads, so it is left out."""
+    raw = exc.extensions.get("cause")
+    code = raw.get("code") if isinstance(raw, Mapping) else None
+    if exc.code == _OPERATION_FAILED_CODE or not isinstance(code, str) or not code:
+        return None
+    return code
+
+
+def _ref_alternatives(raw: object) -> list[dict[str, str]]:
+    """A problem document's `alternatives` extension as `{ref, label}` pairs, each one
+    stating both as strings; the others are left out."""
+    pairs: list[dict[str, str]] = []
+    for item in raw if isinstance(raw, list) else ():
+        fields = dict(item) if isinstance(item, Mapping) else {}
+        ref, label = fields.get("ref"), fields.get("label")
+        if isinstance(ref, str) and isinstance(label, str):
+            pairs.append({"ref": ref, "label": label})
+    return pairs

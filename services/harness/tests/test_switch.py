@@ -998,7 +998,7 @@ async def test_a_switch_on_a_pin_an_earlier_plan_declared_a_whole_is_applied(
     )
     search = SearchStub(answer={scope["id"]: envelope})
     part = "spec_" + "4" * 32
-    whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="sector")
+    whole = AlignedPin(origin=part, option_ids=(), spec_id="", digest={}, whole_axis="provider")
 
     switched = await _switch(
         pg_engine,

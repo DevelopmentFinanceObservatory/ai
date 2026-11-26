@@ -42,9 +42,9 @@ class Settings(FrameServiceSettings):
     which computes nothing, so a stalled dfo-apis fails a read in seconds.
 
     `dfo_caller_principal` (`DFO_CALLER_PRINCIPAL`) is the secret dfo-apis shares
-    with the website. Every call carries it beside an `ip:<digest>` caller the
-    website named, or a harness `conversation:` caller
-    (`common.caller.vouched_caller_headers`). dfo-apis counts an `ip:` caller. A
+    with the website. Every call carries it beside an `ip:<digest>` or
+    `user:<digest>` caller the website named, or a harness `conversation:` caller
+    (`common.caller.vouched_caller_headers`). dfo-apis counts an `ip:` or `user:` caller. A
     `conversation:` caller is logged as Studio and counted against this service's
     address. Unset or blank, no caller is sent.
     """

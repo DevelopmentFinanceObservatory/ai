@@ -101,6 +101,7 @@ from planner.plan import (
     Unit,
     answering_results,
     authored_text,
+    compiled_source,
     copy_origins,
     covered,
     dataset_of,
@@ -136,6 +137,7 @@ from planner.records import (
 from planner.shapes import FrameShape, RoleDimension, TimeLabel, ValueKind
 from planner.workflow import ReadingSetBy, SelectedSource, Workflow, WorkflowStep
 
+from harness.scope_choices import PROVIDER_AXIS
 from harness.sentences import DECLINE_REASONS, PlanWords
 
 _REDUCTION_WORDS: dict[Reduction, str] = {
@@ -676,7 +678,7 @@ def _entity_whole_concept(
     sector: str | None,
     measure: str,
 ) -> str:
-    """What a declared whole leaving a donor or recipient axis open fetches,
+    """What a declared whole fetches,
     as the plan card names it (`_concept`), by `concept_name`'s order: the concept
     Search states for the whole's `source`, else for its part's `part`, else
     the `sector` option the whole was counted on, else the label Search
@@ -1016,6 +1018,24 @@ def _by_party(plan: Plan, decision: Decision) -> str | None:
     return f"by {_joined([*parties, *(['each place named'] if None in kept else [])])}"
 
 
+def _spliced(plan: Plan, decision: Decision) -> str | None:
+    """`StatVarReading.SUM` in words for a family the mint splices by years
+    (`SelectedSource.splices_components`), as `_reading_clause` words it: "spliced
+    into one series" where every source of a dataset requirement citing
+    `decision` splices its family; `None` otherwise, or where none cites it."""
+    if plan.workflow is None:
+        return None
+    cited = {r.id for r in _citing(plan, decision, DatasetRequirement)}
+    sources = [
+        plan.workflow.source_of(binding.step_id)
+        for binding in plan.workflow.evidence_bindings
+        if binding.requirement_id in cited
+    ]
+    if sources and all(s is not None and s.splices_components for s in sources):
+        return "spliced into one series"
+    return None
+
+
 def _by_breakdown(plan: Plan, decision: Decision) -> str | None:
     """`GroupBy.BREAKDOWN` in words: by the dimension every aggregate citing
     `decision` reads a breakdown of (`_breakdown_of`), as the step sentence
@@ -1062,7 +1082,7 @@ _PRICE_WORDS: Mapping[str, _Words] = {
 # case, as every option text the card shows is.
 FIXED_VALUE_WORDS: Mapping[str, Mapping[str, _Words]] = {
     "stat_vars": {
-        StatVarReading.SUM: _Words("summed into one series"),
+        StatVarReading.SUM: _Words("summed into one series", _spliced),
         StatVarReading.SEPARATE: _Words("one series per indicator"),
     },
     "reduction": {
@@ -1161,23 +1181,6 @@ def concept_name(
     return concept_label or sector or measure_label or measure
 
 
-# What a declared whole fetches, by the axis it opens (`WholeOf.axis`), with the
-# preposition that sets it after a measure.
-_WHOLE_NAMES = {
-    "sector": ("in", "all sectors"),
-    "donor": ("from", "all donors"),
-    "recipient": ("to", "all recipients"),
-}
-
-
-def whole_name(axis: str, *, measure: str | None = None) -> str:
-    """What a declared whole leaving `axis` open fetches ("all sectors", "all
-    donors"), on `measure` when given ("gross disbursements in all sectors",
-    "gross disbursements from all donors")."""
-    preposition, name = _WHOLE_NAMES[axis]
-    return f"{measure} {preposition} {name}" if measure else name
-
-
 def _concept(
     requirement: DatasetRequirement,
     plan: Plan,
@@ -1187,18 +1190,18 @@ def _concept(
     """What `requirement` fetches, in the reader's words, as `_concepts` names it
     (`concept_name`), read off the scope decisions it cites and its source.
 
-    A declared whole (`DatasetRequirement.whole_of`) is its part with the
-    part's axis opened, and ignores the planner's `measure`. Over every
-    sector it is named by that axis ("all sectors"). Over every donor or
-    recipient it is named off its own source and its part's
+    A declared whole (`DatasetRequirement.whole_of`) is its part with one
+    axis widened, and ignores the planner's `measure`. It is named off its
+    own source, Search's answer for the whole, and its part's
     (`_entity_whole_concept`), on the sector option the whole cites, else
     its part's, else by its part's `measure`; the parties it reads (`_who`,
-    `_parties`) name the population its source holds there. A plan not
-    compiled reads its source off `sources` (`_source`)."""
-    if requirement.whole_of is not None:
-        part = plan.requirement(requirement.whole_of.part)
-        if requirement.whole_of.axis == "sector" or not isinstance(part, DatasetRequirement):
-            return whole_name(requirement.whole_of.axis)
+    `_parties`) name the population its source holds there. A whole whose
+    part is no dataset requirement, which admission refuses
+    (`planner.plan.whole_of_fault`), is named as any requirement is, off its
+    own source, else by its own `measure`. A plan not compiled reads its
+    source off `sources` (`_source`)."""
+    part = plan.requirement(requirement.whole_of.part) if requirement.whole_of is not None else None
+    if isinstance(part, DatasetRequirement):
         sector = _governing(requirement, plan).get("sector") or _governing(part, plan).get("sector")
         return _entity_whole_concept(
             source=_source(requirement.id, plan, sources),
@@ -1336,20 +1339,52 @@ def _namings(
             _concept(dataset, plan, sources=sources),
             _who(dataset, plan, sources=sources),
             dataset.period,
-            _held_options(dataset, plan),
+            _held_options(dataset, plan, sources=sources),
         )
         for dataset in _datasets(plan).values()
     }
 
 
-def _held_options(requirement: DatasetRequirement, plan: Plan) -> tuple[str | None, ...]:
+def _held_options(
+    requirement: DatasetRequirement,
+    plan: Plan,
+    *,
+    sources: Mapping[str, SelectedSource] | None = None,
+) -> tuple[str | None, ...]:
     """The option `requirement` holds on each of `_NAMING_AXES`: the label the
-    scope decision it cites there chose, `None` where it cites none."""
+    scope decision it cites there chose, `None` where it cites none.
+
+    A whole over every provider cites no provider decision of its own, so on
+    the provider axis it holds the option its own source counts, and its part,
+    where it cites none, the option the part's source counts
+    (`SelectedSource.provider_counted`), so the card never names a provider
+    share as a share of itself. A plan not compiled reads its sources off
+    `sources`."""
     governing = _governing(requirement, plan)
-    return tuple(
+    held = [
         decision.chosen if (decision := governing.get(axis)) is not None else None
         for axis in _NAMING_AXES
-    )
+    ]
+    if held[0] is None:
+        held[0] = _provider_counted(requirement, plan, sources)
+    return tuple(held)
+
+
+def _provider_counted(
+    requirement: DatasetRequirement,
+    plan: Plan,
+    sources: Mapping[str, SelectedSource] | None,
+) -> str | None:
+    """The provider option `requirement`'s own source counts where it is a whole
+    over every provider or the part of one (`SelectedSource.provider_counted`);
+    `None` otherwise."""
+    for whole in _datasets(plan).values():
+        if whole.whole_of is None or whole.whole_of.axis != PROVIDER_AXIS:
+            continue
+        if requirement.id in (whole.id, whole.whole_of.part):
+            source = _source(requirement.id, plan, sources)
+            return source.provider_counted if source is not None else None
+    return None
 
 
 def _pinned_sources(
@@ -1509,7 +1544,7 @@ def _fetched(requirement: DatasetRequirement, plan: Plan, concepts: Mapping[str,
     name = concepts[requirement.id]
     if name != _concept(requirement, plan):
         return name
-    return f"{name} for {_parties(requirement, plan)}"
+    return f"{name}{_for(_parties(requirement, plan))}"
 
 
 def _card_filter_label(requirement: FilterRequirement, concept: str) -> str:
@@ -2537,7 +2572,7 @@ def _label_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     measure = requirement.measure
     if source is not None and source.measure_label is not None:
         measure = source.measure_label
-    return f"Fetch {measure} for {_parties(requirement, plan)}"
+    return f"Fetch {measure}{_for(_parties(requirement, plan))}"
 
 
 def _side_groups(source: SelectedSource | None) -> list[tuple[str, str]]:
@@ -2550,6 +2585,12 @@ def _side_groups(source: SelectedSource | None) -> list[tuple[str, str]]:
         for group in (source.groups if source is not None else ())
         if (side := flow_side(group.role)) is not None
     ]
+
+
+def _for(parties: str) -> str:
+    """The clause naming who a retrieval covers, `parties` after "for"; empty where
+    `parties` is, as for a whole that names no party (`entities_phrase`)."""
+    return f" for {parties}" if parties else ""
 
 
 def _parties(requirement: DatasetRequirement, plan: Plan, *, level: PlaceType | None = None) -> str:
@@ -2750,7 +2791,7 @@ def _sentence_dataset(requirement: DatasetRequirement, plan: Plan) -> str:
     period = f"{requirement.period.start}-{requirement.period.end}" + (
         _FOLLOWING if requirement.period_end_open else ""
     )
-    return ", ".join([f"Retrieves {requirement.measure} for {parties}", period, *clauses]) + "."
+    return ", ".join([f"Retrieves {requirement.measure}{_for(parties)}", period, *clauses]) + "."
 
 
 def _source(
@@ -2766,22 +2807,13 @@ def _source(
 
 
 def _selected_source(requirement_id: str, plan: Plan) -> SelectedSource | None:
-    """The source the compiled plan retrieves `requirement_id` from.
+    """The source the compiled plan retrieves `requirement_id` from, a whole's viewed
+    with its part's name facts (`planner.plan.compiled_source`).
 
     `None` before compile (`plan.workflow` unset) or when nothing was bound
     for this requirement.
     """
-    if plan.workflow is None:
-        return None
-    step_id = next(
-        (
-            binding.step_id
-            for binding in plan.workflow.evidence_bindings
-            if binding.requirement_id == requirement_id
-        ),
-        None,
-    )
-    return plan.workflow.source_of(step_id) if step_id is not None else None
+    return compiled_source(plan, requirement_id)
 
 
 def _population_count(requirement: DatasetRequirement, word: str, plan: Plan) -> int | None:
@@ -2814,7 +2846,9 @@ def _reading_clause(source: SelectedSource) -> str | None:
     on a role axis, so the retrieval can hold other members than it counts.
     Such a source, and one whose confirmed count `search` states as a floor
     or not at all, is counted by the family `served_count` counts, whatever
-    its years, as "summed over whichever of its 288 indicators hold data".
+    its years, as "summed over whichever of its 288 indicators hold data". A
+    family the mint splices by years (`splices_components`) is "spliced from"
+    its indicators.
     A family without that count, or counted at fewer than two members, is
     named without a count. Says when the reading is the compiler's default
     (`ReadingSetBy.RULE`), so the user knows the plan can be amended to read
@@ -2831,6 +2865,9 @@ def _reading_clause(source: SelectedSource) -> str | None:
     if source.stat_var_reading is StatVarReading.SEPARATE and count == 1 and not source.open_axes:
         return None
     summed = source.stat_var_reading is StatVarReading.SUM
+    # A spliced family's members serve disjoint years, so its one series is
+    # spliced from them (`SelectedSource.splices_components`).
+    collapsed = "spliced from" if source.splices_components else "summed over"
     retrieved = (
         source.stat_var_member_count
         if source.stat_var_member_count_exact is not False and not source.open_entity_axes
@@ -2838,18 +2875,18 @@ def _reading_clause(source: SelectedSource) -> str | None:
     )
     if retrieved is not None and retrieved > 1:
         clause = (
-            f"summed over its {retrieved:,} indicators"
+            f"{collapsed} its {retrieved:,} indicators"
             if summed
             else f"kept as {retrieved:,} separate indicators"
         )
     elif retrieved is None and (served := source.served_count or 0) > 1:
         clause = (
-            f"summed over whichever of its {served:,} indicators hold data"
+            f"{collapsed} whichever of its {served:,} indicators hold data"
             if summed
             else f"kept separate over whichever of its {served:,} indicators hold data"
         )
     else:
-        clause = "summed over its indicators" if summed else "kept as separate indicators"
+        clause = f"{collapsed} its indicators" if summed else "kept as separate indicators"
     return f"{clause} by default" if source.stat_var_reading_set_by is ReadingSetBy.RULE else clause
 
 
@@ -2986,11 +3023,14 @@ def _sentence_share_of(requirement: ShareOfRequirement, plan: Plan) -> str:
     level = kept_level(denominator, plan)
     parties = "; ".join(
         dict.fromkeys(
-            _parties(dataset, plan, level=level) for dataset in datasets_of(denominator, plan)
+            named
+            for dataset in datasets_of(denominator, plan)
+            if (named := _parties(dataset, plan, level=level))
         )
     )
     whole = f"each year's total of {divisor}" if per_year else divisor
-    return f"Share of {measure} {shape}, divided by {whole} ({parties})."
+    held = f" ({parties})" if parties else ""
+    return f"Share of {measure} {shape}, divided by {whole}{held}."
 
 
 def _sentence_quotient_of(requirement: QuotientRequirement, plan: Plan) -> str:

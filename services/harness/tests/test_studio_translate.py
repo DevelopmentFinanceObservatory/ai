@@ -107,10 +107,13 @@ from planner.plan import (
     DecisionFixes,
     PinSource,
     Plan,
+    RequirementSide,
     ResolvedBy,
     SessionState,
+    ShareOfRequirement,
     Unit,
     UnsupportedOperation,
+    WholeOf,
     plan_revision,
 )
 from planner.pydantic_agent import PlannerAnswers, PlannerResponse
@@ -2539,6 +2542,43 @@ async def test_a_refused_write_never_reaches_component_frames() -> None:
     assert not any(getattr(f, "event", None) == "component.created" for f in frames)
     activity = [f for f in frames if f.event == "activity.step"]
     assert activity and activity[0].status == StepStatus.FAILED
+
+
+async def test_a_checked_plan_listing_a_whole_first_is_named_by_its_part() -> None:
+    """An amendment can list a share's whole before its part. The whole states no
+    entities of its own (`whole_of`), so the checking line names the part's data."""
+    translator = _translator()
+    scripted = scripted_plan("kenya life expectancy", spec_id=None)
+    part = next(r for r in scripted.evidence_requirements if isinstance(r, DatasetRequirement))
+    whole = DatasetRequirement(
+        id="whole",
+        decision_ids=part.decision_ids,
+        measure="total life expectancy",
+        period=part.period,
+        whole_of=WholeOf(part=part.id, axis="provider"),
+    )
+    share = ShareOfRequirement(
+        id="share",
+        decision_ids=part.decision_ids,
+        numerator=RequirementSide(input_id=part.id),
+        denominator=RequirementSide(input_id=whole.id),
+    )
+    plan = Plan(
+        question="q", decisions=scripted.decisions, evidence_requirements=(whole, part, share)
+    )
+
+    await translated(translator, PlannerStarted(revising=False))
+    await translated(translator, _planner_call("propose_plan", question="q"))
+    checked = await translated(
+        translator,
+        _planner_answer(
+            "propose_plan",
+            {"outcome": "ok", "translation": {"outcome": "ok"}},
+            **{PLAN_STATE_KEY: plan.model_dump_json()},
+        ),
+    )
+
+    assert [f.detail for f in checked] == ["life expectancy at birth for Kenya and 1 more"]
 
 
 # --- the recorded action survives into the conversation digest ---------------
