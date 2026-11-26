@@ -32,12 +32,15 @@ routes (`create_studio_router`), the surface a browser uses.
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx2
 from analysis_mcp.server import mcp as analysis_mcp
+from common.live_apis import StatedScopeEntry, StatedScopeReading
 from compiler.surface import McpSurface, ToolCallResult, ToolSchema, ToolSurfaceUnavailableError
 from data_mcp.digest import render_answer
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
@@ -70,13 +73,13 @@ from harness.turn.loop import Graph
 from harness.turn.node import NodeCtx
 from harness.turn.store import TurnStore
 from harness.turn_budget import current_turn_budget
-from harness.wiring import build_stated_scope_reader, handing_back_planner_failures
+from harness.wiring import handing_back_planner_failures
 from orchestrator.agent import orchestrator_agent
 from orchestrator.model import orchestrator_model
 from planner.plan import Plan, SessionState, save_plan
 from planner.settings import AgentSettings
 from planner.specs import planner_specs
-from planner.stated_scope import StatedScopeReader
+from planner.stated_scope import StatedScopeReader, TextReading
 from planner.tool_spec import ToolSpec
 from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.tool import build_translate
@@ -435,6 +438,55 @@ class CannedDataSurface(ScriptedSurface):
         )
 
 
+# Search's answers to the stated-scope route for the texts the cases put to it.
+_STATED_SCOPE_READINGS = (
+    Path(__file__).resolve().parents[2]
+    / "services/harness/tests/fixtures/stated_scope_readings.json"
+)
+
+
+class CannedStatedScope:
+    """Search's reader of stated scope answering each text as dfo-apis' route did
+    (`stated_scope_readings.json`), recording each call's texts in `calls`. A text
+    with no recorded answer fails the call: a scripted run reads no live route, so it
+    holds whatever `DFO_APIS_URL` says."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self._readings: dict[str, Any] = json.loads(_STATED_SCOPE_READINGS.read_text())["readings"]
+
+    async def __call__(self, texts: Sequence[str]) -> list[TextReading]:
+        self.calls.append(list(texts))
+        missing = [text for text in texts if text not in self._readings]
+        if missing:
+            raise LookupError(f"no recorded stated-scope reading for {missing}")
+        return [TextReading.of(_reading(self._readings[text])) for text in texts]
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _reading(answer: Mapping[str, Any]) -> StatedScopeReading:
+    """The client's reading of one recorded route answer."""
+    return StatedScopeReading(
+        entries=tuple(
+            StatedScopeEntry(
+                axis=entry["axis"], option_id=entry["option_id"], words=entry["origin"]["text"]
+            )
+            for entry in answer["entries"]
+        ),
+        total=answer["total"],
+        sums_providers=answer["sums_providers"],
+        mentions=tuple(answer["mentions"]),
+    )
+
+
+def build_stated_scope_reader(settings: Settings) -> CannedStatedScope | None:
+    """The canned reader, or `None` where `planner_stated_scope` is off, as
+    `harness.wiring.build_stated_scope_reader` answers for the live route."""
+    return CannedStatedScope() if settings.planner_stated_scope else None
+
+
 _REAL_SCHEMAS: list[ToolSchema] = []
 
 
@@ -487,7 +539,6 @@ def build_studio(scenario: Mapping[str, Any], *, log: Log, engine: AsyncEngine) 
         planner_model_name=AgentSettings().planner_model_name,
     )
     set_studio_surface(model_surface)
-    # Closed with the app by `orchestrator_client` (`app.state.stated_scope`).
     stated_scope = build_stated_scope_reader(settings)
     orchestrator_genai = scripted_client(
         OrchestratorScript(
@@ -594,4 +645,4 @@ async def orchestrator_client(
                 await app.state.stated_scope.aclose()
 
 
-__all__ = ["Log", "build_studio", "orchestrator_client", "search_envelope"]
+__all__ = ["CannedStatedScope", "Log", "build_studio", "orchestrator_client", "search_envelope"]
