@@ -37,7 +37,7 @@ from typing import Literal
 from planner.settings import AgentSettings
 
 from harness.prefix_cache import PrefixCache
-from harness.settings import Settings
+from harness.settings import Settings, studio_history
 
 # The instruction sets the orchestrator and the planner can run with:
 # `flash`, the instructions written for `gemini-3.8-flash`, and `hydrogen`,
@@ -221,12 +221,14 @@ def surface_fingerprint(
     surface: Surface, *, instruction: str | None, declarations: str
 ) -> dict[str, str]:
     """The span attributes naming the model surface one model call was sent:
-    the surface's instruction set and tool descriptions, and the first 12 hex
-    digits of the sha256 of the system `instruction` (empty when none) and of
-    the `declarations` as JSON."""
+    the surface's instruction set and tool descriptions, how a follow-up turn
+    reads the earlier turns (`STUDIO_HISTORY`), and the first 12 hex digits of
+    the sha256 of the system `instruction` (empty when none) and of the
+    `declarations` as JSON."""
     return {
         "studio.surface.prompt_variant": surface.variant,
         "studio.surface.tool_desc": surface.tool_descriptions,
+        "studio.surface.history": studio_history(),
         "studio.surface.instruction_hash": _short_sha(instruction or ""),
         "studio.surface.declarations_hash": _short_sha(declarations),
     }

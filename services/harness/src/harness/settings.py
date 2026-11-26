@@ -45,6 +45,36 @@ DEFAULT_ORCHESTRATOR_THINKING_LEVEL: ThinkingLevelName = "LOW"
 # `gemini-4-hydrogen`, which is more than one constrained JSON patch needs.
 DEFAULT_EDIT_THINKING_LEVEL: ThinkingLevelName = "LOW"
 
+# How a follow-up turn's orchestrator reads the earlier turns
+# (`STUDIO_HISTORY`): `digest`, the conversation digest rendered afresh in each
+# turn's opening, or `full`, the previous turn's orchestrator messages carried
+# whole, so the follow-up's first request extends the previous turn's last one
+# (`harness.studio_state.ConversationState.carried_opening`).
+type StudioHistory = Literal["digest", "full"]
+DEFAULT_STUDIO_HISTORY: StudioHistory = "digest"
+
+
+class HistorySettings(BaseServiceSettings):
+    """`STUDIO_HISTORY`, read case-insensitively; blank means the default and
+    any other value is refused. A settings class of its own, so the model
+    wrapper reads it on each call without the service settings' checks."""
+
+    studio_history: StudioHistory = DEFAULT_STUDIO_HISTORY
+
+    @field_validator("studio_history", mode="before")
+    @classmethod
+    def _normalise(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower() or DEFAULT_STUDIO_HISTORY
+        return value
+
+
+def studio_history() -> StudioHistory:
+    """How a follow-up turn's orchestrator reads the earlier turns, as
+    `STUDIO_HISTORY` names it."""
+    return HistorySettings().studio_history
+
+
 # How long after its deadline `harness.live_refresh` cancels a refresh, and how
 # long the website waits for one. A refresh answers by its deadline plus the
 # grace, so the largest deadline accepted is the caller's timeout less the grace.

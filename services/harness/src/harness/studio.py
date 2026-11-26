@@ -100,7 +100,7 @@ from harness.graph.state import (
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import ApprovedRun, StudioRunLedger
 from harness.seeds import seeds_slot
-from harness.settings import Settings
+from harness.settings import Settings, studio_history
 from harness.studio_edit import (
     CardSwap,
     EditClosed,
@@ -709,11 +709,17 @@ def _turn_opening(
         # One reference, the reserved shape: `graph.seed` reports it unused.
         seeds = body.seed_spec.model_dump(mode="json")
     text = body.message if chip_label is None else f"Count {chip_label}."
+    # Under `STUDIO_HISTORY=full` the orchestrator opens on the previous
+    # turn's conversation where it carried one, with the digest's tail; the
+    # planner reads the whole digest either way.
+    carried = conversation.carried_opening() if studio_history() == "full" else None
     inputs = TurnInput(
         message=text,
         canvas_digest=json.dumps(digest) if digest else None,
         conversation_digest=json.dumps(history) if history else None,
         seeds=seeds,
+        carried_history=carried[0] if carried is not None else None,
+        conversation_tail=json.dumps(carried[1]) if carried is not None else None,
     )
     state: dict[str, Any] = {"surface": body.surface.value}
     # The orchestrator's planner renders the earlier turns' readings;

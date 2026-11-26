@@ -126,6 +126,7 @@ from harness.graph.state import (
     ASK_FOR_QUESTION_KEY,
     NEW_QUESTION_KEY,
     ORCHESTRATOR_APPLIED_KEY,
+    ORCHESTRATOR_CARRIED_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
     ORCHESTRATOR_SEARCHES_KEY,
     ORCHESTRATOR_SPECS_KEY,
@@ -189,6 +190,7 @@ _KEY_AUTO_ADD = "auto_add"
 _KEY_CLIENT_FEATURES = "client_features"
 _KEY_TIMED_OUT_CALLS = "timed_out_calls"
 _KEY_LICENCE = "licence"
+_KEY_CARRIED_HISTORY = "carried_history"
 _KEY_TURN_USER_MESSAGE = "turn_user_message"
 _KEY_TURN_USER_WORDS = "turn_user_words"
 _KEY_TURN_FINAL_TEXT = "turn_final_text"
@@ -212,6 +214,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_CLIENT_FEATURES,
         _KEY_TIMED_OUT_CALLS,
         _KEY_LICENCE,
+        _KEY_CARRIED_HISTORY,
         _KEY_TURN_USER_MESSAGE,
         _KEY_TURN_USER_WORDS,
         _KEY_TURN_FINAL_TEXT,
@@ -237,8 +240,9 @@ _APPROVAL_ITEM_PREFIX = "approval:"
 
 # Identity, the process-local runtime objects, and the turn's spec blocks
 # (`turn_specs`, held by the open turn's `turn_specs` rows,
-# `harness.turn.store.TurnStore.specs`), which `_serialize_durable` and
-# `_apply_delta` skip.
+# `harness.turn.store.TurnStore.specs`), and the open turn's carried
+# conversation (`turn_carried`, held by its cursor's state), which
+# `_serialize_durable` and `_apply_delta` skip.
 _PROCESS_LOCAL_FIELDS = frozenset(
     {
         "conversation_id",
@@ -246,6 +250,7 @@ _PROCESS_LOCAL_FIELDS = frozenset(
         "renew_now",
         "_removal_unreported",
         "turn_specs",
+        "turn_carried",
     }
 )
 
@@ -655,6 +660,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_CLIENT_FEATURES: sorted(state.client_features),
         _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
         _KEY_LICENCE: state.licence,
+        _KEY_CARRIED_HISTORY: state.carried_history,
         _KEY_TURN_USER_MESSAGE: state.turn_user_message,
         _KEY_TURN_USER_WORDS: state.turn_user_words,
         _KEY_TURN_FINAL_TEXT: state.turn_final_text,
@@ -721,6 +727,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.timed_out_calls = set(value)
         elif key == _KEY_LICENCE:
             state.licence = dict(value) if value else None
+        elif key == _KEY_CARRIED_HISTORY:
+            state.carried_history = dict(value) if value else None
         elif key == _KEY_TURN_USER_MESSAGE:
             state.turn_user_message = value
         elif key == _KEY_TURN_USER_WORDS:
@@ -1602,7 +1610,9 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
     `state`, a turn's state, holds, for `ConversationState.close_turn` to
     store with the turn, whether the read of the turn's own words asked about
     projections (`ConversationState.turn_projection_asked`), and the
-    conversation's licence that read left (`ConversationState.licence`). Each key holds the
+    conversation's licence that read left (`ConversationState.licence`), and
+    under `STUDIO_HISTORY=full` the orchestrator's conversation as the turn's
+    reply left it (`ConversationState.turn_carried`). Each key holds the
     whole value, so the latest write replaces. The blocks stay in process
     (`turn_specs`) until the turn closes."""
     if LICENCE_STATE_KEY in state:
@@ -1620,6 +1630,8 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
         conversation.turn_specs = dict(state[ORCHESTRATOR_SPECS_KEY] or {})
     if ORCHESTRATOR_APPLIED_KEY in state:
         conversation.turn_applied_choice = dict(state[ORCHESTRATOR_APPLIED_KEY] or {})
+    if ORCHESTRATOR_CARRIED_KEY in state:
+        conversation.turn_carried = dict(state[ORCHESTRATOR_CARRIED_KEY])
 
 
 def set_aside_question(cursor: Cursor) -> str | None:

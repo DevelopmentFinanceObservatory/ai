@@ -514,10 +514,15 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:12]
 
 
+@pytest.mark.parametrize("history", [None, "digest", " FULL "])
 @pytest.mark.parametrize("surface", [FLASH_SURFACE, HYDROGEN_SURFACE])
 async def test_each_model_call_s_span_names_the_surface_it_was_sent(
-    surface, exported_spans: InMemorySpanExporter
+    surface, history, exported_spans: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if history is None:
+        monkeypatch.delenv("STUDIO_HISTORY", raising=False)
+    else:
+        monkeypatch.setenv("STUDIO_HISTORY", history)
     set_studio_surface(surface)
     with trace.get_tracer(__name__).start_as_current_span("chat"):
         request = await _orchestrator_request(surface)
@@ -533,6 +538,7 @@ async def test_each_model_call_s_span_names_the_surface_it_was_sent(
     assert {k: v for k, v in attributes.items() if k.startswith("studio.surface.")} == {
         "studio.surface.prompt_variant": surface.variant,
         "studio.surface.tool_desc": surface.tool_descriptions,
+        "studio.surface.history": "full" if history == " FULL " else "digest",
         "studio.surface.instruction_hash": _sha(str(config.system_instruction)),
         "studio.surface.declarations_hash": _sha(json.dumps(sent, ensure_ascii=False)),
     }

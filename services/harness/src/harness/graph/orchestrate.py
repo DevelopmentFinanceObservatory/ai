@@ -32,11 +32,13 @@ from orchestrator.run import (
 )
 from planner.plan import SessionState
 from pydantic import BaseModel, Field, model_validator
+from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import Model
 
 from harness.gemini_agent import RecordingState
 from harness.graph.events import AgentStatus, GraphEvent
 from harness.graph.state import (
+    ORCHESTRATOR_CARRIED_KEY,
     ORCHESTRATOR_GIVEN_BACK_ASKS_KEY,
     ORCHESTRATOR_HISTORY_KEY,
     ORCHESTRATOR_PENDING_KEY,
@@ -62,6 +64,7 @@ from harness.graph.state import (
     unit_asks,
 )
 from harness.scope_choices import mark_planner_axes
+from harness.settings import studio_history
 from harness.tool_contracts import resolver_digest
 from harness.turn.node import Next, Node, NodeCtx, Pause, TurnKey
 from harness.turn_records import SearchReading
@@ -131,7 +134,10 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
         the date and the digests (`TurnInput`), with a seed hand-back after
         the message; a later run resumes the conversation the last one
         handed off with (`ORCHESTRATOR_HISTORY_KEY`), its waiting call
-        answered by the hand-back. The run's first `ToolsAnswered` carries
+        answered by the hand-back. Under `STUDIO_HISTORY=full` a turn may
+        open on the previous turn's conversation (`TurnInput.carried_history`),
+        and a run that closes on its reply stores its own
+        (`ORCHESTRATOR_CARRIED_KEY`). The run's first `ToolsAnswered` carries
         that answer, so the node emits nothing else for it. Every event of
         the run is emitted as it comes.
 
@@ -158,12 +164,20 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
         resumed: HandBack | None = None
         if hand_back is None or hand_back.answers is None:
             inputs = TurnInput.model_validate(ctx.inputs)
+            carried = (
+                StoredHistory.model_validate_json(inputs.carried_history)
+                if inputs.carried_history is not None
+                else None
+            )
             opening = Opening(
                 question=inputs.message,
                 today=datetime.now(UTC).date(),
                 canvas_digest=inputs.canvas_digest,
-                conversation_digest=inputs.conversation_digest,
+                conversation_digest=(
+                    inputs.conversation_tail if carried is not None else inputs.conversation_digest
+                ),
                 seeded=hand_back.text if hand_back is not None else None,
+                carried=carried,
             )
         else:
             stored = ctx.state.pop(ORCHESTRATOR_HISTORY_KEY, None)
@@ -189,11 +203,26 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
             if isinstance(event, HandedOff):
                 return _handed_off(ctx, event)
             if isinstance(event, Answered):
+                if event.history is not None and studio_history() == "full":
+                    ctx.state[ORCHESTRATOR_CARRIED_KEY] = carried_record(event.history)
                 return Next("answered")
             ctx.emit(event)
         raise RuntimeError("the orchestrator's run ended without its reply or a hand-off")
 
     return Node(run=orchestrate)
+
+
+def carried_record(history: StoredHistory) -> dict[str, Any]:
+    """`history` as `ORCHESTRATOR_CARRIED_KEY` keeps it: the `StoredHistory`
+    JSON text, and the input and output tokens its final call reported, which
+    the next turn holds to `harness.studio_state.CARRIED_HISTORY_TOKEN_CAP`."""
+    final = history.conversation.messages[-1] if history.conversation.messages else None
+    tokens = (
+        final.usage.input_tokens + final.usage.output_tokens
+        if isinstance(final, ModelResponse)
+        else 0
+    )
+    return {"history": history.model_dump_json(), "tokens": tokens}
 
 
 def _handed_off(ctx: NodeCtx[GraphEvent], handed: HandedOff) -> Next:

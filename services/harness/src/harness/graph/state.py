@@ -119,6 +119,14 @@ ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
 # `orchestrator.run.StoredHistory` JSON, written and taken by the
 # `orchestrate` node.
 ORCHESTRATOR_HISTORY_KEY = "orchestrator:history"
+# Under `STUDIO_HISTORY=full`, the orchestrator's conversation once its run
+# closed on the turn's reply, `{"history", "tokens"}`: the
+# `orchestrator.run.StoredHistory` JSON as text, so a JSONB column cannot
+# reorder its keys, and the tokens its final call reported
+# (`harness.graph.orchestrate.carried_record`). Written by the `orchestrate`
+# node and kept with the conversation for the next turn's opening
+# (`harness.studio_store.keep_turn_records`).
+ORCHESTRATOR_CARRIED_KEY = "orchestrator:carried"
 # spec_id -> the refusal message of a fetch or a plan step that read it and
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.
@@ -199,12 +207,21 @@ class TurnInput(BaseModel):
     Studio" action handed over (each seed as `harness.seeds.seeds_slot`
     keeps it, or the one reference `harness.wire.TurnRequest.seed_spec` also
     takes). The rest of what a turn opens with, which the orchestrator's
-    tools also read, is opening state (`turn_budgets`)."""
+    tools also read, is opening state (`turn_budgets`).
+
+    Under `STUDIO_HISTORY=full`, a turn that extends the previous turn's
+    conversation holds it as `carried_history` (`orchestrator.run.StoredHistory`
+    JSON text) and the conversation digest's tail without its `turns` as
+    `conversation_tail`, which the orchestrator reads in place of
+    `conversation_digest`; the planner still reads the digest. Both are absent
+    from the dumped inputs when unset."""
 
     message: str
     canvas_digest: str | None = None
     conversation_digest: str | None = None
     seeds: list[Any] | dict[str, Any] | None = None
+    carried_history: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    conversation_tail: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class AskOption(BaseModel):

@@ -207,6 +207,10 @@ CONVERSATION_DIGEST_MAX_BYTES = 5_000
 # What a newest turn's ask and answer are cut to once the newest turn alone
 # is over the digest's cap, halved each further try.
 _HISTORY_NEWEST_TEXT_CAP = CONVERSATION_DIGEST_MAX_BYTES // 2
+# Under `STUDIO_HISTORY=full`, the most tokens a carried conversation may hold,
+# counted as the input and output tokens its final call reported. Past it the
+# next turn opens a fresh chain from the digest (`carried_opening`).
+CARRIED_HISTORY_TOKEN_CAP = 60_000
 type RecallPart = Literal["plan", "readings", "canvas"]
 # What `recall_part` renders of a turn's plan records, or of its readings, in
 # characters, which a turn's plans share. `_RECALL_ID_CAP` is the most component
@@ -657,6 +661,14 @@ class ConversationState:
     # `harness.studio_store.keep_turn_records` keeps it back here. No model
     # reads it.
     licence: dict[str, Any] | None = None
+    # Under `STUDIO_HISTORY=full`, the orchestrator's conversation as the
+    # latest closed turn's reply left it: `{"turn", "history", "tokens"}`,
+    # where `turn` is the turn's number, `history` the
+    # `orchestrator.run.StoredHistory` JSON text and `tokens` the input and
+    # output tokens its final call reported. `close_turn` sets it from
+    # `turn_carried`, or to None when the turn closed with no conversation to
+    # carry or on an error, which breaks the chain (`carried_opening`).
+    carried_history: dict[str, Any] | None = None
     # The current turn's record-in-progress; reset by begin_turn.
     # `turn_user_message` is the history record's text: the message, each
     # amendment and answer, and each switch on a plan card (`add_to_turn`).
@@ -699,6 +711,11 @@ class ConversationState:
     # `approved`, and the state read hands them to a page that never read
     # the frame.
     turn_approved: list[dict[str, Any]] = field(default_factory=list)
+    # The turn's orchestrator conversation once its run closed on the reply,
+    # `{"history", "tokens"}` (`harness.graph.state.ORCHESTRATOR_CARRIED_KEY`),
+    # set by `harness.studio_store.keep_turn_records`; None until then. Not
+    # durable: every close path keeps the cursor's records first.
+    turn_carried: dict[str, Any] | None = None
     turn_recorded: bool = False
     # Who asked the current turn and the specs it used; set by `begin_turn`.
     turn_usage: TurnUsage = field(default_factory=TurnUsage)
@@ -919,6 +936,41 @@ class ConversationState:
             shrink += 1
             window[-1] = _history_turn(newest[-1], shrink=shrink)
         return digest(window)
+
+    def carried_opening(self) -> tuple[str, dict[str, Any]] | None:
+        """Under `STUDIO_HISTORY=full`, what the next turn's orchestrator opens
+        from: the previous turn's conversation as `StoredHistory` JSON text and
+        the conversation digest's tail, its `total_turns` without the `turns`
+        list. None opens a fresh chain from the whole digest, logged with its
+        reason: the previous turn closed with no conversation to carry
+        (an error, a Stop, a pause left unanswered, an Edit Card turn, a reply
+        the harness wrote), or the carried conversation's final call reported
+        more than `CARRIED_HISTORY_TOKEN_CAP` tokens."""
+        if not self.turns:
+            return None
+        carried = self.carried_history
+        reason: str | None = None
+        if carried is None or carried.get("turn") != len(self.turns):
+            reason = "previous_turn_carried_none"
+        elif int(carried.get("tokens") or 0) > CARRIED_HISTORY_TOKEN_CAP:
+            reason = "token_cap"
+        if reason is not None:
+            logger.info(
+                "studio history: chain reset conversation_id=%s turn=%d reason=%s tokens=%s",
+                self.conversation_id,
+                len(self.turns) + 1,
+                reason,
+                carried.get("tokens") if carried is not None else None,
+            )
+            return None
+        assert carried is not None
+        logger.info(
+            "studio history: chain extended conversation_id=%s turn=%d tokens=%s",
+            self.conversation_id,
+            len(self.turns) + 1,
+            carried.get("tokens"),
+        )
+        return str(carried["history"]), {"total_turns": len(self.turns)}
 
     def canvas_series_ids(self) -> list[str]:
         """The id of every series the cards on the canvas draw, in canvas
@@ -1153,6 +1205,11 @@ class ConversationState:
         record["trace_id"] = self.trace_id
         record["usage"] = dataclasses.asdict(self.turn_usage)
         self.turns.append(record)
+        self.carried_history = (
+            {"turn": len(self.turns), **self.turn_carried}
+            if self.turn_carried is not None and not error
+            else None
+        )
         # Only once a record is appended, the minimal one included.
         self.turn_recorded = True
         if error:
@@ -1433,6 +1490,7 @@ class ConversationState:
         self.turn_specs = {}
         self.turn_applied_choice = None
         self.turn_approved = []
+        self.turn_carried = None
         self.turn_recorded = False
         self.turn_usage = usage if usage is not None else TurnUsage()
         self.turn_usage.trace_id = self.trace_id
