@@ -19,23 +19,30 @@ whole turns over the routes and read the requests, the spans and the
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from common.logging import JSON_FIELDS
 from harness.conversation import current_history
-from harness.graph.orchestrate import carried_record
-from harness.graph.state import CarriedRef
+from harness.graph.orchestrate import _carried_opening, carried_record
+from harness.graph.state import ORCHESTRATOR_CHAIN_RESET_KEY, CarriedRef
 from harness.settings import HistorySettings
 from harness.studio_state import (
     CARRIED_HISTORY_TOKEN_CAP,
+    SEGMENT_TTL_S,
     ConversationState,
     TurnUsage,
     history_arm,
+    make_carried_history,
 )
+from harness.studio_store import Renewal, SegmentClose, StudioStore
+from harness.turn.node import TurnKey
+from harness.turn.store import TurnStatus
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from orchestrator.run import StoredHistory
 from pydantic import ValidationError
@@ -53,6 +60,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .scripted_genai import Reply, Request, call_part, text_part, thought_part, usage_metadata
 from .scripted_tools import CannedSearch, definite_envelope
+from .store_clock import StoreClock
 from .studio_routes import (
     CLIENT_FEATURES,
     CONVERSATION,
@@ -308,6 +316,97 @@ async def test_a_follow_up_whose_carried_conversation_changed_since_its_claim_op
 
 
 @pytest.mark.usefixtures("full_history")
+async def test_a_follow_up_that_pauses_as_it_opens_logs_the_chain_reset_its_orchestrator_met(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A follow-up whose orchestrator finds the carried conversation changed
+    since the claim, and asks the user at once, writes its paused line with
+    the reset, `unloadable`, where the claim's check said `extended`."""
+    asking = call_part(
+        "ask_user",
+        {"questions": [{"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]},
+    )
+    app, _ = orchestrator_app(
+        *_TURN_1, asking, resolver=CannedSearch(definite_envelope()), engine=pg_engine
+    )
+    await _turns(app, "Life expectancy in Kenya?")
+
+    class _Changed(CarriedRef):
+        @classmethod
+        def of(cls, *, turn: int, history: str) -> CarriedRef:
+            return CarriedRef(turn=turn, sha256=hashlib.sha256(b"another").hexdigest())
+
+    monkeypatch.setattr("harness.studio.CarriedRef", _Changed)
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        async with studio_client(app) as client:
+            paused = await stream(client, "/api/studio/turn", turn_body("And Uganda?"))
+
+    assert paused[-1]["event"] == "elicitation.request"
+    (line,) = [
+        fields
+        for record in caplog.records
+        if isinstance(fields := getattr(record, JSON_FIELDS, None), dict)
+        and fields.get("event") == "studio.turn"
+    ]
+    assert (line["status"], line["history_chain"], line["carried_tokens"]) == (
+        "paused",
+        "reset:unloadable",
+        None,
+    )
+
+
+@pytest.mark.usefixtures("full_history")
+@pytest.mark.parametrize("cut", ["acknowledgement-lost", "lease-lost"])
+async def test_a_turn_cut_after_its_done_write_committed_still_carries_its_conversation(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, cut: str
+) -> None:
+    """The write that ends turn 1 `done` commits, and then its
+    acknowledgement is lost (`_after_failed_write` reads the turn back) or
+    a lost lease cuts the segment (`_settle` reads it back). Either read back
+    hands on the turn's conversation, and turn 2 extends it."""
+    app, model = orchestrator_app(
+        *_TURN_1,
+        _UGANDA,
+        resolver=CannedSearch(definite_envelope()),
+        engine=pg_engine,
+        heartbeat_seconds=0.05,
+    )
+    turns, store = app.state.studio.turns, app.state.studio.store
+    real_finish = turns.finish
+    cuts: list[str] = []
+
+    async def finish_then_cut(cursor: Any, **kwargs: Any) -> Any:
+        finished = await real_finish(cursor, **kwargs)
+        if kwargs.get("status") is TurnStatus.DONE and not cuts:
+            cuts.append(cut)
+            if cut == "acknowledgement-lost":
+                raise ConnectionResetError("the COMMIT's acknowledgement was lost")
+            # The next renewal finds the lease lost, which cuts the segment
+            # here.
+            real_renew = store.renew
+
+            async def lost(*args: Any, **kwargs: Any) -> Renewal:
+                store.renew = real_renew
+                return Renewal(held=False, stop_id=None)
+
+            store.renew = lost
+            await asyncio.sleep(5)
+            pytest.fail("the lost lease did not cut the segment")
+        return finished
+
+    turns.finish = finish_then_cut
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        await _turns(app, "Life expectancy in Kenya?", "And Uganda?")
+
+    assert cuts == [cut]
+    _assert_extends(model.requests[-1], model.requests[1])
+    assert [(line["turn"], line["history_chain"]) for line in _turn_lines(caplog)] == [
+        (1, "fresh"),
+        (2, "extended"),
+    ]
+
+
+@pytest.mark.usefixtures("full_history")
 async def test_the_follow_up_extends_the_turn_another_process_stored(
     pg_engine: AsyncEngine,
 ) -> None:
@@ -320,6 +419,40 @@ async def test_the_follow_up_extends_the_turn_another_process_stored(
     await _turns(reloaded, "And Uganda?")
 
     _assert_extends(model_after.requests[0], model.requests[-1])
+
+
+@pytest.mark.usefixtures("full_history")
+async def test_a_follow_up_to_a_turn_whose_closing_write_failed_resets_as_close_failed(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Turn 1 answers, and the write that would store its record and its
+    carry fails. Once its lease lapses, turn 2's claim records turn 1
+    `state_not_saved`, and turn 2 opens from the digest, its chain reset
+    `close_failed`."""
+    clock = await StoreClock.start(pg_engine)
+    store = StudioStore(pg_engine, **clock.store_kwargs)
+    app, model = orchestrator_app(
+        *_TURN_1, _UGANDA, resolver=CannedSearch(definite_envelope()), store=store
+    )
+    closing = store.close_segment
+
+    async def close_failed(*args: Any, **kwargs: Any) -> SegmentClose:
+        return SegmentClose.FAILED
+
+    store.close_segment = close_failed  # type: ignore[method-assign]
+    await _turns(app, "Life expectancy in Kenya?")
+    store.close_segment = closing  # type: ignore[method-assign]
+    await clock.advance(SEGMENT_TTL_S + 1)
+
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        await _turns(app, "And Uganda?")
+
+    request = model.requests[-1]
+    assert len(_contents(request)) == 2
+    assert '"turns": [' in _opening_texts(request, 2)[0]
+    assert [
+        (line["turn"], line["error"], line["history_chain"]) for line in _turn_lines(caplog)
+    ] == [(1, "state_not_saved", "fresh"), (2, None, "reset:close_failed")]
 
 
 @pytest.mark.usefixtures("full_history")
@@ -718,6 +851,41 @@ async def test_a_paused_full_turn_resumed_after_a_rollback_keeps_its_arm(
     ]
 
 
+@pytest.mark.parametrize(
+    ("stored", "reason"),
+    [
+        # The instance holds no state for the conversation.
+        pytest.param(None, "not_in_process", id="not-in-process"),
+        # It holds the conversation, which stores no carried conversation.
+        pytest.param({}, "unloadable", id="none-stored"),
+    ],
+)
+def test_an_orchestrator_that_cannot_read_the_named_conversation_records_why(
+    stored: dict[str, Any] | None, reason: str
+) -> None:
+    key = TurnKey(principal=_PRINCIPAL, conversation_id=_FULL_ID, turn_index=2)
+    ctx = SimpleNamespace(key=key, state={})
+    ref = CarriedRef.of(turn=1, history="{}")
+
+    opened = _carried_opening(ctx, ref, lambda _key: stored)  # type: ignore[arg-type]
+
+    assert opened is None
+    assert ctx.state == {ORCHESTRATOR_CHAIN_RESET_KEY: reason}
+
+
+async def test_the_carried_source_tells_a_conversation_out_of_process_from_one_storing_none(
+    pg_engine: AsyncEngine,
+) -> None:
+    store = StudioStore(pg_engine)
+    source = make_carried_history(store)
+    key = TurnKey(principal=_PRINCIPAL, conversation_id=_FULL_ID, turn_index=1)
+    assert source(key) is None
+
+    await store.create(_PRINCIPAL, _FULL_ID)
+
+    assert source(key) == {}
+
+
 def _response(input_tokens: int, output_tokens: int) -> ModelResponse:
     return ModelResponse(
         parts=[TextPart("x")],
@@ -845,6 +1013,46 @@ async def test_a_turn_resumed_on_an_instance_that_carried_an_earlier_turn_carrie
         (2, "digest", None),
         (3, "full", "reset:previous_turn_carried_none"),
     ]
+
+
+async def test_the_turn_after_a_full_turn_resumed_on_another_instance_extends_its_last_request(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Turn 2 runs on instance A under `full`, pauses on a question, and is
+    answered on instance B, whose run closes on the reply. Turn 3 on A
+    opens on the conversation B's run carried: its first request extends
+    B's last byte for byte."""
+    asking = call_part(
+        "ask_user",
+        {"questions": [{"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]},
+    )
+    full = HistorySettings(studio_history="full")
+    first, first_model = orchestrator_app(
+        *_TURN_1,
+        asking,
+        text_part("Both rose."),
+        resolver=CannedSearch(definite_envelope()),
+        engine=pg_engine,
+        history=full,
+    )
+    second, second_model = orchestrator_app(_UGANDA, engine=pg_engine, history=full)
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        await _turns(first, "Life expectancy in Kenya?", conversation_id=_FULL_ID)
+        async with studio_client(first) as client:
+            paused = await stream(
+                client, "/api/studio/turn", turn_body("And Uganda?", conversation_id=_FULL_ID)
+            )
+        assert paused[-1]["event"] == "elicitation.request"
+        async with studio_client(second) as client:
+            frames = await stream(client, "/api/studio/interrupt", _answer(paused, _FULL_ID))
+        assert frames[-1]["event"] == "done"
+        await _turns(first, "Compare them", conversation_id=_FULL_ID)
+
+    (resumed,) = second_model.requests
+    _assert_extends(first_model.requests[-1], resumed)
+    assert [
+        (line["turn"], line["history"], line["history_chain"]) for line in _turn_lines(caplog)
+    ] == [(1, "full", "fresh"), (2, "full", "extended"), (3, "full", "extended")]
 
 
 @pytest.mark.parametrize(

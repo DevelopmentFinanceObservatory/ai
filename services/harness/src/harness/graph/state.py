@@ -121,8 +121,9 @@ ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
 # `orchestrate` node. The write that closes the turn drops it.
 ORCHESTRATOR_HISTORY_KEY = WAITING_HISTORY_KEY
 # On a `full` turn whose orchestrator could not open on the conversation
-# its inputs name (`TurnInput.carried_from`), the reason, `unloadable`, it
-# opened from the whole digest instead; `harness.studio_store.keep_turn_records`
+# its inputs name (`TurnInput.carried_from`), the reason it opened from the
+# whole digest instead: `unloadable`, or `not_in_process` when the instance
+# running it holds no state for the conversation; `harness.studio_store.keep_turn_records`
 # records it as the turn's `history_chain`.
 ORCHESTRATOR_CHAIN_RESET_KEY = "orchestrator:chain_reset"
 # spec_id -> the refusal message of a fetch or a plan step that read it and

@@ -123,7 +123,8 @@ HAND_OFF_EDGES = {"plan": "plan", "ask_user": "ask"}
 
 # The conversation's stored carried conversation
 # (`harness.studio_state.ConversationState.carried_history`), for the turn
-# `TurnKey` names, or None when it holds none.
+# `TurnKey` names: an empty mapping when it holds none, and None when the
+# instance holds no state for the conversation.
 type CarriedSource = Callable[[TurnKey], Mapping[str, Any] | None]
 
 
@@ -235,22 +236,28 @@ def orchestrate_node(
 def _carried_opening(
     ctx: NodeCtx[GraphEvent], ref: CarriedRef, carried: CarriedSource
 ) -> StoredHistory | None:
-    """The conversation `ref` names, read from `carried`, or None when the
-    stored one is another or no longer loads as a `StoredHistory`. Then the
-    turn opens from the whole digest, and its state records the reset
-    (`ORCHESTRATOR_CHAIN_RESET_KEY`)."""
-    text = ref.history_in(carried(ctx.key))
-    if text is not None:
-        try:
-            return StoredHistory.model_validate_json(text)
-        except ValidationError:
-            pass
+    """The conversation `ref` names, read from `carried`, or None when this
+    instance holds no state for the conversation (`not_in_process`) or the
+    stored one is another or no longer loads as a `StoredHistory`
+    (`unloadable`). Then the turn opens from the whole digest, and its state
+    records the reset (`ORCHESTRATOR_CHAIN_RESET_KEY`)."""
+    stored = carried(ctx.key)
+    reason = "not_in_process"
+    if stored is not None:
+        reason = "unloadable"
+        text = ref.history_in(stored)
+        if text is not None:
+            try:
+                return StoredHistory.model_validate_json(text)
+            except ValidationError:
+                pass
     logger.info(
-        "studio history: chain reset conversation_id=%s turn=%d reason=unloadable",
+        "studio history: chain reset conversation_id=%s turn=%d reason=%s",
         ctx.key.conversation_id,
         ctx.key.turn_index,
+        reason,
     )
-    ctx.state[ORCHESTRATOR_CHAIN_RESET_KEY] = "unloadable"
+    ctx.state[ORCHESTRATOR_CHAIN_RESET_KEY] = reason
     return None
 
 

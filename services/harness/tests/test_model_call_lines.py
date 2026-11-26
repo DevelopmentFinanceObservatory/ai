@@ -5,6 +5,7 @@ sum of its lines by `trace_id`."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -21,12 +22,14 @@ from orchestrator.model import orchestrator_model
 from planner.model import planner_model
 from planner.plan import Plan
 from planner.specs import PROPOSE_PLAN
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .scripted_genai import (
     Reply,
     ScriptedGenai,
+    StreamCutError,
     call_part,
     malformed_call_reply,
     reply,
@@ -38,7 +41,7 @@ from .scripted_tools import CannedSearch, definite_envelope, plan_call
 from .studio_routes import CLIENT_FEATURES, orchestrator_app, stream, studio_client, turn_body
 from .test_generative import _FakeClient
 from .test_planner_adapter import _translated_plan
-from .test_planner_model import _After, _budget, _HangingGenai, _pai
+from .test_planner_model import _PARAMETERS, INSTRUCTION, _After, _budget, _HangingGenai, _pai
 from .test_planner_node import _QUESTION, _SIGNED, _proposals
 from .test_studio import (
     COMPONENT,
@@ -292,6 +295,11 @@ async def test_a_model_call_in_shared_work_writes_no_line() -> None:
         # The first send stalls before any chunk, so it reported no usage, and
         # the send that replaces it reports its own.
         ("first-chunk-resend", [2]),
+        # The stream fails after a chunk that reported usage.
+        ("stream-error", [1]),
+        # A Stop cancels the call while the stream waits after a chunk that
+        # reported usage.
+        ("stop", [1]),
     ],
 )
 async def test_a_call_a_bound_closes_or_resends_writes_the_usage_it_reported(
@@ -300,12 +308,17 @@ async def test_a_call_a_bound_closes_or_resends_writes_the_usage_it_reported(
     """A call a bound closes mid-stream reports the usage its chunks carried,
     the usage the planner's `token usage` line logs, and a first-chunk resend
     reports the usage of the send that answered, once."""
-    if bound == "model-time-cut":
+    if bound in ("model-time-cut", "stop"):
         scripted: ScriptedGenai = _HangingGenai(
             [Reply(chunks=[[text_part("Partly")]], usage=_usage(1), finish_reason=None)],
             hang_after=1,
         )
-        budget = _budget(model_time_s=0.05)
+        budget = _budget(model_time_s=0.05 if bound == "model-time-cut" else 5.0)
+    elif bound == "stream-error":
+        scripted = ScriptedGenai(
+            [Reply(chunks=[[text_part("Partly")]], usage=_usage(1), cut_after=1)]
+        )
+        budget = _budget()
     else:
         scripted = ScriptedGenai(
             [
@@ -323,10 +336,39 @@ async def test_a_call_a_bound_closes_or_resends_writes_the_usage_it_reported(
     heard: list[Any] = []
     current_model_usage.set(heard.append)
 
-    await _pai(model)
+    if bound == "stream-error":
+        with pytest.raises(StreamCutError):
+            await _pai(model)
+    elif bound == "stop":
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(_pai(model), 0.2)
+    else:
+        await _pai(model)
 
     assert [(call.role, call.usage) for call in heard] == [(role, _usage(n)) for n in expected]
-    if role == "planner":
+    if role == "planner" and bound not in ("stream-error", "stop"):
         assert [usage for _, usage in after.calls if usage is not None] == [
             call.usage for call in heard
         ]
+
+
+async def test_a_stream_its_caller_closes_at_a_chunk_writes_the_usage_it_reported() -> None:
+    """A caller that stops reading the orchestrator's stream at a chunk that
+    reported usage, as a Stop or a client leaving does, closes the call there,
+    and the attempt reports that usage once."""
+    scripted = _HangingGenai(
+        [Reply(chunks=[[text_part("Partly")]], usage=_usage(1), finish_reason=None)],
+        hang_after=1,
+    )
+    model = orchestrator_model("gemini-test", client=scripted.client, budget=_budget())
+    heard: list[Any] = []
+    current_model_usage.set(heard.append)
+    messages = [
+        ModelRequest(parts=[UserPromptPart("Total ODA to Ghana?")], instructions=INSTRUCTION)
+    ]
+
+    async with model.request_stream(messages, None, _PARAMETERS) as response:
+        async for _ in response:
+            break
+
+    assert [(call.role, call.usage) for call in heard] == [("orchestrator", _usage(1))]

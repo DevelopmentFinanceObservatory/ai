@@ -136,6 +136,7 @@ from harness.provenance import CardLineage, CardLineageDecodeError, lineage_from
 from harness.run_ledger import end_unfinished
 from harness.settings import StudioHistory
 from harness.studio_state import (
+    CHAIN_RESET_CLOSE_FAILED,
     MODEL_CALL_LOG_EVENT,
     SEGMENT_TTL_S,
     TURN_LOG_EVENT,
@@ -1793,15 +1794,21 @@ def record_closed_turn(conversation: ConversationState, cursor: Cursor) -> str:
     `closed_turn_error`'s error. A turn that ended on a question set aside
     for the next turn (`set_aside_question`) keeps that question too, so the
     state read still hands it back to the page that never got `done`.
-    Returns the error recorded."""
+    A `full` turn closed `done` drops its carry with the error, and the
+    conversation keeps why in its place
+    (`ConversationState.mark_carry_lost`), so the next turn's chain reset
+    reads `close_failed`. Returns the error recorded."""
     keep_turn_records(conversation, cursor.state)
     error = closed_turn_error(cursor)
+    carry_lost = cursor.status is TurnStatus.DONE and conversation.turn_usage.history == "full"
     conversation.close_turn(
         final_text="",
         error=error,
         new_question=set_aside_question(cursor),
         asked_for_question=asked_for_question(cursor),
     )
+    if carry_lost:
+        conversation.mark_carry_lost(CHAIN_RESET_CLOSE_FAILED)
     return error
 
 

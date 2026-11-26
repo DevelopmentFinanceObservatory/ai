@@ -5479,9 +5479,8 @@ async def test_a_turn_loaded_from_a_row_with_no_usage_keeps_the_identity_it_take
     ]
 
 
-# The model usage totals turn usage held before each model call wrote a line
-# of its own (`harness.studio_store.write_model_call_line`).
-_RETIRED_USAGE_KEYS = {
+# Keys a stored `turn_usage` holds that `TurnUsage` has no field for.
+_UNKNOWN_USAGE_KEYS = {
     "model_calls": 3,
     "input_tokens": 3_000,
     "cached_tokens": 1_000,
@@ -5491,7 +5490,7 @@ _RETIRED_USAGE_KEYS = {
 
 
 @pytest.mark.parametrize(
-    ("stored_trace_id", "caller", "started_at", "retired"),
+    ("stored_trace_id", "caller", "started_at", "unknown"),
     [
         ("tr_current", "conversation:" + "c" * 32, "2026-11-19T10:00:00+00:00", {}),
         ("tr_earlier", None, None, {}),
@@ -5499,24 +5498,23 @@ _RETIRED_USAGE_KEYS = {
             "tr_current",
             "conversation:" + "c" * 32,
             "2026-11-19T10:00:00+00:00",
-            _RETIRED_USAGE_KEYS,
+            _UNKNOWN_USAGE_KEYS,
         ),
     ],
-    ids=["this-turn", "another-turn", "retired-usage-keys"],
+    ids=["this-turn", "another-turn", "unknown-usage-keys"],
 )
 def test_a_stored_usage_reads_only_for_the_turn_it_names(
-    stored_trace_id, caller, started_at, retired
+    stored_trace_id, caller, started_at, unknown
 ) -> None:
     """A row whose usage names another turn's trace id reads as unset. A row
-    an older revision wrote, holding the retired usage totals, reads without
-    them."""
+    holding keys `TurnUsage` has no field for reads without them."""
     stored = {
         "trace_id": "tr_current",
         "turn_usage": {
             "trace_id": stored_trace_id,
             "started_at": "2026-11-19T10:00:00+00:00",
             "caller": "conversation:" + "c" * 32,
-            **retired,
+            **unknown,
         },
     }
     state = ConversationState(conversation_id=CONVERSATION)

@@ -1230,7 +1230,10 @@ class _SegmentWork:
         """Write the `studio.turn` line and `turn.pause` outcome of the pause
         `cursor` holds, once its write committed (`run_segment`'s `paused`):
         a line exists exactly when the cursor stores the pause, whatever cut
-        or failed closing write follows it."""
+        or failed closing write follows it. The turn's records are kept from
+        the paused state first, so the line names a chain reset the
+        orchestrator met as it opened (`keep_turn_records`)."""
+        keep_turn_records(self._conversation, cursor.state)
         write_pause_line(self._conversation.conversation_id, self._conversation)
 
     async def frames(self, event: _MarkedEvent) -> list[BaseModel]:

@@ -215,6 +215,10 @@ _HISTORY_NEWEST_TEXT_CAP = CONVERSATION_DIGEST_MAX_BYTES // 2
 # (`harness.graph.orchestrate.carried_record`). Past it the next turn opens a
 # fresh chain from the digest (`carried_opening`).
 CARRIED_HISTORY_TOKEN_CAP = 60_000
+# The chain reset a turn logs when the previous turn, on the `full` arm,
+# closed `done` and the write that would have stored its record and carry
+# failed (`harness.studio_store.record_closed_turn`).
+CHAIN_RESET_CLOSE_FAILED = "close_failed"
 type RecallPart = Literal["plan", "readings", "canvas"]
 # What `recall_part` renders of a turn's plan records, or of its readings, in
 # characters, which a turn's plans share. `_RECALL_ID_CAP` is the most component
@@ -732,7 +736,9 @@ class ConversationState:
     # `turn_carried`, or to None when the turn closed with no conversation to
     # carry or on an error, which breaks the chain (`carried_opening`). It is
     # the one stored copy: the next turn's inputs name it by reference
-    # (`harness.graph.state.CarriedRef`).
+    # (`harness.graph.state.CarriedRef`). A turn whose carry was lost for a
+    # known reason leaves `{"turn", "reset"}` instead, the reason the next
+    # turn's chain reset logs (`mark_carry_lost`).
     carried_history: dict[str, Any] | None = None
     # The history arm stored with the conversation, `{"arm", "turn"}`: the arm
     # `STUDIO_HISTORY=split` assigned it (`history_arm`) and the number of the
@@ -1018,7 +1024,9 @@ class ConversationState:
         the whole digest: on a first turn, or, logged with its reason, when
         the previous turn closed with no conversation to carry (an error, a
         Stop, a pause left unanswered, an Edit Card turn, a reply the harness
-        wrote, a `digest` turn: `previous_turn_carried_none`), when another
+        wrote, a `digest` turn: `previous_turn_carried_none`), when the turn
+        closed `done` and its closing write failed (`close_failed`,
+        `mark_carry_lost`), when another
         model wrote it (`model_changed`), since its thought signatures are
         that model's, when no call in it reported usage (`no_usage`), when
         its largest call reported more than `CARRIED_HISTORY_TOKEN_CAP`
@@ -1033,6 +1041,8 @@ class ConversationState:
         reason: str | None = None
         if carried is None or carried.get("turn") != len(self.turns):
             reason = "previous_turn_carried_none"
+        elif isinstance(lost := carried.get("reset"), str):
+            reason = lost
         elif carried.get("model") != model_name:
             reason = "model_changed"
         elif not isinstance(tokens := carried.get("tokens"), int) or tokens <= 0:
@@ -1305,6 +1315,12 @@ class ConversationState:
         self.turn_recorded = True
         if error:
             self.pending.clear()
+
+    def mark_carry_lost(self, reason: str) -> None:
+        """Keep `reason` as why the latest recorded turn carries no
+        conversation, in `carried_history`'s place, for the next turn's
+        chain reset (`carried_opening`) to log."""
+        self.carried_history = {"turn": len(self.turns), "reset": reason}
 
     def _turn_record(
         self,
@@ -1660,12 +1676,15 @@ def make_carried_history(store: StudioStore) -> Any:
     """The callable the `orchestrate` node reads a `full` turn's carried
     conversation through (`harness.graph.orchestrate.CarriedSource`): the
     stored `ConversationState.carried_history` of the conversation the turn's
-    key names, as this instance holds it, with no database access. None
-    when this instance holds no state for it."""
+    key names, as this instance holds it, with no database access: an empty
+    mapping when it stores none, and None when this instance holds no state
+    for the conversation."""
 
     def carried_history(key: TurnKey) -> dict[str, Any] | None:
         conversation = store.current(key.principal, key.conversation_id)
-        return conversation.carried_history if conversation is not None else None
+        if conversation is None:
+            return None
+        return conversation.carried_history or {}
 
     return carried_history
 

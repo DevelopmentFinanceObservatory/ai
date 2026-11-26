@@ -258,9 +258,15 @@ class GeminiStream:
                             continue
                         for chunk in relay.take(item):
                             yield chunk
-            except (Exception, asyncio.CancelledError) as exc:
-                if span.is_recording():
+            except (Exception, asyncio.CancelledError, GeneratorExit) as exc:
+                if span.is_recording() and not isinstance(exc, GeneratorExit):
                     span.set_attribute(_ERROR, type(exc).__name__)
+                # The model billed what its chunks reported before the cut, a
+                # Stop, a lost lease, the caller closing the stream at a chunk
+                # or a failure mid-stream; an attempt cut before any chunk
+                # reported none.
+                note_model_usage(relay.usage, model=model, role=self.role)
+                record_usage(span, _added(spent, relay.usage))
                 raise
             unsent = relay.closing is not None and not relay.closing.sent and not sent_any
             if span.is_recording():
@@ -389,24 +395,30 @@ def client_call_id() -> str:
     return f"{CLIENT_CALL_ID_PREFIX}{uuid.uuid4()}"
 
 
-async def _with_client_call_ids(chunks: AsyncIterator[Chunk]) -> AsyncGenerator[Chunk]:
+async def _with_client_call_ids(chunks: AsyncGenerator[Chunk]) -> AsyncGenerator[Chunk]:
     """`chunks`, each function call that arrived without an id given one
-    (`client_call_id`).
+    (`client_call_id`), closed when this stream is.
 
     The call is stored under that id, given before its tool runs. Pydantic AI
     would invent an id of its own form, so this runs on every chunk the model
     hands Pydantic AI, a turn put in the model's place and a closing turn
     included. A chunk carries each call whole in one part, and Pydantic AI
     reads each function call part as one call, so one part gets one id.
+
+    Pydantic AI closes this stream when its caller stops reading. Closing
+    `chunks` with it lets `GeminiStream._respond` note a cut attempt's usage
+    in the turn's context, where garbage collection would close it later in
+    another.
     """
-    async for chunk in chunks:
-        if not any(_id_less_calls(chunk)):
-            yield chunk
-            continue
-        named = chunk.model_copy(deep=True)
-        for call in _id_less_calls(named):
-            call.id = client_call_id()
-        yield named
+    async with aclosing(chunks):
+        async for chunk in chunks:
+            if not any(_id_less_calls(chunk)):
+                yield chunk
+                continue
+            named = chunk.model_copy(deep=True)
+            for call in _id_less_calls(named):
+                call.id = client_call_id()
+            yield named
 
 
 def _id_less_calls(chunk: Chunk) -> list[types.FunctionCall]:
