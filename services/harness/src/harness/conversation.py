@@ -22,10 +22,10 @@ and detaches it from the turn's trace.
 as the turn began (`harness.studio_state.TurnUsage.history`), which every
 model span of the turn names (`harness.gemini_wire.surface_attributes`).
 
-`current_model_usage` is the sink the turn's model calls report their token
-usage to (`note_model_usage`), which sums it into the turn's
-`harness.studio_state.TurnUsage`, as `compiler.surface.current_spec_uses` does
-for the specs a turn used.
+`current_model_usage` is the sink each model call attempt of the turn reports
+its model, role and token usage to (`note_model_usage`), which writes it as
+one `harness.studio_state.MODEL_CALL_LOG_EVENT` line
+(`harness.studio_store.write_model_call_line`).
 
 `current_user_message` holds the user's own message for the turn, which the
 orchestrator's `search` sends Search to read intent and explicit scope from.
@@ -96,27 +96,42 @@ class TurnHistory(NamedTuple):
 current_history: ContextVar[TurnHistory | None] = ContextVar("studio_history", default=None)
 
 
-# Where the current Studio turn hears the usage of each model call it makes,
-# set by `harness.studio` for each request that runs a turn; `None` outside
-# one, where nothing is heard.
-current_model_usage: ContextVar[
-    Callable[[types.GenerateContentResponseUsageMetadata], None] | None
-] = ContextVar("studio_model_usage", default=None)
+# The agent a model call serves: the orchestrator, the planner, or the Edit
+# Card (`harness.generative.GeminiEdit`).
+type ModelRole = Literal["orchestrator", "planner", "edit"]
 
 
-def note_model_usage(usage: types.GenerateContentResponseUsageMetadata | None) -> None:
-    """Tell the current turn a model call spent `usage` (`current_model_usage`).
-    A no-op outside a turn and for a call that reported none. Never raises, so a
-    turn's cost record cannot fail the call it records."""
+class ModelCall(NamedTuple):
+    """One model call attempt that reported usage: the agent it served, the
+    model it was sent to, and the usage Gemini reported for it."""
+
+    role: ModelRole
+    model: str
+    usage: types.GenerateContentResponseUsageMetadata
+
+
+# Where the current Studio turn hears each model call it makes, set by
+# `harness.studio` for each request that runs a turn; `None` outside one, where
+# nothing is heard.
+current_model_usage: ContextVar[Callable[[ModelCall], None] | None] = ContextVar(
+    "studio_model_usage", default=None
+)
+
+
+def note_model_usage(
+    usage: types.GenerateContentResponseUsageMetadata | None, *, model: str, role: ModelRole
+) -> None:
+    """Tell the current turn a model call attempt to `model`, serving `role`,
+    spent `usage` (`current_model_usage`). A no-op outside a turn and for an
+    attempt that reported none. Never raises, so a turn's cost record cannot
+    fail the call it records."""
     sink = current_model_usage.get()
     if sink is None or usage is None:
         return
     try:
-        sink(usage)
+        sink(ModelCall(role=role, model=model, usage=usage))
     except Exception:
-        logger.warning(
-            "recording a model call's usage failed; the turn will not count it", exc_info=True
-        )
+        logger.warning("recording a model call's usage failed", exc_info=True)
 
 
 # The user's words for the current turn as `ConversationState.turn_user_words`
@@ -183,6 +198,8 @@ def shared_work_context() -> Context:
 
 __all__ = [
     "NO_CONVERSATION",
+    "ModelCall",
+    "ModelRole",
     "TurnHistory",
     "current_caller_turn",
     "current_conversation_caller",

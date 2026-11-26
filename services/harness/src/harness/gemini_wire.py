@@ -77,7 +77,7 @@ from google.genai import Client, errors, types
 from opentelemetry import trace
 from pydantic_ai.exceptions import ModelAPIError
 
-from harness.conversation import current_history, note_model_usage
+from harness.conversation import ModelRole, current_history, note_model_usage
 from harness.prefix_cache import CACHE_GONE_CODES, PrefixCache, against_cache
 from harness.sentences import StopCode
 from harness.surface import studio_surface, surface_fingerprint
@@ -199,6 +199,8 @@ class _Relay:
 class GeminiStream:
     """The streamed call `GoogleModel` makes, with its hooks, cache and budget.
 
+    `role` is the agent the stream serves, which each attempt that reported
+    usage names to the turn (`harness.conversation.note_model_usage`).
     `passes_text` passes answer text on as it arrives; left false, every chunk
     is held to the call's end (step 4 of the module docstring).
 
@@ -211,6 +213,7 @@ class GeminiStream:
     prefix_cache: PrefixCache | None
     before_request: BeforeRequest | None
     after_response: AfterResponse | None
+    role: ModelRole
     passes_text: bool = False
 
     def __post_init__(self) -> None:
@@ -269,7 +272,7 @@ class GeminiStream:
                     span.set_attribute(_FINISH_REASON, relay.finish_reason or "none")
             sent_any = sent_any or (relay.closing is None or relay.closing.sent)
             usage = relay.usage
-            note_model_usage(usage)
+            note_model_usage(usage, model=model, role=self.role)
             spent = _added(spent, usage)
             record_usage(span, spent)
             replaced = (

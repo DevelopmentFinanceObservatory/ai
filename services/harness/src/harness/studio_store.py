@@ -114,6 +114,7 @@ from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from harness.approval import ApprovalRecord
+from harness.conversation import ModelCall
 from harness.db.best_effort import execute_in_savepoint
 from harness.db.commit import (
     committing,
@@ -136,6 +137,7 @@ from harness.provenance import CardLineage, CardLineageDecodeError, lineage_from
 from harness.run_ledger import end_unfinished
 from harness.settings import StudioHistory
 from harness.studio_state import (
+    MODEL_CALL_LOG_EVENT,
     SEGMENT_TTL_S,
     TURN_LOG_EVENT,
     ConversationState,
@@ -300,30 +302,31 @@ def _assign_changed(
     other value when it is not the same object. A field `live` changed
     meanwhile and `work` did not keeps `live`'s value. A `TurnUsage`, which
     `_shallow_copy` copies, counts as changed when it compares unequal too.
-    Its model usage totals add: `live` keeps the calls it noted since the
-    copy was taken on top of `work`'s, since a model call is noted on the
-    live state while a canvas write works on its copy."""
+    Its spec uses add: `live` keeps the specs it noted since the copy was
+    taken beside `work`'s, since a spec use is noted on the live state while
+    a canvas write works on its copy."""
     for f in dataclasses.fields(ConversationState):
         value = getattr(work, f.name)
         before = getattr(base, f.name)
         if value != before if isinstance(value, (*_CONTAINERS, TurnUsage)) else value is not before:
             if isinstance(value, TurnUsage):
-                value = _with_usage_noted_meanwhile(value, live.turn_usage, before)
+                value = _with_specs_noted_meanwhile(value, live.turn_usage)
             setattr(live, f.name, value)
 
 
-def _with_usage_noted_meanwhile(usage: TurnUsage, live: TurnUsage, base: TurnUsage) -> TurnUsage:
-    """`usage` with the model usage `live` counted past `base` added to its
-    totals, when all three are the same turn's."""
-    if not usage.trace_id or not (usage.trace_id == live.trace_id == base.trace_id):
+def _with_specs_noted_meanwhile(usage: TurnUsage, live: TurnUsage) -> TurnUsage:
+    """`usage` with the spec uses `live` holds added to its own, once each,
+    when both are the same turn's. Spec uses only grow, so the union is right
+    whichever side noted a use first."""
+    if not usage.trace_id or usage.trace_id != live.trace_id:
         return usage
-    return dataclasses.replace(
-        usage,
-        **{
-            name: getattr(usage, name) + max(getattr(live, name) - getattr(base, name), 0)
-            for name in _MODEL_USAGE_FIELDS
-        },
-    )
+    merged = usage.copy()
+    for mine, theirs in (
+        (merged.fetched_specs, live.fetched_specs),
+        (merged.drawn_specs, live.drawn_specs),
+    ):
+        mine.extend(spec_id for spec_id in theirs if spec_id not in mine)
+    return merged
 
 
 def _shallow_copy(state: ConversationState) -> ConversationState:
@@ -813,38 +816,13 @@ def _history_assignment(value: Any) -> dict[str, Any] | None:
     return {"arm": arm, "turn": turn}
 
 
-# The `TurnUsage` fields that sum the turn's model calls
-# (`ConversationState.note_model_usage`).
-_MODEL_USAGE_FIELDS = (
-    "model_calls",
-    "input_tokens",
-    "cached_tokens",
-    "output_tokens",
-    "thinking_tokens",
-)
-
-
-def _unsaved_model_usage(held: TurnUsage, stored: Any) -> dict[str, int]:
-    """The model usage `held`, a turn's live usage, counted past `stored`, the
-    usage of the same turn this process last wrote or read (its baseline's
-    `turn_usage`): the calls noted since the last successful save. The
-    totals are additive, so a load adds this to what the row now holds and
-    no side is chosen over the other. `stored` holding no usage of the turn
-    means none of the turn's calls were saved."""
-    base = stored if isinstance(stored, dict) and stored.get("trace_id") == held.trace_id else {}
-    pending: dict[str, int] = {}
-    for name in _MODEL_USAGE_FIELDS:
-        saved = base.get(name)
-        saved = saved if isinstance(saved, int) and not isinstance(saved, bool) else 0
-        pending[name] = max(getattr(held, name) - saved, 0)
-    return pending
-
-
 def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
     """The `TurnUsage` of the turn `trace_id` a stored `turn_usage` holds. A
     value that is not an object, or names another turn's trace id, reads as
     unset, as a member of the wrong type does. A conversation that has
-    begun no turn has the empty trace id, and its usage names none."""
+    begun no turn has the empty trace id, and its usage names none. A key
+    `TurnUsage` does not hold, as a row an older revision wrote may, is left
+    out."""
     trace_id = trace_id or None
     stored = value if isinstance(value, dict) else {}
     if stored.get("trace_id") != trace_id:
@@ -884,11 +862,6 @@ def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
         history_assigned_turn=number("history_assigned_turn"),
         history_chain=text("history_chain"),
         carried_tokens=number("carried_tokens"),
-        model_calls=number("model_calls") or 0,
-        input_tokens=number("input_tokens") or 0,
-        cached_tokens=number("cached_tokens") or 0,
-        output_tokens=number("output_tokens") or 0,
-        thinking_tokens=number("thinking_tokens") or 0,
     )
 
 
@@ -995,8 +968,7 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
     logger.info(
         "%s trace_id=%s turn=%s status=%s caller=%s account=%s visitor=%s release=%s error=%s "
         "fetched_specs=%d drawn_specs=%d history=%s history_arm=%s history_mode=%s "
-        "history_assigned_turn=%s history_chain=%s carried_tokens=%s "
-        "model_calls=%d input_tokens=%d cached_tokens=%d output_tokens=%d thinking_tokens=%d",
+        "history_assigned_turn=%s history_chain=%s carried_tokens=%s",
         TURN_LOG_EVENT,
         line.trace_id,
         usage.turn,
@@ -1014,11 +986,6 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
         usage.history_assigned_turn,
         usage.history_chain,
         usage.carried_tokens,
-        usage.model_calls,
-        usage.input_tokens,
-        usage.cached_tokens,
-        usage.output_tokens,
-        usage.thinking_tokens,
         extra={
             JSON_FIELDS: {
                 "event": TURN_LOG_EVENT,
@@ -1041,11 +1008,6 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
                 "history_assigned_turn": usage.history_assigned_turn,
                 "history_chain": usage.history_chain,
                 "carried_tokens": usage.carried_tokens,
-                "model_calls": usage.model_calls,
-                "input_tokens": usage.input_tokens,
-                "cached_tokens": usage.cached_tokens,
-                "output_tokens": usage.output_tokens,
-                "thinking_tokens": usage.thinking_tokens,
             }
         },
     )
@@ -1059,6 +1021,63 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
         response=line.response,
         error=line.error,
         paused=line.status == "paused",
+    )
+
+
+def write_model_call_line(
+    call: ModelCall,
+    *,
+    conversation_id: str,
+    trace_id: str,
+    turn: int | None,
+    history: StudioHistory | None,
+    history_mode: Literal["split", "forced"] | None,
+) -> None:
+    """Write the `MODEL_CALL_LOG_EVENT` line of one model call attempt of
+    the turn `trace_id`, number `turn` of `conversation_id`, run on the
+    `history` arm chosen by `history_mode` (`harness.studio_state.TurnUsage`):
+    the agent the call served (`role`), its model, and the tokens Gemini
+    reported. `input_tokens` are the prompt and tool-use tokens, of which
+    `cached_tokens` were read from a cache, `output_tokens` the answer and
+    tool-call tokens, and `thinking_tokens` the thought tokens, which
+    `output_tokens` leaves out. The process that made the call writes it once,
+    as JSON fields (`common.logging.JSON_FIELDS`) and in the message, so a
+    turn's cost is the sum of its lines by `trace_id`."""
+    usage = call.usage
+    input_tokens = (usage.prompt_token_count or 0) + (usage.tool_use_prompt_token_count or 0)
+    cached_tokens = usage.cached_content_token_count or 0
+    output_tokens = usage.candidates_token_count or 0
+    thinking_tokens = usage.thoughts_token_count or 0
+    logger.info(
+        "%s trace_id=%s turn=%s role=%s model=%s history=%s history_mode=%s "
+        "input_tokens=%d cached_tokens=%d output_tokens=%d thinking_tokens=%d",
+        MODEL_CALL_LOG_EVENT,
+        trace_id,
+        turn,
+        call.role,
+        call.model,
+        history,
+        history_mode,
+        input_tokens,
+        cached_tokens,
+        output_tokens,
+        thinking_tokens,
+        extra={
+            JSON_FIELDS: {
+                "event": MODEL_CALL_LOG_EVENT,
+                "trace_id": trace_id,
+                "conversation_id": conversation_id,
+                "turn": turn,
+                "role": call.role,
+                "model": call.model,
+                "history": history,
+                "history_mode": history_mode,
+                "input_tokens": input_tokens,
+                "cached_tokens": cached_tokens,
+                "output_tokens": output_tokens,
+                "thinking_tokens": thinking_tokens,
+            }
+        },
     )
 
 
@@ -2224,12 +2243,6 @@ class StudioStore:
         entry.read_stamp = stamp
         entry.seq_reserved, entry.claimed_reserved = row.seq_reserved, None
         held = entry.state.turn_usage if entry.state is not None else None
-        # Calls the turn noted since this process's last successful save of it.
-        pending = (
-            _unsaved_model_usage(held, entry.baseline.get(_KEY_TURN_USAGE))
-            if held is not None
-            else {}
-        )
         if entry.state is None:
             durable.lock = entry.lock
             entry.state = durable
@@ -2238,9 +2251,6 @@ class StudioStore:
                 if f.name not in _PROCESS_LOCAL_FIELDS:
                     setattr(entry.state, f.name, getattr(durable, f.name))
         entry.baseline = _serialize_durable(entry.state)
-        segment = entry.state.segment
-        # Held by this process, or by none: a paused turn holds no segment.
-        elsewhere = segment is not None and segment.id != entry.held
         if held is not None and held.trace_id == entry.state.trace_id:
             # Specs the turn noted after its last save, during a pause, say,
             # are this process's alone. A turn this instance holds keeps them,
@@ -2249,11 +2259,8 @@ class StudioStore:
                 entry.state.note_spec_use("fetched", spec_id)
             for spec_id in held.drawn_specs:
                 entry.state.note_spec_use("drawn", spec_id)
-            # Model usage adds: what the row holds, plus the calls this
-            # process noted since its last save of the turn.
-            for name, count in pending.items():
-                setattr(entry.state.turn_usage, name, getattr(entry.state.turn_usage, name) + count)
-        if segment is None or elsewhere:
+        segment = entry.state.segment
+        if segment is None or segment.id != entry.held:
             entry.held = None
         if entry.state.turn_index and not entry.state.turn_recorded:
             entry.state.turn_specs = {}

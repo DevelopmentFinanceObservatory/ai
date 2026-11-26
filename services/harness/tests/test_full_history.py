@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 from common.logging import JSON_FIELDS
-from harness.conversation import current_history, current_model_usage
+from harness.conversation import current_history
 from harness.graph.orchestrate import carried_record
 from harness.settings import HistorySettings
 from harness.studio_state import (
@@ -762,39 +762,6 @@ async def test_a_turn_resumed_on_an_instance_that_carried_an_earlier_turn_carrie
         (2, "digest", None),
         (3, "full", "reset:previous_turn_carried_none"),
     ]
-
-
-async def test_a_load_keeps_the_model_usage_its_turn_noted_since_the_last_save(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A call the paused turn noted on this instance after its last save
-    survives the load `/interrupt` starts with, and the closed line counts
-    it with both segments."""
-    asking = call_part(
-        "ask_user",
-        {"questions": [{"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]}]},
-    )
-    app, _ = orchestrator_app(
-        Reply(chunks=[[asking]], usage=usage_metadata(prompt=700, candidates=10)),
-        Reply(chunks=[[text_part("A it is.")]], usage=usage_metadata(prompt=900, candidates=20)),
-        engine=pg_engine,
-    )
-    store = app.state.studio.store
-    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
-        async with studio_client(app) as client:
-            paused = await stream(client, "/api/studio/turn", turn_body("Compare them"))
-            assert paused[-1]["event"] == "elicitation.request"
-            conversation = store.current(_PRINCIPAL, CONVERSATION)
-            conversation.note_model_usage(usage_metadata(prompt=50, candidates=5))
-            loaded = await store.load(_PRINCIPAL, CONVERSATION)
-            assert loaded is not None
-            assert (loaded.turn_usage.model_calls, loaded.turn_usage.input_tokens) == (2, 750)
-            current_model_usage.set(None)
-            frames = await stream(client, "/api/studio/interrupt", _answer(paused, CONVERSATION))
-    assert frames[-1]["event"] == "done"
-
-    (line,) = _turn_lines(caplog)
-    assert (line["model_calls"], line["input_tokens"], line["output_tokens"]) == (3, 1_650, 35)
 
 
 @pytest.mark.parametrize(

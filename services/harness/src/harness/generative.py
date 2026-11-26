@@ -118,7 +118,7 @@ class _ModelCall:
                 span.set_attribute("dfo.model.error", type(exc).__name__)
                 raise
             _record_response(span, response, model_name=self.model_name)
-        note_model_usage(response.usage_metadata)
+        note_model_usage(response.usage_metadata, model=self.model_name, role="edit")
         log_usage(type(self).__name__, response.usage_metadata)
         return json.loads(response.text or "{}")
 

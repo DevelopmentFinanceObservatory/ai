@@ -65,7 +65,6 @@ from executor.run import UnrunnablePlan, approved_work, run_candidate
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
-from google.genai import types
 from planner.plan import (
     PlanStatus,
     current_earlier_block,
@@ -82,6 +81,7 @@ from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
 from harness.card_unit import UnitMove, stored_unit_change, unit_move
 from harness.conversation import (
+    ModelCall,
     TurnHistory,
     current_conversation_caller,
     current_conversation_id,
@@ -150,6 +150,7 @@ from harness.studio_store import (
     set_aside_question,
     stop_names_turn,
     turn_standing,
+    write_model_call_line,
     write_pause_line,
 )
 from harness.studio_stream import Emit, LiveOwners, LockHold, open_stream
@@ -272,23 +273,29 @@ def studio_identity(
 
 
 def _set_turn_sinks(
-    store: StudioStore, principal: str, conversation_id: str, trace_id: str
+    store: StudioStore, principal: str, conversation_id: str, conversation: ConversationState
 ) -> None:
-    """Point the sinks a turn's work reports to at the turn `trace_id` of
-    `(principal, conversation_id)`: the specs it used
-    (`compiler.surface.current_spec_uses`) and the usage of its model calls
+    """Point the sinks a turn's work reports to at the current turn of
+    `conversation`, `(principal, conversation_id)`'s: the specs it used
+    (`compiler.surface.current_spec_uses`) and its model calls
     (`harness.conversation.current_model_usage`). Every request that runs
-    part of a turn sets them before anything runs."""
+    part of a turn sets them before anything runs. Each model call writes its
+    own line (`harness.studio_store.write_model_call_line`) with the turn's
+    trace id, number and history arm as the turn began, and reads no store."""
+    trace_id = conversation.trace_id
     current_spec_uses.set(_spec_use_sink(store, principal, conversation_id, trace_id))
+    usage = conversation.turn_usage
+    turn, history, history_mode = usage.turn, usage.history, usage.history_mode
 
-    def note(usage: types.GenerateContentResponseUsageMetadata) -> None:
-        conversation = store.current(principal, conversation_id)
-        if (
-            conversation is not None
-            and conversation.trace_id == trace_id
-            and not conversation.turn_recorded
-        ):
-            conversation.note_model_usage(usage)
+    def note(call: ModelCall) -> None:
+        write_model_call_line(
+            call,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            turn=turn,
+            history=history,
+            history_mode=history_mode,
+        )
 
     current_model_usage.set(note)
 
@@ -2758,7 +2765,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # so do the in-process dfo-apis calls.
             current_turn_id.set(work.trace_id)
             set_supplied_turn(work.trace_id)
-            _set_turn_sinks(studio.store, principal, body.conversation_id, work.trace_id)
+            _set_turn_sinks(studio.store, principal, body.conversation_id, work)
             work.auto_add = body.auto_add
             if body.client_features is not None:
                 work.client_features = declared_features(body.client_features)
@@ -3474,7 +3481,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # undo (`_PendingInterrupt.step_order`'s docstring). It and the
             # spec-use sink are set before anything below can run the graph
             # or close the turn.
-            _set_turn_sinks(studio.store, principal, body.conversation_id, conversation.trace_id)
+            _set_turn_sinks(studio.store, principal, body.conversation_id, conversation)
             if studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
                     ledger_conversation_id(principal, body.conversation_id),
@@ -3843,7 +3850,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 (p for p in conversation.pending.values() if p.resuming_segment == segment_id),
                 None,
             )
-            _set_turn_sinks(studio.store, principal, conversation_id, conversation.trace_id)
+            _set_turn_sinks(studio.store, principal, conversation_id, conversation)
             if answered is not None and studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
                     ledger_conversation_id(principal, conversation_id),

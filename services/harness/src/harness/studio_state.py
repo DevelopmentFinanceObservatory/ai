@@ -92,8 +92,6 @@ from harness.wire import (
 )
 
 if TYPE_CHECKING:
-    from google.genai import types
-
     from harness.provenance import CardLineage
     from harness.studio_store import StudioStore
 
@@ -510,6 +508,9 @@ class Segment:
 # The message, and the `event` field, of the log line `StudioStore` writes
 # for each turn close and each pause one of its writes commits.
 TURN_LOG_EVENT = "studio.turn"
+# The message, and the `event` field, of the log line written for each model
+# call attempt of a turn (`harness.studio_store.write_model_call_line`).
+MODEL_CALL_LOG_EVENT = "studio.model_call"
 
 # A turn record's `ended_by` for a turn the user ended by typing a different
 # question on its plan card (`ConversationState.close_turn`).
@@ -596,15 +597,6 @@ class TurnUsage:
     It is `None` on a `digest` turn and on a turn that opened no orchestrator,
     such as an Edit Card. Each is `None` on a turn that began before the
     harness kept it.
-
-    `model_calls` counts the model calls the turn made, orchestrator, planner
-    and Edit Card, each attempt that reported usage once, and the four token
-    fields sum what they reported (`harness.conversation.note_model_usage`):
-    `input_tokens` the prompt and tool-use tokens, of which `cached_tokens` were
-    read from a cache, `output_tokens` the answer and tool-call tokens, and
-    `thinking_tokens` the thought tokens, which `output_tokens` leaves out. They
-    keep counting across a pause and its resume, so the turn's line holds the
-    whole turn.
     """
 
     trace_id: str | None = None
@@ -623,11 +615,6 @@ class TurnUsage:
     history_assigned_turn: int | None = None
     history_chain: str | None = None
     carried_tokens: int | None = None
-    model_calls: int = 0
-    input_tokens: int = 0
-    cached_tokens: int = 0
-    output_tokens: int = 0
-    thinking_tokens: int = 0
 
     @property
     def user_id(self) -> str | None:
@@ -1429,17 +1416,6 @@ class ConversationState:
         specs = self.turn_usage.fetched_specs if use == "fetched" else self.turn_usage.drawn_specs
         if spec_id not in specs:
             specs.append(spec_id)
-
-    def note_model_usage(self, usage: types.GenerateContentResponseUsageMetadata) -> None:
-        """Add one model call's `usage` to the turn's totals."""
-        total = self.turn_usage
-        total.model_calls += 1
-        total.input_tokens += (usage.prompt_token_count or 0) + (
-            usage.tool_use_prompt_token_count or 0
-        )
-        total.cached_tokens += usage.cached_content_token_count or 0
-        total.output_tokens += usage.candidates_token_count or 0
-        total.thinking_tokens += usage.thoughts_token_count or 0
 
     def recorded_identity(self, spec_id: str) -> RecordedIdentity | None:
         """The identity `spec_id` hashes from, as this turn or an earlier one
