@@ -369,7 +369,7 @@ _CLOSING = (
 
 
 # The instruction written for `gemini-4-hydrogen`: the same rules, shorter and
-# under headings, asking only over a genuinely ambiguous choice.
+# under headings, asking the user only when a choice is ambiguous.
 _HYDROGEN_PLANNING = (
     "You are the Planner Agent for the Development Finance Observatory. Given a "
     "development finance question, draft a methodological plan with `propose_plan`. "

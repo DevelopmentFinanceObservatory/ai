@@ -7,7 +7,7 @@ replies, search results and hand-back, the refused plan's next step worded as
 `plan_done` words it on Hydrogen, and each tool's declaration.
 
 A request is stored without its HTTP options, which configure the client and
-never reach the model. Rewrite the files after a change that moves what the
+are not sent to the model. Rewrite the files after a change that moves what the
 orchestrator sends on Hydrogen, then run the tests again without the variable:
 
     ORCHESTRATOR_REQUESTS=write \\

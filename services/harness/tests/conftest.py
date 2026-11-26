@@ -14,10 +14,10 @@ literal in every test would repeat those pairings.
 
 The autouse fixtures run every test with the studio shared secret unset, and
 reset `common.auth`'s process-wide bearer-token policy after every test.
-`Settings` reads the repository's `.env`, so a developer who has set
-`STUDIO_API_TOKEN` there would otherwise have every test request's bearer
-token refused. The environment variable takes precedence over the env file,
-and a blank value is the setting unset.
+A developer who has set `STUDIO_API_TOKEN` in the shell would otherwise have
+every test request's bearer token refused. A blank value is the setting unset.
+No `.env` file reaches `Settings`, since the root conftest's `_isolate_dotenv`
+chdirs every test into an empty `tmp_path`.
 
 The workspace-root `conftest.py` carries the same `common.auth` reset, but
 `services/harness/pyproject.toml` sets `[tool.pytest.ini_options]`, which
@@ -250,8 +250,9 @@ def _reset_studio_surface(monkeypatch: pytest.MonkeyPatch) -> Any:
     later test. The next `studio_surface()` resolves it again from settings.
 
     Every test also starts with `MODEL_NAME` and `PLANNER_MODEL_NAME` set to the
-    code defaults, so neither a shell nor a `.env` file in the working directory
-    can change the surface a test that pins none gets.
+    code defaults, so a shell that sets either cannot change the surface a test
+    that pins none gets. The root conftest's `_isolate_dotenv` chdirs every test
+    into an empty `tmp_path`, so no `.env` file reaches `Settings`.
     Autouse fixtures run before the others, so `flash_studio`,
     `hydrogen_studio` and a test's own `setenv` still win.
     """

@@ -40,8 +40,8 @@ def test_both_planner_instructions_take_a_share_s_whole_from_search(variant, rul
 
 @pytest.mark.parametrize("variant", ["default", "hydrogen"])
 def test_no_planner_instruction_keeps_the_rules_search_replaced(variant) -> None:
-    # Before Search derived a share's whole, a sector share opened 'sector' and
-    # a provider share left `whole_of` unset.
+    # Search derives a share's whole, so the rules that had a sector share open
+    # 'sector' and a provider share leave `whole_of` unset must be gone.
     instruction = planner_instruction(variant)
 
     assert "opens 'sector'" not in instruction

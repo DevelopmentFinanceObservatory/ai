@@ -56,8 +56,8 @@ Gemini gave (`_FINISH_REASON`, `none` when the stream carried none), or the
 class of the exception the call raised (`_ERROR`). Pydantic AI's own
 `gen_ai.response.finish_reasons` maps several of Gemini's reasons onto one
 and leaves out a response that carried none. Each span also names the model
-surface the call was sent (`harness.surface.surface_fingerprint`): the
-process's instruction set and tool descriptions, and short hashes of the
+surface the call was sent (`harness.surface.surface_fingerprint`). Those are
+the process's instruction set and tool descriptions, and short hashes of the
 system instruction and the declarations as sent.
 """
 
@@ -429,9 +429,9 @@ def _added(spent: Usage | None, usage: Usage | None) -> Usage | None:
 
 
 def surface_attributes(config: types.GenerateContentConfig) -> dict[str, str]:
-    """The surface attributes of a call sent `config`, in canonical form: the
-    hash of its system instruction and of its declarations, each as the SDK's
-    JSON less unset fields, in the order sent."""
+    """The surface attributes of a call sent `config`, in canonical form. They
+    hold the hash of its system instruction and of its declarations, each as the
+    SDK's JSON less unset fields, in the order sent."""
     declarations = [
         json.loads(declaration.model_dump_json(exclude_none=True))
         for tool in config.tools or []

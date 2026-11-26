@@ -86,8 +86,8 @@ from .test_planner_model import _HangingGenai
 from .test_turn_records import _switchable_scope
 from .turn_driver import numbered_call_ids as _numbered_call_ids
 
-# The planner model the tests name; each that builds a planner on it names it
-# itself, so no test reads the settings for it.
+# The planner model the tests name. Each test that builds a planner on it names
+# it itself, and none reads the settings for it.
 _MODEL = "gemini-3.8-flash"
 _USAGE = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
 _QUESTION = "kenya debt"

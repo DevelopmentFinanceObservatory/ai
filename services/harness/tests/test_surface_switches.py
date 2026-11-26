@@ -143,8 +143,8 @@ except SurfaceRefusedError:
 
 def test_importing_the_studio_reads_no_surface(tmp_path) -> None:
     """The modules that build Studio's agents import under a model the map does
-    not name, so test collection never resolves the surface; the first read
-    refuses it."""
+    not name, so test collection resolves no surface. The first read refuses
+    it."""
     env = {**os.environ, "MODEL_NAME": "gemini-unmapped", "PLANNER_MODEL_NAME": "gemini-unmapped"}
     done = subprocess.run(
         [sys.executable, "-c", _IMPORT_UNDER_AN_UNMAPPED_MODEL],
@@ -188,7 +188,7 @@ class _CountedPrefixCache:
 @pytest.fixture
 def counted_prefix_cache(monkeypatch) -> type[_CountedPrefixCache]:
     """Counts every `PrefixCache` built, through `surface_prefix_cache` or
-    around it: the class is replaced where it is defined, where the surface
+    around it. The class is replaced where it is defined, where the surface
     module reads it, and in the server, should the server name it."""
     monkeypatch.setattr(_CountedPrefixCache, "built", 0)
     monkeypatch.setattr(surface_module, "PrefixCache", _CountedPrefixCache)
@@ -400,7 +400,7 @@ def test_minimal_make_charts_keeps_the_full_chart_texts(variant, path, rule) -> 
     tool = _tools()["make_charts"]
     minimal = tool_declaration(tool, variant=variant, descriptions="minimal")
 
-    # The variant's full text: HYDROGEN_SELECT_JSON_DESCRIPTION under hydrogen.
+    # The variant's full text, `HYDROGEN_SELECT_JSON_DESCRIPTION` under hydrogen.
     assert _texts_at(minimal, path) == _texts_at(tool_declaration(tool, variant=variant), path)
     assert all(rule in text for text in _texts_at(minimal, path))
 

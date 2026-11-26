@@ -40,9 +40,9 @@ type ThinkingLevelName = Literal["LOW", "MEDIUM", "HIGH"]
 # between two default-level runs.
 DEFAULT_ORCHESTRATOR_THINKING_LEVEL: ThinkingLevelName = "LOW"
 
-# The Edit Card call (`harness.generative.GeminiEdit`) runs at `LOW`: unset, a
+# The Edit Card call (`harness.generative.GeminiEdit`) runs at `LOW`. Unset, a
 # model runs at its own default, `MEDIUM` on `gemini-3.8-flash` and `HIGH` on
-# `gemini-4-hydrogen`, for one constrained JSON patch.
+# `gemini-4-hydrogen`, which is more than one constrained JSON patch needs.
 DEFAULT_EDIT_THINKING_LEVEL: ThinkingLevelName = "LOW"
 
 # How long after its deadline `harness.live_refresh` cancels a refresh, and how

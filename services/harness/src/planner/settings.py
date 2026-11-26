@@ -11,8 +11,8 @@ from pydantic import field_validator
 # the agent its usage is logged under.
 AGENT_NAME = "dfo_planner"
 
-# The planner's model, a concrete version rather than a floating alias because an
-# eval score has to be attributable to one model: under an alias, a score that
+# The planner's model, pinned to a concrete version because an eval score has
+# to be attributable to one model: under a floating alias, a score that
 # moves between two runs could mean a changed instruction or a repointed alias,
 # and the run itself gives no way to tell which. It names the same model as the
 # harness's `MODEL_NAME` default (`harness.settings.Settings.model_name`), since
@@ -46,7 +46,7 @@ class AgentSettings(BaseServiceSettings):
     @field_validator("planner_thinking_level", mode="before")
     @classmethod
     def _normalise_thinking_level(cls, value: object) -> object:
-        # `low`, ` Low ` and `LOW` all name one level; a blank value is the default.
+        # `low`, ` Low ` and `LOW` all name one level. A blank value is the default.
         if isinstance(value, str):
             return value.strip().upper() or DEFAULT_PLANNER_THINKING_LEVEL
         return value
@@ -60,7 +60,7 @@ def agent_thinking_config(level: ThinkingLevelName) -> types.ThinkingConfig:
 # `gemini-3.8-flash` takes a `thinking_level` of `LOW`, `MEDIUM` or `HIGH`
 # (`MINIMAL` is a flash-lite-only value this model rejects) and otherwise
 # runs at an unset, much larger default. The planner runs every generation at
-# `PLANNER_THINKING_LEVEL`, read once at import, `LOW` by default: measured on
+# `PLANNER_THINKING_LEVEL`, read once at import and `LOW` by default. Measured on
 # `gemini-3.8-flash` against the real planner brief, `LOW` reproduces the unset
 # default's validity outcome on both a well-formed and a malformed draft, at
 # roughly 1/14 to 1/46 the wall time and near-zero reasoning tokens.

@@ -1700,7 +1700,7 @@ def test_a_family_with_an_unsummable_axis_is_told_to_name_one_value_for_it(surfa
 def test_a_family_s_repair_by_variant_keeps_the_unstated_sum_repair(
     variant, unsummable_axes, sum_unstated, repair
 ):
-    # The hydrogen wording changes the summable-family repairs only; a family
+    # The hydrogen wording changes the summable-family repairs only. A family
     # whose source states no sum keeps its own repair under either variant.
     set_studio_surface(HYDROGEN_SURFACE if variant == "hydrogen" else FLASH_SURFACE)
     shape = dataclasses.replace(

@@ -126,8 +126,8 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
     recordings = {task.id: load_recording(task.recording_id) for task in tasks}
     by_id = {task.id: task for task in tasks}
     model = AgentSettings().planner_model_name
-    # The surface the served harness would run these models on, which every
-    # text the planner reads follows (`harness.surface`).
+    # The surface the served harness would run these models on. Every text the
+    # planner reads follows it (`harness.surface`).
     surface = resolve_surface(model_name=Settings().model_name, planner_model_name=model)
     set_studio_surface(surface)
     at = revision()
