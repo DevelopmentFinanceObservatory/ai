@@ -216,7 +216,7 @@
   ],
   "requests": [
     {
-      "model": "gemini-3.8-flash",
+      "model": "gemini-4-hydrogen",
       "config": {
         "shared": "request_config"
       },
@@ -240,7 +240,7 @@
       ]
     },
     {
-      "model": "gemini-3.8-flash",
+      "model": "gemini-4-hydrogen",
       "config": {
         "shared": "request_config"
       },

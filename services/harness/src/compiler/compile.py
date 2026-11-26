@@ -35,6 +35,7 @@ from common.place_type import type_column
 from common.rolling import PopulationEmptyError, PopulationLevelColumnMissingError
 from common.unit_refs import PERCENT_UNIT
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN, VALUE_COLUMN, normalize_role_keys
+from harness.surface import studio_surface
 from planner.operations import (
     AggregateOperation,
     CompareOperation,
@@ -258,6 +259,28 @@ class CompileIssue(StrictModel):
     requirement_id: str | None = None
     tool: ToolId | None = None
     finding: EvidenceIssueCode | None = None
+
+
+def _unusable_findings(
+    findings: Sequence[EvidenceIssue],
+) -> list[tuple[EvidenceIssueCode, str]]:
+    """Each blocking evidence finding of one requirement as the code and detail
+    of a `SOURCE_UNUSABLE` issue, in order. On the `hydrogen` surface
+    every `ENTITY_MISSING` finding is joined into one at the place of the
+    first, so the referral that closes on it names every entity the source
+    lacks and one amendment can fix them all.
+    """
+    if studio_surface().variant == "flash":
+        return [(f.code, f.detail) for f in findings]
+    missing = [f.detail for f in findings if f.code is EvidenceIssueCode.ENTITY_MISSING]
+    joined: list[tuple[EvidenceIssueCode, str]] = []
+    for finding in findings:
+        if finding.code is not EvidenceIssueCode.ENTITY_MISSING:
+            joined.append((finding.code, finding.detail))
+        elif missing:
+            joined.append((finding.code, "; ".join(missing)))
+            missing = []
+    return joined
 
 
 class CompileResult(StrictModel):
@@ -724,14 +747,14 @@ class _Build:
             self._check_breakdown(operation, requirement, source)
             self._check_whole_sum(operation, requirement, source)
             findings = check_evidence(requirement, evidence_from_source(source))
-            for finding in errors(findings):
+            for code, detail in _unusable_findings(errors(findings)):
                 self._issue(
                     CompileIssueCode.SOURCE_UNUSABLE,
                     f"source {source.spec_id} cannot serve requirement {requirement.id!r}: "
-                    f"{finding.detail}",
+                    f"{detail}",
                     operation_id=operation.id,
                     requirement_id=requirement.id,
-                    finding=finding.code,
+                    finding=code,
                 )
             self.warnings.extend(f for f in findings if f not in errors(findings))
 

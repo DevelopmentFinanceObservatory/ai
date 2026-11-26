@@ -40,6 +40,11 @@ type ThinkingLevelName = Literal["LOW", "MEDIUM", "HIGH"]
 # between two default-level runs.
 DEFAULT_ORCHESTRATOR_THINKING_LEVEL: ThinkingLevelName = "LOW"
 
+# The Edit Card call (`harness.generative.GeminiEdit`) runs at `LOW`. Unset, a
+# model runs at its own default, `MEDIUM` on `gemini-3.8-flash` and `HIGH` on
+# `gemini-4-hydrogen`, which is more than one constrained JSON patch needs.
+DEFAULT_EDIT_THINKING_LEVEL: ThinkingLevelName = "LOW"
+
 # How long after its deadline `harness.live_refresh` cancels a refresh, and how
 # long the website waits for one. A refresh answers by its deadline plus the
 # grace, so the largest deadline accepted is the caller's timeout less the grace.
@@ -117,8 +122,9 @@ class Settings(BaseServiceSettings):
     static prompt prefix (`harness.prefix_cache`). The planner's and the
     orchestrator's system instruction and tool declarations are cached once
     per process and read from the cache on every call, in every
-    conversation. Off, each call sends its whole prompt and Gemini's implicit
-    caching serves whatever prefix it matches.
+    conversation. Off, or for a model whose surface takes no explicit cache
+    (`harness.surface.Surface.explicit_cache`), each call sends its whole
+    prompt and Gemini's implicit caching serves whatever prefix it matches.
 
     `combined_mcp_requests_per_s` and `combined_mcp_burst` bound what outside
     clients can ask of the combined server at `/mcp/` (`harness.combined_mcp`).
@@ -222,6 +228,10 @@ class Settings(BaseServiceSettings):
     `turn_model_time_s` as its HTTP timeout.
     """
 
+    # The model the orchestrator and the Edit Card call run on. It overrides
+    # `common.settings.BaseServiceSettings.model_name`, which the MCP services
+    # carry unused.
+    model_name: str = "gemini-4-hydrogen"
     data_mcp_url: str = ""
     analysis_mcp_url: str = ""
     presentation_mcp_url: str = ""
@@ -250,6 +260,9 @@ class Settings(BaseServiceSettings):
     # The orchestrator's reasoning effort (`ORCHESTRATOR_THINKING_LEVEL`),
     # read case-insensitively. Unset or blank means the default.
     orchestrator_thinking_level: ThinkingLevelName = DEFAULT_ORCHESTRATOR_THINKING_LEVEL
+    # The Edit Card call's reasoning effort (`EDIT_THINKING_LEVEL`), read the
+    # same way.
+    edit_thinking_level: ThinkingLevelName = DEFAULT_EDIT_THINKING_LEVEL
     # Browser origins the server answers CORS preflights for, as a
     # comma-separated env value (a locally served page testing against the
     # real agent on another port). Empty sends no CORS headers: the deployed
@@ -332,12 +345,12 @@ class Settings(BaseServiceSettings):
             return None
         return value
 
-    @field_validator("orchestrator_thinking_level", mode="before")
+    @field_validator("orchestrator_thinking_level", "edit_thinking_level", mode="before")
     @classmethod
-    def _normalise_thinking_level(cls, value: object) -> object:
+    def _normalise_thinking_level(cls, value: object, info: ValidationInfo) -> object:
         # `low`, ` Low ` and `LOW` all name one level; a blank value is the default.
         if isinstance(value, str):
-            return value.strip().upper() or DEFAULT_ORCHESTRATOR_THINKING_LEVEL
+            return value.strip().upper() or cls.model_fields[info.field_name or ""].default
         return value
 
     @field_validator(

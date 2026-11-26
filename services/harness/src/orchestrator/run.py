@@ -81,7 +81,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model
 
-from orchestrator.agent import INSTRUCTION, Orchestrator, OrchestratorDeps
+from orchestrator.agent import INSTRUCTIONS, Orchestrator, OrchestratorDeps
 
 logger = logging.getLogger(__name__)
 
@@ -92,21 +92,28 @@ logger = logging.getLogger(__name__)
 # request's instructions reach the model, so neither text is sent.
 _DIGESTS_INSTRUCTIONS = "The turn's date and digests."
 
-# `INSTRUCTION` as each request records it, which Pydantic AI strips of
-# surrounding whitespace, and what a stored request carries in its place
-# (`StoredHistory`).
-_RECORDED_INSTRUCTION = INSTRUCTION.strip()
-_STORED_INSTRUCTION = "orchestrator.agent.INSTRUCTION"
+# The marker a stored request carries in place of each instruction set's
+# instruction (`StoredHistory`), keyed on the instruction as each request
+# records it, which Pydantic AI strips of surrounding whitespace. Each set has
+# its own marker, so a turn stored under one surface loads its own instruction
+# back whatever surface the process that resumes it runs.
+_STORED_INSTRUCTIONS: dict[str, str] = {
+    INSTRUCTIONS["flash"].strip(): "orchestrator.agent.INSTRUCTION",
+    INSTRUCTIONS["hydrogen"].strip(): "orchestrator.agent.HYDROGEN_INSTRUCTION",
+}
+_LOADED_INSTRUCTIONS = {marker: text for text, marker in _STORED_INSTRUCTIONS.items()}
 
 
-def _with_instruction_as(
-    messages: list[ModelMessage], instruction: str, stored: str
+def _with_instructions_as(
+    messages: list[ModelMessage], replacements: Mapping[str, str]
 ) -> list[ModelMessage]:
-    """`messages`, each request whose instructions are `instruction` carrying
-    `stored` in their place."""
+    """`messages`, each request whose instructions `replacements` names carrying
+    their replacement in their place."""
     return [
-        replace(message, instructions=stored)
-        if isinstance(message, ModelRequest) and message.instructions == instruction
+        replace(message, instructions=replacements[message.instructions])
+        if isinstance(message, ModelRequest)
+        and message.instructions is not None
+        and message.instructions in replacements
         else message
         for message in messages
     ]
@@ -133,17 +140,13 @@ class StoredHistory(BaseModel):
 
     @field_serializer("conversation", mode="wrap")
     def _dumped(self, conversation: Conversation, handler: SerializerFunctionWrapHandler) -> Any:
-        messages = _with_instruction_as(
-            conversation.messages, _RECORDED_INSTRUCTION, _STORED_INSTRUCTION
-        )
+        messages = _with_instructions_as(conversation.messages, _STORED_INSTRUCTIONS)
         return handler(replace(conversation, messages=messages))
 
     @field_validator("conversation", mode="after")
     @classmethod
     def _loaded(cls, conversation: Conversation) -> Conversation:
-        messages = _with_instruction_as(
-            conversation.messages, _STORED_INSTRUCTION, _RECORDED_INSTRUCTION
-        )
+        messages = _with_instructions_as(conversation.messages, _LOADED_INSTRUCTIONS)
         return replace(conversation, messages=messages)
 
 

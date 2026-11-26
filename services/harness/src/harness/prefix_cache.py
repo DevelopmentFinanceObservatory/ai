@@ -11,7 +11,9 @@ INVALID_ARGUMENT). The contents, thought signatures included, travel on the
 request as before. `harness.gemini_wire.GeminiStream` is that stream.
 
 `harness.server.create_app` builds one `PrefixCache` per process and hands it
-to the model constructors. Each Cloud Run instance creates its own cache per
+to the model constructors when `STUDIO_PREFIX_CACHE` is on and the model's
+surface allows an explicit cache (`harness.surface.surface_prefix_cache`);
+`gemini-4-hydrogen` takes none. Each Cloud Run instance creates its own cache per
 prefix, once per `CACHE_TTL_S`. A changed prompt or model is a new key, and
 the old cache expires on its TTL.
 
@@ -33,7 +35,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -64,17 +65,6 @@ CREATE_COOLDOWN_S = 60.0
 # denied)". 404 covers the same on the Vertex backend.
 CACHE_GONE_CODES = frozenset({403, 404})
 
-# The names Gemini serves: its own models, Gemma 4 and later, the model
-# optimizer, a fine-tuned Vertex AI endpoint and a Vertex AI Gemini resource
-# path.
-_GEMINI_NAMES = re.compile(
-    r"gemini-.*"
-    r"|gemma-4.*"
-    r"|model-optimizer-.*"
-    r"|projects/.+/locations/.+/endpoints/.+"
-    r"|projects/.+/locations/.+/publishers/google/models/gemini.+"
-)
-
 
 def prefix_key(model: str, config: types.GenerateContentConfig) -> str | None:
     """The sha256 of `model` and `config`'s system instruction, tools and tool
@@ -94,20 +84,6 @@ def prefix_key(model: str, config: types.GenerateContentConfig) -> str | None:
 
 def _jsonable(value: Any) -> Any:
     return value.model_dump(mode="json", exclude_none=True)
-
-
-def gemini_model_name(model_name: str) -> str | None:
-    """`model_name` as sent to Gemini when Gemini serves it, else None.
-
-    A name with a `Gemini:` class prefix, in any case, names Gemini whatever
-    follows, and is sent without the prefix. A name with any other prefix
-    names another provider's model. An unprefixed name is Gemini's when it
-    matches one of `_GEMINI_NAMES` whole.
-    """
-    prefix, colon, named = model_name.partition(":")
-    if colon:
-        return named if prefix.lower() == "gemini" else None
-    return model_name if _GEMINI_NAMES.fullmatch(model_name) else None
 
 
 @dataclass
@@ -242,6 +218,5 @@ __all__ = [
     "REFRESH_MARGIN_S",
     "PrefixCache",
     "against_cache",
-    "gemini_model_name",
     "prefix_key",
 ]

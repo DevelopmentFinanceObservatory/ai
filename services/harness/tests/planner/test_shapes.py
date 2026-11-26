@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 from common.place_type import PLACE_LEVELS
+from harness.surface import FLASH_SURFACE, HYDROGEN_SURFACE, set_studio_surface
 from planner.records import (
     DenominatorScope,
     GrowthChange,
@@ -1650,13 +1653,65 @@ def test_a_family_summable_over_every_axis_is_told_to_read_it_summed():
     )
 
 
-def test_a_family_with_an_unsummable_axis_is_told_to_name_one_value_for_it():
+@pytest.mark.parametrize(
+    ("surface", "repair"),
+    [
+        (FLASH_SURFACE, "so the question has to name one value for it"),
+        (
+            HYDROGEN_SURFACE,
+            "so read one series: set the requirement's `source_code` to the code of one series "
+            "of the family, or ask the user for one value for it",
+        ),
+    ],
+    ids=["flash", "hydrogen"],
+)
+def test_a_family_with_an_unsummable_axis_is_told_to_name_one_value_for_it(surface, repair):
+    set_studio_surface(surface)
     shape = _shape(roles=(_role(),), measures=2, unsummable_axes=("gender",))
     reason = rejects(ShapeVerb.AGGREGATE, shape, by_entity=False, by_period=True)
     assert reason == (
         "aggregate reads a single measure; got 2, one per StatVar of a family read separately; "
-        "it cannot be summed over gender, so the question has to name one value for it"
+        f"it cannot be summed over gender, {repair}"
     )
+
+
+@pytest.mark.parametrize(
+    ("variant", "unsummable_axes", "sum_unstated", "repair"),
+    [
+        ("flash", None, True, "read a measure whose source binds one StatVar"),
+        ("hydrogen", None, True, "read a measure whose source binds one StatVar"),
+        ("hydrogen", ("gender",), True, "read a measure whose source binds one StatVar"),
+        ("flash", None, False, "otherwise name one value for each axis it cannot"),
+        (
+            "hydrogen",
+            None,
+            False,
+            "otherwise set the requirement's `source_code` to the code of one series",
+        ),
+        ("flash", ("gender",), False, "so the question has to name one value for it"),
+        (
+            "hydrogen",
+            ("gender",),
+            False,
+            "so read one series: set the requirement's `source_code`",
+        ),
+    ],
+)
+def test_a_family_s_repair_by_variant_keeps_the_unstated_sum_repair(
+    variant, unsummable_axes, sum_unstated, repair
+):
+    # The hydrogen wording changes the summable-family repairs only. A family
+    # whose source states no sum keeps its own repair under either variant.
+    set_studio_surface(FLASH_SURFACE if variant == "flash" else HYDROGEN_SURFACE)
+    shape = dataclasses.replace(
+        _shape(roles=(_role(),), measures=2, unsummable_axes=unsummable_axes),
+        sum_unstated=sum_unstated,
+    )
+
+    reason = rejects(ShapeVerb.AGGREGATE, shape, by_entity=False, by_period=True)
+
+    assert reason is not None
+    assert repair in reason
 
 
 _MINIMAL_OPTIONS: dict[ShapeVerb, dict[str, object]] = {

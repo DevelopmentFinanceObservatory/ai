@@ -2137,7 +2137,7 @@
               }
             ],
             "timestamp": "<time>",
-            "instructions": "orchestrator.agent.INSTRUCTION",
+            "instructions": "orchestrator.agent.HYDROGEN_INSTRUCTION",
             "kind": "request",
             "run_id": "<run>",
             "conversation_id": "conv_01test0000",

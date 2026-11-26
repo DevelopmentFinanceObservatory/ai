@@ -44,9 +44,15 @@ from entry import (
 )
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
+from harness.surface import (
+    resolve_surface,
+    set_studio_surface,
+    studio_surface,
+    surface_prefix_cache,
+)
 from harness.wiring import build_stated_scope_reader
 from langfuse import Langfuse
-from planner.settings import AgentSettings
+from planner.settings import AGENT_THINKING_CONFIG, AgentSettings
 from summarise import latest, read_records, write_records, write_summary
 
 RESULTS_DIR = EVAL_DIR / ".results"
@@ -81,8 +87,8 @@ def revision() -> str:
 def experiment(arm: str, *, model: str, revision: str, run_timeout: float) -> str:
     """A digest of everything a run of `arm` is treated with besides its task: the arm,
     the model, the code at `revision`, the turn budget each request runs under
-    (`harness.turn_budget.TurnBudget`), the prefix cache, `PLANNER_RUNNER`, and the
-    eval's own time limit. Records of one arm in one run share it."""
+    (`harness.turn_budget.TurnBudget`), the prefix cache, the planner's thinking level,
+    `PLANNER_RUNNER`, and the eval's own time limit. Records of one arm in one run share it."""
     settings = Settings()
     treatment = {
         "arm": arm,
@@ -93,8 +99,9 @@ def experiment(arm: str, *, model: str, revision: str, run_timeout: float) -> st
         "turn_model_calls_max": settings.turn_model_calls_max,
         "turn_wall_s": settings.turn_wall_s,
         "model_first_chunk_s": settings.model_first_chunk_s,
-        "prefix_cache": settings.studio_prefix_cache,
+        "prefix_cache": settings.studio_prefix_cache and studio_surface().explicit_cache,
         "planner_runner": PLANNER_RUNNER,
+        "planner_thinking_level": AGENT_THINKING_CONFIG.thinking_level,
     }
     return hashlib.sha256(json.dumps(treatment, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -119,6 +126,10 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
     recordings = {task.id: load_recording(task.recording_id) for task in tasks}
     by_id = {task.id: task for task in tasks}
     model = AgentSettings().planner_model_name
+    # The surface the served harness would run these models on. Every text the
+    # planner reads follows it (`harness.surface`).
+    surface = resolve_surface(model_name=Settings().model_name, planner_model_name=model)
+    set_studio_surface(surface)
     at = revision()
     experiments = {
         arm: experiment(arm, model=model, revision=at, run_timeout=args.run_timeout) for arm in arms
@@ -136,8 +147,9 @@ async def run_all(args: argparse.Namespace, tasks: list[Task], arms: list[str]) 
             "setting or arm; start a new --out"
         )
     # An arm's edits reach the prefix cache's creates (`entry.RequestEdit`) under the key
-    # of the prefix before them, so each arm with edits keeps a cache of its own.
-    shared = PrefixCache() if Settings().studio_prefix_cache else None
+    # of the prefix before them, so each arm with edits keeps a cache of its own. No arm
+    # has one on a model that takes no explicit cache (`harness.surface.Surface`).
+    shared = surface_prefix_cache(surface, enabled=Settings().studio_prefix_cache)
     prefix_caches = {
         arm: PrefixCache() if shared is not None and ARMS[arm].edits else shared for arm in arms
     }

@@ -1,0 +1,3059 @@
+[
+  {
+    "model": "gemini-test",
+    "contents": [
+      {
+        "parts": [
+          {
+            "text": "Today's date (UTC): 2026-11-17\n\nThe user's canvas: {\"cards\": 2, \"hidden\": 0}\n\nEarlier turns in this conversation: [{\"turn\": 1, \"asked\": \"Kenya's GDP\"}]"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "parts": [
+          {
+            "text": "Rank Kenya's life expectancy"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "config": {
+      "system_instruction": "You are the analyst behind DFO Studio, the Development Finance Observatory's\nchat and canvas. You answer questions about development, development finance\nand the open data DFO holds, from what your tools return.\n\n# Core rules\n\n1. Every figure, name, period and claim about data rests on a tool result\nfrom this turn, the user's canvas or an earlier turn. Do not answer from\nmemory, world knowledge or mental maths, add no background or causes of\nyour own, and do not say you did something no tool result shows you did.\n2. Compute nothing yourself: no sums, differences, averages, shares or\ncounts of returned values, and no names you pick to stand in for a\nranking. A figure only a calculation gives comes from plan, or is reported\nas not calculated.\n3. End every data turn in one of two ways: data drawn on the canvas, or an\nask_user call. Never end on a question or offer in text (\"would you like\",\n\"let me know\", \"I can show\"): a text offer leaves the user with nothing to\nclick. When a series near the one asked is in hand, fetch and draw it,\nlabelled as the nearest DFO holds, or ask with it as the first option.\n4. A refusal, a missing place or a missing year is a step, not an answer:\nwhen a result names a fix, the values it accepts or the years it holds,\ncall again with them. Report that something cannot be answered only after\nthe repairs under \"Searching\" have failed, and then still draw or ask.\n5. Ask only what changes the answer (see \"Asking\"). A question that remains\ngoes through ask_user, never into the reply.\n\nDecline questions outside development and development finance in one\ncourteous sentence and say what you can help with. Do not speculate, give\npolitical views, or help with a request that could cause harm.\n\n# Limits\n\nPer turn: 8 search, 6 fetch, 5 make_charts that draw and 3 refused, 2\nask_user, 1 plan, 2 get_skill (4 more for files), 3 recall, 3 remove_cards,\nand about 30 model calls shared with the planner. Spend searches on new\nattempts and leave room to fetch, plan and draw. Put independent calls in\none response. A call past its limit is refused: draw what you have.\n\n# Messages that need no data\n\nA greeting, thanks or small talk gets a few plain sentences with no search.\nDo not state a figure in a reply to a greeting or small talk. For a question\nabout DFO itself or what can be asked here, call explain_dfo and answer from\nit alone, stating only the figures it gives. Whether DFO holds data on a\ntopic is a data question. Asked why something happened, say what the data\nshows and that it cannot establish causes. \"What happened?\" about a figure\nalready shown asks what it is: restate its source and coverage.\n\n# Searching\n\nOpen with one search: exactly what a precise question asks, or a few likely\nmeasures for a broad one. With no period named, search the latest. Send\nplaces as the user wrote them, and a party that gives or receives a flow as\nan entity with its `role`, not inside `variable`. Datasets the user brought\nfrom Search answer the parts they cover: fetch them and search only the rest.\n\nRepair a part that comes back empty, refused or unplaced with new searches\nuntil it comes back definite, putting several attempts in one call:\n\n- A place, group or qualifier search cannot use: search the measure without\nit, and with the nearest place or group the data holds (a wider region, the\ncountries it names, the world). Keep the reading that answers most of the\nquestion, and say what was dropped.\n- Years the data does not hold: search again for the years the result says\nit covers, and say the years asked are not held.\n- role_not_resolved, or sides of a flow that disagree: set `role` on every\nname, from the side the user or an earlier turn gave it.\n- `retry_with_text`: that part alone, `text` set to the user's own words\nfor it. It repairs wording, not a place or a year, so make the repairs\nabove first when the reason is one of those. A part without\n`retry_with_text` is not searched with `text`.\n- A measure search cannot match: search the measures nearest it, several in\none call: a wider or narrower sector, the same flow from another table, the\naid or debt side of a flow, another count. When a result names a skill for\nthe domain, load it and search with a series code it gives as\n`source_code`.\n\nExpect two to four searches before you settle on the nearest series. When\nsearch says it defaulted, dropped or changed part of the question, or\nanswered more broadly, tell the user in their terms.\n\n# Reading results\n\n- A close but different measure (national income for \"GDP\") is named as\nwhat it is, never as the measure asked for.\n- A loose match (a closest_match departure, or a fetched candidate of a part\nwarned retrieval_score_weak): give the series' first and last values with\ntheir periods, even when drawn. The harness adds what it covers and lacks.\n- group_readings: the group's published total, said in those words.\ngroup_read_as_members: its members; say whether you list or add them up.\n- candidates: fetch the one the question makes plainly right, or ask.\n- `counted_as` is settled, even beside `alternatives`. Put a word for how a\nflow is counted into `variable` only when the user said it, and let search\nelect the rest. The harness adds a \"Counted as\" line with buttons for other\nchoices, so leave those out.\n- `open_prices` (over several years only): fetch the reading search gave, or\nthe constant-price spec_id under `other_prices` when a skill or the user\nprefers constant prices, and say which basis you show. Ask the unit only\nwhen the question turns on it and nothing settles it: one question per\nmeasure, `unit_of` its spec_id, `prices` set when a skill prefers one, one\nquestion for parts measuring one thing over other years. The answer names\nthe spec_id to fetch.\n- A reading the user picks: fetch its spec_id or name it in the plan brief.\n- capability_unavailable from a fetch or plan step: that part cannot be\ndone, and other data does not answer it. Say so, with the reason, and draw\nthe parts that can be.\n\nLoad a skill a result names whenever the question touches its domain, before\nyou fetch, plan or settle on a nearest series: skills hold the definitions,\nseries codes and rules for combining sources.\n\n# Asking\n\nAsk with ask_user when one of these holds, and otherwise go on and say which\nreading you took:\n\n- a placeholder stands for a real name (\"country X\", \"a donor\");\n- candidates leave a choice the question does not settle;\n- readings would give different figures and nothing favours one;\n- search found only series near the one asked, and drawing the nearest\nwould mislead: offer them, the most useful first, each with its spec_id,\nand answering without that part last;\n- the period is named by an event or administration, not years. Search\nevery part and ask which years (options such as \"2021 to the latest\") in\nthe same response, stating nothing about the event. Use the years given;\nwhen they fall after the data, say it ends earlier.\n\nOptions are answers you can deliver: a series in hand, a period the data\nholds. Do not offer a step that repeats a failed search. Ask everything in\none call, in the user's words, with `multi_select` and plain labels when\nanswers can hold together. An answered choice is settled.\n\n# Planning\n\nCall plan when the answer is constructed from the data: a total, average,\npeak or low over several years (an ask with `across_years`); a breakdown by\nmore than one party at once, such as giver and receiver; a ranking, the\nlargest or top, or which members meet a condition; a share, ratio,\nper-person figure or difference; growth or a drop; a sum across donors,\nsectors or places, or of measures from different sources, which goes to\nplan straight after search, the planner asking how to combine them.\n\nA total over a group of countries goes to plan as one aggregate: name the\ngroup once in the brief, as the user did, with its party in the ask's\n`over`, and leave choosing its members to the planner. Do not list the\nmembers yourself.\n\nDraw straight from a fetch only when a published series is the answer: one\nmeasure for a few named places, over time or at one period. \"Show\" does not\ndecide: a total, change, ranking or breakdown needs plan. Fetch every\ndefinite part a direct answer needs. The brief names each part's\ncandidates, open prices and the reading you took.\n\nOne plan a turn, and it ends your turn. When the plan fails, fetch and draw\nthe definite series search found before you write: label them as what they\nare, not as the derived result, and say what could not be calculated. A\nfamily of measures that adds up can be fetched summed. Do not repeat a\nrequest the failure named as not retryable; plan again only when the call\nis given back, with a brief that avoids the failure.\n\n# Charts and the canvas\n\nDraw fetched or planned data with make_charts, a card per frame that\nanswers part of the question: a line for a trend, bars to compare places or\ncategories, a stat card for one figure, a table for exact values. A second\ncard for a frame only when it shows what the first cannot. Cards do not\nstand in for a calculation.\n\nWrite each select as select_json sets out, binding every varying dimension\nbut the one compared; send {} only when one dimension varies. A refused\nchart names what to fix: draw again binding what it names to values the\nview lists, since a new chart type alone fixes nothing; with too many\nseries, bind all but one dimension to one value. A refusal marked\ndo_not_retry is not drawn again.\n\nA period counted back from now (\"over the past decade\") keeps moving: fetch\nwith scope window {\"kind\": \"range\", \"start_year\": Y}, no end_year, Y early\nenough, and set latest_periods on its charts. A plan keeps its own period\nmoving.\n\nmake_charts only adds cards, and each turn's cards join the ones already on\nthe canvas; a follow-up on the subject keeps them. remove_cards takes off\ncards the user names, every card with all_cards when asked to clear, and the\nearlier subject's cards when the conversation turns to another subject,\nwhich you say. remove_cards leaves pinned cards on the canvas and names them\nas kept_pinned; say which stayed. To redraw a card in another form, draw the\nnew one first, then remove the old and say it replaces it (or, if pinned,\nthat both stay). No tool pins, moves, resizes or renames a card: say so in a\nsentence and where to do it. A card's menu has Pin to Canvas (Unpin from\nCanvas) and Edit title (Edit card on a text card); a card moves by its\nhandle and a data card resizes from its corner grip. A pinned card comes off\nonce the user unpins it from the card's menu and asks again.\n\nThe canvas and conversation digests summarise earlier turns in a line each;\nthe canvas digest counts cards on the canvas, pinned and hidden. For an\nearlier turn's plan, readings or card word for word, call recall, not search.\nWhen the question refers to cards on the canvas (\"that chart\", \"clear the\ntable\"), or turns to another subject so the earlier subject's cards come\noff, call recall with part canvas first to see them and their ids, unless\nthe digest's focus card is enough. Hidden cards are off the canvas; the user\nputs them back with Add in the chat, no tool does. A focus_component_id\nmeans the user asked from that card: \"this\" and \"it\" mean it, so answer\nabout it alone, by its title.\n\n# The reply\n\nOpen with what the data shows in answer, or with what kept it from being\nanswered and what the cards show instead. Keep it brief, in prose; a list\nonly when the user asked for one no card holds. End on the data, not on an\noffer.\n\n- Of a drawn card, which the user sees, state only the values its\nreply_figures list, each with its period. Name in state_values_for only a\nseries the user asked a value of, with state_span for how it changed and\nstate_period for one earlier period. make_charts on a card already drawn\nreturns its figures without redrawing. With empty reply_figures, say what\nthe card holds and state no value. Close with one conclusion from holds.\n- Also state answers whose card was not drawn, and a computed result that\nanswers an ask, at its card's reply_figures. No other values, apart from a\nloose match's first and last. After a plan, answer every ask it lists.\n- A card's fact summary (recall, focus card) holds each series' first and\nlast value, their periods and the point count. Date values by their own\nperiod and claim nothing of the years between.\n- Name each source once by the measure its result or plan record gives,\nkeeping the label's words on whose flows or creditors it covers (debt\nservice \"owed to all creditors\"). When the user asked for more, say what it\ncovers and that the rest is not included.\n- In a short clause, say where you read the question otherwise than written:\na place read as another or as its members, a period replaced by the years\nwith data, a near measure, the price basis. Not for a reading the user chose.\n- Say a period_note in a clause; a ranking is among the members with data\nfor the year served.\n- A `held:` line (a partly reported year, or projections a source also\npublishes) means that data exists and is served when the user names those\nyears or asks about the future. With a card drawn, the reply's closing line\nstates it, so leave it out; with none, say it in a clause.\n- Round to three significant figures with a scale word (billion, million,\nper cent); keep counts exact and small values nonzero. No ids, codes, frame\ncounts or step names. A count names what it counts: entities or series with\ndata in the period (\"all N donors\", \"summed over its N indicators\"), or a\nfamily's indicators in any year, of which those with data are summed\n(\"summed over whichever of its N indicators hold data\").\n- Say plainly what could not be answered and the reason a tool result\nstates, in the user's terms, or none when it states none. State covered\nyears only as a result or plan record gives them, and a period the plan\nchose as a choice, with its reason.\n- Do not name how you work: no planner, plan step, search, matching,\ntranslation, data view, chart preparation or limit on your calls.",
+      "tools": [
+        {
+          "function_declarations": [
+            {
+              "description": "Search DFO's data per measure asked; returns spec_ids or candidates. With share_of, variable names the numerator alone.",
+              "name": "search",
+              "parameters_json_schema": {
+                "$defs": {
+                  "SearchEntity": {
+                    "additionalProperties": false,
+                    "description": "Places or parties, each with its role as spoken.",
+                    "properties": {
+                      "text": {
+                        "description": "The entity as spoken, e.g. 'France'.",
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "title": "Text",
+                        "type": "string"
+                      },
+                      "role": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Flow side: 'from' donor, 'to' recipient; 'creditor', 'debtor' for debt.",
+                        "title": "Role"
+                      },
+                      "members": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "True to ask for each member of a set of places.",
+                        "title": "Members"
+                      },
+                      "name": {
+                        "anyOf": [
+                          {
+                            "maxLength": 128,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Full name when text is ambiguous; not with dcid.",
+                        "title": "Name"
+                      },
+                      "dcid": {
+                        "anyOf": [
+                          {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Candidate dcid from a refusal; not with name.",
+                        "title": "Dcid"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "title": "SearchEntity",
+                    "type": "object"
+                  },
+                  "SearchOperation": {
+                    "additionalProperties": false,
+                    "description": "What the question computes over this part.",
+                    "properties": {
+                      "verb": {
+                        "description": "What the question asks to compute.",
+                        "enum": [
+                          "rank",
+                          "aggregate",
+                          "growth",
+                          "share_of",
+                          "explain",
+                          "forecast",
+                          "report"
+                        ],
+                        "title": "Verb",
+                        "type": "string"
+                      },
+                      "phrase": {
+                        "description": "User's wording, e.g. 'top 5'. With share_of, variable names the numerator alone.",
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "title": "Phrase",
+                        "type": "string"
+                      },
+                      "over": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "place",
+                              "origin",
+                              "destination",
+                              "category",
+                              "year"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "origin: donors, creditors; destination: recipients, debtors; else no flow side.",
+                        "title": "Over"
+                      },
+                      "target_year": {
+                        "anyOf": [
+                          {
+                            "maximum": 2200,
+                            "minimum": 1000,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The year a forecast projects to.",
+                        "title": "Target Year"
+                      }
+                    },
+                    "required": [
+                      "verb",
+                      "phrase"
+                    ],
+                    "title": "SearchOperation",
+                    "type": "object"
+                  },
+                  "SearchPart": {
+                    "additionalProperties": false,
+                    "description": "One measured variable the question asks for.",
+                    "properties": {
+                      "variable": {
+                        "description": "What is measured, in the user's words.",
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "title": "Variable",
+                        "type": "string"
+                      },
+                      "entities": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "$ref": "#/$defs/SearchEntity"
+                            },
+                            "maxItems": 16,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Places or parties, each with its role as spoken.",
+                        "title": "Entities"
+                      },
+                      "time": {
+                        "anyOf": [
+                          {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "'YYYY', 'YYYY to YYYY', 'since YYYY', 'between YYYY and the latest' or 'latest'.",
+                        "title": "Time"
+                      },
+                      "unit": {
+                        "anyOf": [
+                          {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Unit or price basis the user stated, if any.",
+                        "title": "Unit"
+                      },
+                      "open_roles": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "maxLength": 64,
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "maxItems": 2,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Side to list by member, e.g. ['creditor']; none for a total or a named side.",
+                        "title": "Open Roles"
+                      },
+                      "operations": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "$ref": "#/$defs/SearchOperation"
+                            },
+                            "maxItems": 8,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "What the question computes over this part.",
+                        "title": "Operations"
+                      },
+                      "sources": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "$ref": "#/$defs/SearchSource"
+                            },
+                            "maxItems": 8,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Publishers or datasets the user named.",
+                        "title": "Sources"
+                      },
+                      "source_code": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Indicator code, e.g. 'DT.TDS.DEGG.CD'.",
+                        "title": "Source Code"
+                      },
+                      "separate": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "True on each part of a comparison.",
+                        "title": "Separate"
+                      }
+                    },
+                    "required": [
+                      "variable"
+                    ],
+                    "title": "SearchPart",
+                    "type": "object"
+                  },
+                  "SearchSource": {
+                    "additionalProperties": false,
+                    "description": "Publishers or datasets the user named.",
+                    "properties": {
+                      "text": {
+                        "description": "The source as the user said it, e.g. 'IDS'.",
+                        "maxLength": 120,
+                        "minLength": 1,
+                        "title": "Text",
+                        "type": "string"
+                      },
+                      "ref": {
+                        "anyOf": [
+                          {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Chosen candidate's ref from source_ambiguous.",
+                        "title": "Ref"
+                      },
+                      "exclude": {
+                        "default": false,
+                        "description": "True when the user asks to leave it out.",
+                        "title": "Exclude",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "title": "SearchSource",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "parts": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "$ref": "#/$defs/SearchPart"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Parts"
+                  },
+                  "text": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Text"
+                  }
+                },
+                "title": "searchParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Retrieve the data behind a spec_id a search returned, as frames to chart.",
+              "name": "fetch",
+              "parameters_json_schema": {
+                "$defs": {
+                  "Breakdown": {
+                    "additionalProperties": false,
+                    "description": "One code axis to total by, at one level.",
+                    "properties": {
+                      "code_system": {
+                        "description": "Code system, e.g. \"crsPurpose\".",
+                        "minLength": 1,
+                        "title": "Code System",
+                        "type": "string"
+                      },
+                      "level": {
+                        "description": "Hierarchy depth; 0 is the top level.",
+                        "minimum": 0,
+                        "title": "Level",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "code_system",
+                      "level"
+                    ],
+                    "title": "Breakdown",
+                    "type": "object"
+                  },
+                  "FetchScope": {
+                    "additionalProperties": false,
+                    "description": "Replaces searched entities, window or facets.",
+                    "properties": {
+                      "entities": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Role -> names, e.g. {\"recipient\": [\"Togo\"]}.",
+                        "title": "Entities"
+                      },
+                      "window": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "e.g. {\"kind\": \"range\", \"start_year\": 2015}.",
+                        "title": "Window"
+                      },
+                      "facets": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Axis -> {\"ref\": \"...\"}, e.g. provenance.",
+                        "title": "Facets"
+                      }
+                    },
+                    "title": "FetchScope",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "spec_id": {
+                    "title": "Spec Id",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/FetchScope"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "stat_vars": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "sum",
+                          "separate"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Stat Vars"
+                  },
+                  "breakdown": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Breakdown"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "spec_id"
+                ],
+                "title": "fetchParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Draw charts on the user's canvas from frames a fetch or plan returned, with the figures to state.",
+              "name": "make_charts",
+              "parameters_json_schema": {
+                "$defs": {
+                  "Chart": {
+                    "description": "One chart from a fetched or planned frame.",
+                    "properties": {
+                      "frame": {
+                        "description": "Id of a frame returned this turn.",
+                        "title": "Frame",
+                        "type": "string"
+                      },
+                      "type": {
+                        "description": "line_chart: a series over time, or up to 8 places over time as one chart with the place dimension listing them; bar_chart: places or categories compared at one period; stat_card: one headline value; table: the detail. A chart shows every period its frame covers. A frame whose rows all cover one period (a collapsed window such as 2020/2024) has no run of periods to draw as a line: show it as a bar_chart, a table or a stat_card. A facet dimension (provenance, unit, measurementMethod) holding several values in the frame's view is bound to one of them in select_json, whatever the type.",
+                        "enum": [
+                          "line_chart",
+                          "bar_chart",
+                          "stat_card",
+                          "table"
+                        ],
+                        "title": "Type",
+                        "type": "string"
+                      },
+                      "title": {
+                        "description": "what the chart shows, with no period or year: 'Aid to Kenya by donor'. make_charts adds the period the card shows, and refuses a title naming a year the frame covers",
+                        "title": "Title",
+                        "type": "string"
+                      },
+                      "latest_periods": {
+                        "anyOf": [
+                          {
+                            "maximum": 200,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Show the N latest periods, e.g. 5.",
+                        "title": "Latest Periods"
+                      },
+                      "select_json": {
+                        "description": "a JSON object binding the frame's view to the series to draw. Each key is a dimension the view lists, and its value one value the view lists for it, or on one dimension a list of them: {\"observationAbout\": [\"country/GHA\", \"country/TGO\"]}, {\"financingRecipient\": \"country/MWI\"}. Bind every dimension the view lists with more than one value to one value, except the one dimension the chart compares, which you leave unbound (one series per value) or list. {} is accepted only when the view lists a single dimension with more than one value. A refusal names the dimensions still to bind: send the select again with each bound to a value the view lists. A line_chart draws at most 8 series, and a bar_chart or a table at most 24, a table fewer when its rows over the periods it covers would pass 2,000. When the compared dimension holds more than that, leave it unbound: the chart is cut for display to the largest at one period, and its title says how many and when. A cut chart shows; it does not answer which are largest, which needs a ranking calculated. Do not list a subset you chose to stand in for the largest. A chart with latest_periods, or over a frame whose view says rolling, is not cut: list its members from a ranking you asked for, at most as many as the chart draws.",
+                        "title": "Select Json",
+                        "type": "string"
+                      },
+                      "order_by_value": {
+                        "default": false,
+                        "description": "True to draw largest first.",
+                        "title": "Order By Value",
+                        "type": "boolean"
+                      },
+                      "state_values_for": {
+                        "description": "Series the user asked to be told a value of.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 24,
+                        "title": "State Values For",
+                        "type": "array"
+                      },
+                      "state_span": {
+                        "default": false,
+                        "description": "True to return first and last values.",
+                        "title": "State Span",
+                        "type": "boolean"
+                      },
+                      "state_period": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "One earlier period to return values at.",
+                        "title": "State Period"
+                      }
+                    },
+                    "required": [
+                      "frame",
+                      "type",
+                      "title",
+                      "select_json"
+                    ],
+                    "title": "Chart",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "charts": {
+                    "items": {
+                      "$ref": "#/$defs/Chart"
+                    },
+                    "title": "Charts",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "charts"
+                ],
+                "title": "make_chartsParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Ask the user one to three questions with likely answers, and end your turn after calling it.",
+              "name": "ask_user",
+              "parameters_json_schema": {
+                "$defs": {
+                  "AskOption": {
+                    "description": "Likely answers; empty for a unit question.",
+                    "properties": {
+                      "label": {
+                        "description": "The answer as the user reads it.",
+                        "title": "Label",
+                        "type": "string"
+                      },
+                      "spec_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The candidate's spec_id, for a candidate answer.",
+                        "title": "Spec Id"
+                      }
+                    },
+                    "required": [
+                      "label"
+                    ],
+                    "title": "AskOption",
+                    "type": "object"
+                  },
+                  "AskQuestion": {
+                    "description": "One question with the answers it offers.",
+                    "properties": {
+                      "question": {
+                        "description": "The question as the user reads it.",
+                        "title": "Question",
+                        "type": "string"
+                      },
+                      "options": {
+                        "description": "Likely answers; empty for a unit question.",
+                        "items": {
+                          "$ref": "#/$defs/AskOption"
+                        },
+                        "title": "Options",
+                        "type": "array"
+                      },
+                      "unit_of": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Spec_id of the part whose unit is asked.",
+                        "title": "Unit Of"
+                      },
+                      "prices": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "current",
+                              "constant"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Prices a skill prefers, on a unit question.",
+                        "title": "Prices"
+                      },
+                      "multi_select": {
+                        "default": false,
+                        "description": "True when several answers can hold together.",
+                        "title": "Multi Select",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "question"
+                    ],
+                    "title": "AskQuestion",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "questions": {
+                    "items": {
+                      "$ref": "#/$defs/AskQuestion"
+                    },
+                    "title": "Questions",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "questions"
+                ],
+                "title": "ask_userParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Hand a question whose answer needs a calculation to the planner; the user approves the plan before it runs.",
+              "name": "plan",
+              "parameters_json_schema": {
+                "$defs": {
+                  "AskedOutput": {
+                    "description": "One output the user asked for; every open side search goes in its by or over.",
+                    "properties": {
+                      "text": {
+                        "description": "The output in the user's terms, one line.",
+                        "title": "Text",
+                        "type": "string"
+                      },
+                      "by": {
+                        "default": [],
+                        "description": "Parties listed one by one, e.g. ['creditor']; [] for a total; not also in over.",
+                        "items": {
+                          "enum": [
+                            "donor",
+                            "recipient",
+                            "creditor",
+                            "debtor",
+                            "exporter",
+                            "importer"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "By",
+                        "type": "array"
+                      },
+                      "over": {
+                        "default": [],
+                        "description": "Parties totalled across, e.g. ['donor']; a share's whole totals its open side.",
+                        "items": {
+                          "enum": [
+                            "donor",
+                            "recipient",
+                            "creditor",
+                            "debtor",
+                            "exporter",
+                            "importer"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "Over",
+                        "type": "array"
+                      },
+                      "across_years": {
+                        "default": false,
+                        "description": "True for one figure across years the user named; false per year.",
+                        "title": "Across Years",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "title": "AskedOutput",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "brief": {
+                    "title": "Brief",
+                    "type": "string"
+                  },
+                  "asks": {
+                    "items": {
+                      "$ref": "#/$defs/AskedOutput"
+                    },
+                    "title": "Asks",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "brief",
+                  "asks"
+                ],
+                "title": "planParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Load a skill a search result named, or one of its files, a page at a time.",
+              "name": "get_skill",
+              "parameters_json_schema": {
+                "properties": {
+                  "skill_id": {
+                    "description": "Id of a skill a search result named.",
+                    "title": "Skill Id",
+                    "type": "string"
+                  },
+                  "path": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "A file path as the skill lists it.",
+                    "title": "Path"
+                  },
+                  "offset": {
+                    "default": 0,
+                    "description": "Page start: 0 or a closing line's offset.",
+                    "title": "Offset",
+                    "type": "integer"
+                  },
+                  "digest": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "The digest a closing line names.",
+                    "title": "Digest"
+                  }
+                },
+                "required": [
+                  "skill_id"
+                ],
+                "title": "get_skillParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Describe what DFO is and what this assistant can do, with DFO's catalogue counts.",
+              "name": "explain_dfo"
+            },
+            {
+              "description": "Read back in full an earlier turn's plan records or search readings, or the conversation's canvas cards.",
+              "name": "recall",
+              "parameters_json_schema": {
+                "$defs": {
+                  "RecallPart": {
+                    "enum": [
+                      "plan",
+                      "readings",
+                      "canvas"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "properties": {
+                  "part": {
+                    "$ref": "#/$defs/RecallPart"
+                  },
+                  "turn": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Turn"
+                  },
+                  "component_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Component Id"
+                  }
+                },
+                "required": [
+                  "part"
+                ],
+                "title": "recallParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Take cards off the user's canvas; pinned cards stay and come back as kept_pinned.",
+              "name": "remove_cards",
+              "parameters_json_schema": {
+                "properties": {
+                  "component_ids": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Component Ids"
+                  },
+                  "all_cards": {
+                    "default": false,
+                    "title": "All Cards",
+                    "type": "boolean"
+                  }
+                },
+                "title": "remove_cardsParams",
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ],
+      "thinking_config": {
+        "include_thoughts": true,
+        "thinking_level": "LOW"
+      },
+      "automatic_continuation": true
+    }
+  },
+  {
+    "model": "gemini-test",
+    "contents": [
+      {
+        "parts": [
+          {
+            "text": "Today's date (UTC): 2026-11-17\n\nThe user's canvas: {\"cards\": 2, \"hidden\": 0}\n\nEarlier turns in this conversation: [{\"turn\": 1, \"asked\": \"Kenya's GDP\"}]"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "parts": [
+          {
+            "text": "Rank Kenya's life expectancy"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "parts": [
+          {
+            "function_call": {
+              "args": {
+                "parts": [
+                  {
+                    "variable": "life expectancy"
+                  }
+                ]
+              },
+              "name": "search"
+            },
+            "thought_signature": "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I="
+          }
+        ],
+        "role": "model"
+      },
+      {
+        "parts": [
+          {
+            "function_response": {
+              "name": "search",
+              "response": {
+                "kind": "resolution",
+                "parts": [
+                  {
+                    "variable": "Life expectancy in Kenya",
+                    "status": "definite",
+                    "spec_id": "spec_ffffffffffffffffffffffffffffffff",
+                    "resolved": "Life expectancy in Kenya",
+                    "warnings": [],
+                    "candidates": [],
+                    "window": {
+                      "start": 1960,
+                      "end": 2023,
+                      "source": "coverage"
+                    },
+                    "wide": false
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "config": {
+      "system_instruction": "You are the analyst behind DFO Studio, the Development Finance Observatory's\nchat and canvas. You answer questions about development, development finance\nand the open data DFO holds, from what your tools return.\n\n# Core rules\n\n1. Every figure, name, period and claim about data rests on a tool result\nfrom this turn, the user's canvas or an earlier turn. Do not answer from\nmemory, world knowledge or mental maths, add no background or causes of\nyour own, and do not say you did something no tool result shows you did.\n2. Compute nothing yourself: no sums, differences, averages, shares or\ncounts of returned values, and no names you pick to stand in for a\nranking. A figure only a calculation gives comes from plan, or is reported\nas not calculated.\n3. End every data turn in one of two ways: data drawn on the canvas, or an\nask_user call. Never end on a question or offer in text (\"would you like\",\n\"let me know\", \"I can show\"): a text offer leaves the user with nothing to\nclick. When a series near the one asked is in hand, fetch and draw it,\nlabelled as the nearest DFO holds, or ask with it as the first option.\n4. A refusal, a missing place or a missing year is a step, not an answer:\nwhen a result names a fix, the values it accepts or the years it holds,\ncall again with them. Report that something cannot be answered only after\nthe repairs under \"Searching\" have failed, and then still draw or ask.\n5. Ask only what changes the answer (see \"Asking\"). A question that remains\ngoes through ask_user, never into the reply.\n\nDecline questions outside development and development finance in one\ncourteous sentence and say what you can help with. Do not speculate, give\npolitical views, or help with a request that could cause harm.\n\n# Limits\n\nPer turn: 8 search, 6 fetch, 5 make_charts that draw and 3 refused, 2\nask_user, 1 plan, 2 get_skill (4 more for files), 3 recall, 3 remove_cards,\nand about 30 model calls shared with the planner. Spend searches on new\nattempts and leave room to fetch, plan and draw. Put independent calls in\none response. A call past its limit is refused: draw what you have.\n\n# Messages that need no data\n\nA greeting, thanks or small talk gets a few plain sentences with no search.\nDo not state a figure in a reply to a greeting or small talk. For a question\nabout DFO itself or what can be asked here, call explain_dfo and answer from\nit alone, stating only the figures it gives. Whether DFO holds data on a\ntopic is a data question. Asked why something happened, say what the data\nshows and that it cannot establish causes. \"What happened?\" about a figure\nalready shown asks what it is: restate its source and coverage.\n\n# Searching\n\nOpen with one search: exactly what a precise question asks, or a few likely\nmeasures for a broad one. With no period named, search the latest. Send\nplaces as the user wrote them, and a party that gives or receives a flow as\nan entity with its `role`, not inside `variable`. Datasets the user brought\nfrom Search answer the parts they cover: fetch them and search only the rest.\n\nRepair a part that comes back empty, refused or unplaced with new searches\nuntil it comes back definite, putting several attempts in one call:\n\n- A place, group or qualifier search cannot use: search the measure without\nit, and with the nearest place or group the data holds (a wider region, the\ncountries it names, the world). Keep the reading that answers most of the\nquestion, and say what was dropped.\n- Years the data does not hold: search again for the years the result says\nit covers, and say the years asked are not held.\n- role_not_resolved, or sides of a flow that disagree: set `role` on every\nname, from the side the user or an earlier turn gave it.\n- `retry_with_text`: that part alone, `text` set to the user's own words\nfor it. It repairs wording, not a place or a year, so make the repairs\nabove first when the reason is one of those. A part without\n`retry_with_text` is not searched with `text`.\n- A measure search cannot match: search the measures nearest it, several in\none call: a wider or narrower sector, the same flow from another table, the\naid or debt side of a flow, another count. When a result names a skill for\nthe domain, load it and search with a series code it gives as\n`source_code`.\n\nExpect two to four searches before you settle on the nearest series. When\nsearch says it defaulted, dropped or changed part of the question, or\nanswered more broadly, tell the user in their terms.\n\n# Reading results\n\n- A close but different measure (national income for \"GDP\") is named as\nwhat it is, never as the measure asked for.\n- A loose match (a closest_match departure, or a fetched candidate of a part\nwarned retrieval_score_weak): give the series' first and last values with\ntheir periods, even when drawn. The harness adds what it covers and lacks.\n- group_readings: the group's published total, said in those words.\ngroup_read_as_members: its members; say whether you list or add them up.\n- candidates: fetch the one the question makes plainly right, or ask.\n- `counted_as` is settled, even beside `alternatives`. Put a word for how a\nflow is counted into `variable` only when the user said it, and let search\nelect the rest. The harness adds a \"Counted as\" line with buttons for other\nchoices, so leave those out.\n- `open_prices` (over several years only): fetch the reading search gave, or\nthe constant-price spec_id under `other_prices` when a skill or the user\nprefers constant prices, and say which basis you show. Ask the unit only\nwhen the question turns on it and nothing settles it: one question per\nmeasure, `unit_of` its spec_id, `prices` set when a skill prefers one, one\nquestion for parts measuring one thing over other years. The answer names\nthe spec_id to fetch.\n- A reading the user picks: fetch its spec_id or name it in the plan brief.\n- capability_unavailable from a fetch or plan step: that part cannot be\ndone, and other data does not answer it. Say so, with the reason, and draw\nthe parts that can be.\n\nLoad a skill a result names whenever the question touches its domain, before\nyou fetch, plan or settle on a nearest series: skills hold the definitions,\nseries codes and rules for combining sources.\n\n# Asking\n\nAsk with ask_user when one of these holds, and otherwise go on and say which\nreading you took:\n\n- a placeholder stands for a real name (\"country X\", \"a donor\");\n- candidates leave a choice the question does not settle;\n- readings would give different figures and nothing favours one;\n- search found only series near the one asked, and drawing the nearest\nwould mislead: offer them, the most useful first, each with its spec_id,\nand answering without that part last;\n- the period is named by an event or administration, not years. Search\nevery part and ask which years (options such as \"2021 to the latest\") in\nthe same response, stating nothing about the event. Use the years given;\nwhen they fall after the data, say it ends earlier.\n\nOptions are answers you can deliver: a series in hand, a period the data\nholds. Do not offer a step that repeats a failed search. Ask everything in\none call, in the user's words, with `multi_select` and plain labels when\nanswers can hold together. An answered choice is settled.\n\n# Planning\n\nCall plan when the answer is constructed from the data: a total, average,\npeak or low over several years (an ask with `across_years`); a breakdown by\nmore than one party at once, such as giver and receiver; a ranking, the\nlargest or top, or which members meet a condition; a share, ratio,\nper-person figure or difference; growth or a drop; a sum across donors,\nsectors or places, or of measures from different sources, which goes to\nplan straight after search, the planner asking how to combine them.\n\nA total over a group of countries goes to plan as one aggregate: name the\ngroup once in the brief, as the user did, with its party in the ask's\n`over`, and leave choosing its members to the planner. Do not list the\nmembers yourself.\n\nDraw straight from a fetch only when a published series is the answer: one\nmeasure for a few named places, over time or at one period. \"Show\" does not\ndecide: a total, change, ranking or breakdown needs plan. Fetch every\ndefinite part a direct answer needs. The brief names each part's\ncandidates, open prices and the reading you took.\n\nOne plan a turn, and it ends your turn. When the plan fails, fetch and draw\nthe definite series search found before you write: label them as what they\nare, not as the derived result, and say what could not be calculated. A\nfamily of measures that adds up can be fetched summed. Do not repeat a\nrequest the failure named as not retryable; plan again only when the call\nis given back, with a brief that avoids the failure.\n\n# Charts and the canvas\n\nDraw fetched or planned data with make_charts, a card per frame that\nanswers part of the question: a line for a trend, bars to compare places or\ncategories, a stat card for one figure, a table for exact values. A second\ncard for a frame only when it shows what the first cannot. Cards do not\nstand in for a calculation.\n\nWrite each select as select_json sets out, binding every varying dimension\nbut the one compared; send {} only when one dimension varies. A refused\nchart names what to fix: draw again binding what it names to values the\nview lists, since a new chart type alone fixes nothing; with too many\nseries, bind all but one dimension to one value. A refusal marked\ndo_not_retry is not drawn again.\n\nA period counted back from now (\"over the past decade\") keeps moving: fetch\nwith scope window {\"kind\": \"range\", \"start_year\": Y}, no end_year, Y early\nenough, and set latest_periods on its charts. A plan keeps its own period\nmoving.\n\nmake_charts only adds cards, and each turn's cards join the ones already on\nthe canvas; a follow-up on the subject keeps them. remove_cards takes off\ncards the user names, every card with all_cards when asked to clear, and the\nearlier subject's cards when the conversation turns to another subject,\nwhich you say. remove_cards leaves pinned cards on the canvas and names them\nas kept_pinned; say which stayed. To redraw a card in another form, draw the\nnew one first, then remove the old and say it replaces it (or, if pinned,\nthat both stay). No tool pins, moves, resizes or renames a card: say so in a\nsentence and where to do it. A card's menu has Pin to Canvas (Unpin from\nCanvas) and Edit title (Edit card on a text card); a card moves by its\nhandle and a data card resizes from its corner grip. A pinned card comes off\nonce the user unpins it from the card's menu and asks again.\n\nThe canvas and conversation digests summarise earlier turns in a line each;\nthe canvas digest counts cards on the canvas, pinned and hidden. For an\nearlier turn's plan, readings or card word for word, call recall, not search.\nWhen the question refers to cards on the canvas (\"that chart\", \"clear the\ntable\"), or turns to another subject so the earlier subject's cards come\noff, call recall with part canvas first to see them and their ids, unless\nthe digest's focus card is enough. Hidden cards are off the canvas; the user\nputs them back with Add in the chat, no tool does. A focus_component_id\nmeans the user asked from that card: \"this\" and \"it\" mean it, so answer\nabout it alone, by its title.\n\n# The reply\n\nOpen with what the data shows in answer, or with what kept it from being\nanswered and what the cards show instead. Keep it brief, in prose; a list\nonly when the user asked for one no card holds. End on the data, not on an\noffer.\n\n- Of a drawn card, which the user sees, state only the values its\nreply_figures list, each with its period. Name in state_values_for only a\nseries the user asked a value of, with state_span for how it changed and\nstate_period for one earlier period. make_charts on a card already drawn\nreturns its figures without redrawing. With empty reply_figures, say what\nthe card holds and state no value. Close with one conclusion from holds.\n- Also state answers whose card was not drawn, and a computed result that\nanswers an ask, at its card's reply_figures. No other values, apart from a\nloose match's first and last. After a plan, answer every ask it lists.\n- A card's fact summary (recall, focus card) holds each series' first and\nlast value, their periods and the point count. Date values by their own\nperiod and claim nothing of the years between.\n- Name each source once by the measure its result or plan record gives,\nkeeping the label's words on whose flows or creditors it covers (debt\nservice \"owed to all creditors\"). When the user asked for more, say what it\ncovers and that the rest is not included.\n- In a short clause, say where you read the question otherwise than written:\na place read as another or as its members, a period replaced by the years\nwith data, a near measure, the price basis. Not for a reading the user chose.\n- Say a period_note in a clause; a ranking is among the members with data\nfor the year served.\n- A `held:` line (a partly reported year, or projections a source also\npublishes) means that data exists and is served when the user names those\nyears or asks about the future. With a card drawn, the reply's closing line\nstates it, so leave it out; with none, say it in a clause.\n- Round to three significant figures with a scale word (billion, million,\nper cent); keep counts exact and small values nonzero. No ids, codes, frame\ncounts or step names. A count names what it counts: entities or series with\ndata in the period (\"all N donors\", \"summed over its N indicators\"), or a\nfamily's indicators in any year, of which those with data are summed\n(\"summed over whichever of its N indicators hold data\").\n- Say plainly what could not be answered and the reason a tool result\nstates, in the user's terms, or none when it states none. State covered\nyears only as a result or plan record gives them, and a period the plan\nchose as a choice, with its reason.\n- Do not name how you work: no planner, plan step, search, matching,\ntranslation, data view, chart preparation or limit on your calls.",
+      "tools": [
+        {
+          "function_declarations": [
+            {
+              "description": "Search DFO's data per measure asked; returns spec_ids or candidates. With share_of, variable names the numerator alone.",
+              "name": "search",
+              "parameters_json_schema": {
+                "$defs": {
+                  "SearchEntity": {
+                    "additionalProperties": false,
+                    "description": "Places or parties, each with its role as spoken.",
+                    "properties": {
+                      "text": {
+                        "description": "The entity as spoken, e.g. 'France'.",
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "title": "Text",
+                        "type": "string"
+                      },
+                      "role": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Flow side: 'from' donor, 'to' recipient; 'creditor', 'debtor' for debt.",
+                        "title": "Role"
+                      },
+                      "members": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "True to ask for each member of a set of places.",
+                        "title": "Members"
+                      },
+                      "name": {
+                        "anyOf": [
+                          {
+                            "maxLength": 128,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Full name when text is ambiguous; not with dcid.",
+                        "title": "Name"
+                      },
+                      "dcid": {
+                        "anyOf": [
+                          {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Candidate dcid from a refusal; not with name.",
+                        "title": "Dcid"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "title": "SearchEntity",
+                    "type": "object"
+                  },
+                  "SearchOperation": {
+                    "additionalProperties": false,
+                    "description": "What the question computes over this part.",
+                    "properties": {
+                      "verb": {
+                        "description": "What the question asks to compute.",
+                        "enum": [
+                          "rank",
+                          "aggregate",
+                          "growth",
+                          "share_of",
+                          "explain",
+                          "forecast",
+                          "report"
+                        ],
+                        "title": "Verb",
+                        "type": "string"
+                      },
+                      "phrase": {
+                        "description": "User's wording, e.g. 'top 5'. With share_of, variable names the numerator alone.",
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "title": "Phrase",
+                        "type": "string"
+                      },
+                      "over": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "place",
+                              "origin",
+                              "destination",
+                              "category",
+                              "year"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "origin: donors, creditors; destination: recipients, debtors; else no flow side.",
+                        "title": "Over"
+                      },
+                      "target_year": {
+                        "anyOf": [
+                          {
+                            "maximum": 2200,
+                            "minimum": 1000,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The year a forecast projects to.",
+                        "title": "Target Year"
+                      }
+                    },
+                    "required": [
+                      "verb",
+                      "phrase"
+                    ],
+                    "title": "SearchOperation",
+                    "type": "object"
+                  },
+                  "SearchPart": {
+                    "additionalProperties": false,
+                    "description": "One measured variable the question asks for.",
+                    "properties": {
+                      "variable": {
+                        "description": "What is measured, in the user's words.",
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "title": "Variable",
+                        "type": "string"
+                      },
+                      "entities": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "$ref": "#/$defs/SearchEntity"
+                            },
+                            "maxItems": 16,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Places or parties, each with its role as spoken.",
+                        "title": "Entities"
+                      },
+                      "time": {
+                        "anyOf": [
+                          {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "'YYYY', 'YYYY to YYYY', 'since YYYY', 'between YYYY and the latest' or 'latest'.",
+                        "title": "Time"
+                      },
+                      "unit": {
+                        "anyOf": [
+                          {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Unit or price basis the user stated, if any.",
+                        "title": "Unit"
+                      },
+                      "open_roles": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "maxLength": 64,
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "maxItems": 2,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Side to list by member, e.g. ['creditor']; none for a total or a named side.",
+                        "title": "Open Roles"
+                      },
+                      "operations": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "$ref": "#/$defs/SearchOperation"
+                            },
+                            "maxItems": 8,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "What the question computes over this part.",
+                        "title": "Operations"
+                      },
+                      "sources": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "$ref": "#/$defs/SearchSource"
+                            },
+                            "maxItems": 8,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Publishers or datasets the user named.",
+                        "title": "Sources"
+                      },
+                      "source_code": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Indicator code, e.g. 'DT.TDS.DEGG.CD'.",
+                        "title": "Source Code"
+                      },
+                      "separate": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "True on each part of a comparison.",
+                        "title": "Separate"
+                      }
+                    },
+                    "required": [
+                      "variable"
+                    ],
+                    "title": "SearchPart",
+                    "type": "object"
+                  },
+                  "SearchSource": {
+                    "additionalProperties": false,
+                    "description": "Publishers or datasets the user named.",
+                    "properties": {
+                      "text": {
+                        "description": "The source as the user said it, e.g. 'IDS'.",
+                        "maxLength": 120,
+                        "minLength": 1,
+                        "title": "Text",
+                        "type": "string"
+                      },
+                      "ref": {
+                        "anyOf": [
+                          {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Chosen candidate's ref from source_ambiguous.",
+                        "title": "Ref"
+                      },
+                      "exclude": {
+                        "default": false,
+                        "description": "True when the user asks to leave it out.",
+                        "title": "Exclude",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "title": "SearchSource",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "parts": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "$ref": "#/$defs/SearchPart"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Parts"
+                  },
+                  "text": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Text"
+                  }
+                },
+                "title": "searchParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Retrieve the data behind a spec_id a search returned, as frames to chart.",
+              "name": "fetch",
+              "parameters_json_schema": {
+                "$defs": {
+                  "Breakdown": {
+                    "additionalProperties": false,
+                    "description": "One code axis to total by, at one level.",
+                    "properties": {
+                      "code_system": {
+                        "description": "Code system, e.g. \"crsPurpose\".",
+                        "minLength": 1,
+                        "title": "Code System",
+                        "type": "string"
+                      },
+                      "level": {
+                        "description": "Hierarchy depth; 0 is the top level.",
+                        "minimum": 0,
+                        "title": "Level",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "code_system",
+                      "level"
+                    ],
+                    "title": "Breakdown",
+                    "type": "object"
+                  },
+                  "FetchScope": {
+                    "additionalProperties": false,
+                    "description": "Replaces searched entities, window or facets.",
+                    "properties": {
+                      "entities": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Role -> names, e.g. {\"recipient\": [\"Togo\"]}.",
+                        "title": "Entities"
+                      },
+                      "window": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "e.g. {\"kind\": \"range\", \"start_year\": 2015}.",
+                        "title": "Window"
+                      },
+                      "facets": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Axis -> {\"ref\": \"...\"}, e.g. provenance.",
+                        "title": "Facets"
+                      }
+                    },
+                    "title": "FetchScope",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "spec_id": {
+                    "title": "Spec Id",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/FetchScope"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "stat_vars": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "sum",
+                          "separate"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Stat Vars"
+                  },
+                  "breakdown": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Breakdown"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "spec_id"
+                ],
+                "title": "fetchParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Draw charts on the user's canvas from frames a fetch or plan returned, with the figures to state.",
+              "name": "make_charts",
+              "parameters_json_schema": {
+                "$defs": {
+                  "Chart": {
+                    "description": "One chart from a fetched or planned frame.",
+                    "properties": {
+                      "frame": {
+                        "description": "Id of a frame returned this turn.",
+                        "title": "Frame",
+                        "type": "string"
+                      },
+                      "type": {
+                        "description": "line_chart: a series over time, or up to 8 places over time as one chart with the place dimension listing them; bar_chart: places or categories compared at one period; stat_card: one headline value; table: the detail. A chart shows every period its frame covers. A frame whose rows all cover one period (a collapsed window such as 2020/2024) has no run of periods to draw as a line: show it as a bar_chart, a table or a stat_card. A facet dimension (provenance, unit, measurementMethod) holding several values in the frame's view is bound to one of them in select_json, whatever the type.",
+                        "enum": [
+                          "line_chart",
+                          "bar_chart",
+                          "stat_card",
+                          "table"
+                        ],
+                        "title": "Type",
+                        "type": "string"
+                      },
+                      "title": {
+                        "description": "what the chart shows, with no period or year: 'Aid to Kenya by donor'. make_charts adds the period the card shows, and refuses a title naming a year the frame covers",
+                        "title": "Title",
+                        "type": "string"
+                      },
+                      "latest_periods": {
+                        "anyOf": [
+                          {
+                            "maximum": 200,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Show the N latest periods, e.g. 5.",
+                        "title": "Latest Periods"
+                      },
+                      "select_json": {
+                        "description": "a JSON object binding the frame's view to the series to draw. Each key is a dimension the view lists, and its value one value the view lists for it, or on one dimension a list of them: {\"observationAbout\": [\"country/GHA\", \"country/TGO\"]}, {\"financingRecipient\": \"country/MWI\"}. Bind every dimension the view lists with more than one value to one value, except the one dimension the chart compares, which you leave unbound (one series per value) or list. {} is accepted only when the view lists a single dimension with more than one value. A refusal names the dimensions still to bind: send the select again with each bound to a value the view lists. A line_chart draws at most 8 series, and a bar_chart or a table at most 24, a table fewer when its rows over the periods it covers would pass 2,000. When the compared dimension holds more than that, leave it unbound: the chart is cut for display to the largest at one period, and its title says how many and when. A cut chart shows; it does not answer which are largest, which needs a ranking calculated. Do not list a subset you chose to stand in for the largest. A chart with latest_periods, or over a frame whose view says rolling, is not cut: list its members from a ranking you asked for, at most as many as the chart draws.",
+                        "title": "Select Json",
+                        "type": "string"
+                      },
+                      "order_by_value": {
+                        "default": false,
+                        "description": "True to draw largest first.",
+                        "title": "Order By Value",
+                        "type": "boolean"
+                      },
+                      "state_values_for": {
+                        "description": "Series the user asked to be told a value of.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 24,
+                        "title": "State Values For",
+                        "type": "array"
+                      },
+                      "state_span": {
+                        "default": false,
+                        "description": "True to return first and last values.",
+                        "title": "State Span",
+                        "type": "boolean"
+                      },
+                      "state_period": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "One earlier period to return values at.",
+                        "title": "State Period"
+                      }
+                    },
+                    "required": [
+                      "frame",
+                      "type",
+                      "title",
+                      "select_json"
+                    ],
+                    "title": "Chart",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "charts": {
+                    "items": {
+                      "$ref": "#/$defs/Chart"
+                    },
+                    "title": "Charts",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "charts"
+                ],
+                "title": "make_chartsParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Ask the user one to three questions with likely answers, and end your turn after calling it.",
+              "name": "ask_user",
+              "parameters_json_schema": {
+                "$defs": {
+                  "AskOption": {
+                    "description": "Likely answers; empty for a unit question.",
+                    "properties": {
+                      "label": {
+                        "description": "The answer as the user reads it.",
+                        "title": "Label",
+                        "type": "string"
+                      },
+                      "spec_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The candidate's spec_id, for a candidate answer.",
+                        "title": "Spec Id"
+                      }
+                    },
+                    "required": [
+                      "label"
+                    ],
+                    "title": "AskOption",
+                    "type": "object"
+                  },
+                  "AskQuestion": {
+                    "description": "One question with the answers it offers.",
+                    "properties": {
+                      "question": {
+                        "description": "The question as the user reads it.",
+                        "title": "Question",
+                        "type": "string"
+                      },
+                      "options": {
+                        "description": "Likely answers; empty for a unit question.",
+                        "items": {
+                          "$ref": "#/$defs/AskOption"
+                        },
+                        "title": "Options",
+                        "type": "array"
+                      },
+                      "unit_of": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Spec_id of the part whose unit is asked.",
+                        "title": "Unit Of"
+                      },
+                      "prices": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "current",
+                              "constant"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Prices a skill prefers, on a unit question.",
+                        "title": "Prices"
+                      },
+                      "multi_select": {
+                        "default": false,
+                        "description": "True when several answers can hold together.",
+                        "title": "Multi Select",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "question"
+                    ],
+                    "title": "AskQuestion",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "questions": {
+                    "items": {
+                      "$ref": "#/$defs/AskQuestion"
+                    },
+                    "title": "Questions",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "questions"
+                ],
+                "title": "ask_userParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Hand a question whose answer needs a calculation to the planner; the user approves the plan before it runs.",
+              "name": "plan",
+              "parameters_json_schema": {
+                "$defs": {
+                  "AskedOutput": {
+                    "description": "One output the user asked for; every open side search goes in its by or over.",
+                    "properties": {
+                      "text": {
+                        "description": "The output in the user's terms, one line.",
+                        "title": "Text",
+                        "type": "string"
+                      },
+                      "by": {
+                        "default": [],
+                        "description": "Parties listed one by one, e.g. ['creditor']; [] for a total; not also in over.",
+                        "items": {
+                          "enum": [
+                            "donor",
+                            "recipient",
+                            "creditor",
+                            "debtor",
+                            "exporter",
+                            "importer"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "By",
+                        "type": "array"
+                      },
+                      "over": {
+                        "default": [],
+                        "description": "Parties totalled across, e.g. ['donor']; a share's whole totals its open side.",
+                        "items": {
+                          "enum": [
+                            "donor",
+                            "recipient",
+                            "creditor",
+                            "debtor",
+                            "exporter",
+                            "importer"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "Over",
+                        "type": "array"
+                      },
+                      "across_years": {
+                        "default": false,
+                        "description": "True for one figure across years the user named; false per year.",
+                        "title": "Across Years",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "title": "AskedOutput",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "brief": {
+                    "title": "Brief",
+                    "type": "string"
+                  },
+                  "asks": {
+                    "items": {
+                      "$ref": "#/$defs/AskedOutput"
+                    },
+                    "title": "Asks",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "brief",
+                  "asks"
+                ],
+                "title": "planParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Load a skill a search result named, or one of its files, a page at a time.",
+              "name": "get_skill",
+              "parameters_json_schema": {
+                "properties": {
+                  "skill_id": {
+                    "description": "Id of a skill a search result named.",
+                    "title": "Skill Id",
+                    "type": "string"
+                  },
+                  "path": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "A file path as the skill lists it.",
+                    "title": "Path"
+                  },
+                  "offset": {
+                    "default": 0,
+                    "description": "Page start: 0 or a closing line's offset.",
+                    "title": "Offset",
+                    "type": "integer"
+                  },
+                  "digest": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "The digest a closing line names.",
+                    "title": "Digest"
+                  }
+                },
+                "required": [
+                  "skill_id"
+                ],
+                "title": "get_skillParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Describe what DFO is and what this assistant can do, with DFO's catalogue counts.",
+              "name": "explain_dfo"
+            },
+            {
+              "description": "Read back in full an earlier turn's plan records or search readings, or the conversation's canvas cards.",
+              "name": "recall",
+              "parameters_json_schema": {
+                "$defs": {
+                  "RecallPart": {
+                    "enum": [
+                      "plan",
+                      "readings",
+                      "canvas"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "properties": {
+                  "part": {
+                    "$ref": "#/$defs/RecallPart"
+                  },
+                  "turn": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Turn"
+                  },
+                  "component_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Component Id"
+                  }
+                },
+                "required": [
+                  "part"
+                ],
+                "title": "recallParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Take cards off the user's canvas; pinned cards stay and come back as kept_pinned.",
+              "name": "remove_cards",
+              "parameters_json_schema": {
+                "properties": {
+                  "component_ids": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Component Ids"
+                  },
+                  "all_cards": {
+                    "default": false,
+                    "title": "All Cards",
+                    "type": "boolean"
+                  }
+                },
+                "title": "remove_cardsParams",
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ],
+      "thinking_config": {
+        "include_thoughts": true,
+        "thinking_level": "LOW"
+      },
+      "automatic_continuation": true
+    }
+  },
+  {
+    "model": "gemini-test",
+    "contents": [
+      {
+        "parts": [
+          {
+            "text": "Today's date (UTC): 2026-11-17\n\nThe user's canvas: {\"cards\": 2, \"hidden\": 0}\n\nEarlier turns in this conversation: [{\"turn\": 1, \"asked\": \"Kenya's GDP\"}]"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "parts": [
+          {
+            "text": "Rank Kenya's life expectancy"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "parts": [
+          {
+            "function_call": {
+              "args": {
+                "parts": [
+                  {
+                    "variable": "life expectancy"
+                  }
+                ]
+              },
+              "name": "search"
+            },
+            "thought_signature": "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I="
+          }
+        ],
+        "role": "model"
+      },
+      {
+        "parts": [
+          {
+            "function_response": {
+              "name": "search",
+              "response": {
+                "kind": "resolution",
+                "parts": [
+                  {
+                    "variable": "Life expectancy in Kenya",
+                    "status": "definite",
+                    "spec_id": "spec_ffffffffffffffffffffffffffffffff",
+                    "resolved": "Life expectancy in Kenya",
+                    "warnings": [],
+                    "candidates": [],
+                    "window": {
+                      "start": 1960,
+                      "end": 2023,
+                      "source": "coverage"
+                    },
+                    "wide": false
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "parts": [
+          {
+            "text": "A ranking needs a plan.",
+            "thought": true,
+            "thought_signature": "c2NyaXB0ZWQtc2lnbmF0dXJl"
+          },
+          {
+            "function_call": {
+              "args": {
+                "brief": "rank Kenya",
+                "asks": [
+                  "rank"
+                ]
+              },
+              "name": "plan"
+            },
+            "thought_signature": "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I="
+          }
+        ],
+        "role": "model"
+      },
+      {
+        "parts": [
+          {
+            "function_response": {
+              "name": "plan",
+              "response": {
+                "result": "The planner could not make a plan: the planner ran out of rounds\nFetch the series the question rests on, by the spec_ids search returned, and chart them labelled as what they are; then say which calculation could not be made. A brief that avoids the problem may be planned once more."
+              }
+            }
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "config": {
+      "system_instruction": "You are the analyst behind DFO Studio, the Development Finance Observatory's\nchat and canvas. You answer questions about development, development finance\nand the open data DFO holds, from what your tools return.\n\n# Core rules\n\n1. Every figure, name, period and claim about data rests on a tool result\nfrom this turn, the user's canvas or an earlier turn. Do not answer from\nmemory, world knowledge or mental maths, add no background or causes of\nyour own, and do not say you did something no tool result shows you did.\n2. Compute nothing yourself: no sums, differences, averages, shares or\ncounts of returned values, and no names you pick to stand in for a\nranking. A figure only a calculation gives comes from plan, or is reported\nas not calculated.\n3. End every data turn in one of two ways: data drawn on the canvas, or an\nask_user call. Never end on a question or offer in text (\"would you like\",\n\"let me know\", \"I can show\"): a text offer leaves the user with nothing to\nclick. When a series near the one asked is in hand, fetch and draw it,\nlabelled as the nearest DFO holds, or ask with it as the first option.\n4. A refusal, a missing place or a missing year is a step, not an answer:\nwhen a result names a fix, the values it accepts or the years it holds,\ncall again with them. Report that something cannot be answered only after\nthe repairs under \"Searching\" have failed, and then still draw or ask.\n5. Ask only what changes the answer (see \"Asking\"). A question that remains\ngoes through ask_user, never into the reply.\n\nDecline questions outside development and development finance in one\ncourteous sentence and say what you can help with. Do not speculate, give\npolitical views, or help with a request that could cause harm.\n\n# Limits\n\nPer turn: 8 search, 6 fetch, 5 make_charts that draw and 3 refused, 2\nask_user, 1 plan, 2 get_skill (4 more for files), 3 recall, 3 remove_cards,\nand about 30 model calls shared with the planner. Spend searches on new\nattempts and leave room to fetch, plan and draw. Put independent calls in\none response. A call past its limit is refused: draw what you have.\n\n# Messages that need no data\n\nA greeting, thanks or small talk gets a few plain sentences with no search.\nDo not state a figure in a reply to a greeting or small talk. For a question\nabout DFO itself or what can be asked here, call explain_dfo and answer from\nit alone, stating only the figures it gives. Whether DFO holds data on a\ntopic is a data question. Asked why something happened, say what the data\nshows and that it cannot establish causes. \"What happened?\" about a figure\nalready shown asks what it is: restate its source and coverage.\n\n# Searching\n\nOpen with one search: exactly what a precise question asks, or a few likely\nmeasures for a broad one. With no period named, search the latest. Send\nplaces as the user wrote them, and a party that gives or receives a flow as\nan entity with its `role`, not inside `variable`. Datasets the user brought\nfrom Search answer the parts they cover: fetch them and search only the rest.\n\nRepair a part that comes back empty, refused or unplaced with new searches\nuntil it comes back definite, putting several attempts in one call:\n\n- A place, group or qualifier search cannot use: search the measure without\nit, and with the nearest place or group the data holds (a wider region, the\ncountries it names, the world). Keep the reading that answers most of the\nquestion, and say what was dropped.\n- Years the data does not hold: search again for the years the result says\nit covers, and say the years asked are not held.\n- role_not_resolved, or sides of a flow that disagree: set `role` on every\nname, from the side the user or an earlier turn gave it.\n- `retry_with_text`: that part alone, `text` set to the user's own words\nfor it. It repairs wording, not a place or a year, so make the repairs\nabove first when the reason is one of those. A part without\n`retry_with_text` is not searched with `text`.\n- A measure search cannot match: search the measures nearest it, several in\none call: a wider or narrower sector, the same flow from another table, the\naid or debt side of a flow, another count. When a result names a skill for\nthe domain, load it and search with a series code it gives as\n`source_code`.\n\nExpect two to four searches before you settle on the nearest series. When\nsearch says it defaulted, dropped or changed part of the question, or\nanswered more broadly, tell the user in their terms.\n\n# Reading results\n\n- A close but different measure (national income for \"GDP\") is named as\nwhat it is, never as the measure asked for.\n- A loose match (a closest_match departure, or a fetched candidate of a part\nwarned retrieval_score_weak): give the series' first and last values with\ntheir periods, even when drawn. The harness adds what it covers and lacks.\n- group_readings: the group's published total, said in those words.\ngroup_read_as_members: its members; say whether you list or add them up.\n- candidates: fetch the one the question makes plainly right, or ask.\n- `counted_as` is settled, even beside `alternatives`. Put a word for how a\nflow is counted into `variable` only when the user said it, and let search\nelect the rest. The harness adds a \"Counted as\" line with buttons for other\nchoices, so leave those out.\n- `open_prices` (over several years only): fetch the reading search gave, or\nthe constant-price spec_id under `other_prices` when a skill or the user\nprefers constant prices, and say which basis you show. Ask the unit only\nwhen the question turns on it and nothing settles it: one question per\nmeasure, `unit_of` its spec_id, `prices` set when a skill prefers one, one\nquestion for parts measuring one thing over other years. The answer names\nthe spec_id to fetch.\n- A reading the user picks: fetch its spec_id or name it in the plan brief.\n- capability_unavailable from a fetch or plan step: that part cannot be\ndone, and other data does not answer it. Say so, with the reason, and draw\nthe parts that can be.\n\nLoad a skill a result names whenever the question touches its domain, before\nyou fetch, plan or settle on a nearest series: skills hold the definitions,\nseries codes and rules for combining sources.\n\n# Asking\n\nAsk with ask_user when one of these holds, and otherwise go on and say which\nreading you took:\n\n- a placeholder stands for a real name (\"country X\", \"a donor\");\n- candidates leave a choice the question does not settle;\n- readings would give different figures and nothing favours one;\n- search found only series near the one asked, and drawing the nearest\nwould mislead: offer them, the most useful first, each with its spec_id,\nand answering without that part last;\n- the period is named by an event or administration, not years. Search\nevery part and ask which years (options such as \"2021 to the latest\") in\nthe same response, stating nothing about the event. Use the years given;\nwhen they fall after the data, say it ends earlier.\n\nOptions are answers you can deliver: a series in hand, a period the data\nholds. Do not offer a step that repeats a failed search. Ask everything in\none call, in the user's words, with `multi_select` and plain labels when\nanswers can hold together. An answered choice is settled.\n\n# Planning\n\nCall plan when the answer is constructed from the data: a total, average,\npeak or low over several years (an ask with `across_years`); a breakdown by\nmore than one party at once, such as giver and receiver; a ranking, the\nlargest or top, or which members meet a condition; a share, ratio,\nper-person figure or difference; growth or a drop; a sum across donors,\nsectors or places, or of measures from different sources, which goes to\nplan straight after search, the planner asking how to combine them.\n\nA total over a group of countries goes to plan as one aggregate: name the\ngroup once in the brief, as the user did, with its party in the ask's\n`over`, and leave choosing its members to the planner. Do not list the\nmembers yourself.\n\nDraw straight from a fetch only when a published series is the answer: one\nmeasure for a few named places, over time or at one period. \"Show\" does not\ndecide: a total, change, ranking or breakdown needs plan. Fetch every\ndefinite part a direct answer needs. The brief names each part's\ncandidates, open prices and the reading you took.\n\nOne plan a turn, and it ends your turn. When the plan fails, fetch and draw\nthe definite series search found before you write: label them as what they\nare, not as the derived result, and say what could not be calculated. A\nfamily of measures that adds up can be fetched summed. Do not repeat a\nrequest the failure named as not retryable; plan again only when the call\nis given back, with a brief that avoids the failure.\n\n# Charts and the canvas\n\nDraw fetched or planned data with make_charts, a card per frame that\nanswers part of the question: a line for a trend, bars to compare places or\ncategories, a stat card for one figure, a table for exact values. A second\ncard for a frame only when it shows what the first cannot. Cards do not\nstand in for a calculation.\n\nWrite each select as select_json sets out, binding every varying dimension\nbut the one compared; send {} only when one dimension varies. A refused\nchart names what to fix: draw again binding what it names to values the\nview lists, since a new chart type alone fixes nothing; with too many\nseries, bind all but one dimension to one value. A refusal marked\ndo_not_retry is not drawn again.\n\nA period counted back from now (\"over the past decade\") keeps moving: fetch\nwith scope window {\"kind\": \"range\", \"start_year\": Y}, no end_year, Y early\nenough, and set latest_periods on its charts. A plan keeps its own period\nmoving.\n\nmake_charts only adds cards, and each turn's cards join the ones already on\nthe canvas; a follow-up on the subject keeps them. remove_cards takes off\ncards the user names, every card with all_cards when asked to clear, and the\nearlier subject's cards when the conversation turns to another subject,\nwhich you say. remove_cards leaves pinned cards on the canvas and names them\nas kept_pinned; say which stayed. To redraw a card in another form, draw the\nnew one first, then remove the old and say it replaces it (or, if pinned,\nthat both stay). No tool pins, moves, resizes or renames a card: say so in a\nsentence and where to do it. A card's menu has Pin to Canvas (Unpin from\nCanvas) and Edit title (Edit card on a text card); a card moves by its\nhandle and a data card resizes from its corner grip. A pinned card comes off\nonce the user unpins it from the card's menu and asks again.\n\nThe canvas and conversation digests summarise earlier turns in a line each;\nthe canvas digest counts cards on the canvas, pinned and hidden. For an\nearlier turn's plan, readings or card word for word, call recall, not search.\nWhen the question refers to cards on the canvas (\"that chart\", \"clear the\ntable\"), or turns to another subject so the earlier subject's cards come\noff, call recall with part canvas first to see them and their ids, unless\nthe digest's focus card is enough. Hidden cards are off the canvas; the user\nputs them back with Add in the chat, no tool does. A focus_component_id\nmeans the user asked from that card: \"this\" and \"it\" mean it, so answer\nabout it alone, by its title.\n\n# The reply\n\nOpen with what the data shows in answer, or with what kept it from being\nanswered and what the cards show instead. Keep it brief, in prose; a list\nonly when the user asked for one no card holds. End on the data, not on an\noffer.\n\n- Of a drawn card, which the user sees, state only the values its\nreply_figures list, each with its period. Name in state_values_for only a\nseries the user asked a value of, with state_span for how it changed and\nstate_period for one earlier period. make_charts on a card already drawn\nreturns its figures without redrawing. With empty reply_figures, say what\nthe card holds and state no value. Close with one conclusion from holds.\n- Also state answers whose card was not drawn, and a computed result that\nanswers an ask, at its card's reply_figures. No other values, apart from a\nloose match's first and last. After a plan, answer every ask it lists.\n- A card's fact summary (recall, focus card) holds each series' first and\nlast value, their periods and the point count. Date values by their own\nperiod and claim nothing of the years between.\n- Name each source once by the measure its result or plan record gives,\nkeeping the label's words on whose flows or creditors it covers (debt\nservice \"owed to all creditors\"). When the user asked for more, say what it\ncovers and that the rest is not included.\n- In a short clause, say where you read the question otherwise than written:\na place read as another or as its members, a period replaced by the years\nwith data, a near measure, the price basis. Not for a reading the user chose.\n- Say a period_note in a clause; a ranking is among the members with data\nfor the year served.\n- A `held:` line (a partly reported year, or projections a source also\npublishes) means that data exists and is served when the user names those\nyears or asks about the future. With a card drawn, the reply's closing line\nstates it, so leave it out; with none, say it in a clause.\n- Round to three significant figures with a scale word (billion, million,\nper cent); keep counts exact and small values nonzero. No ids, codes, frame\ncounts or step names. A count names what it counts: entities or series with\ndata in the period (\"all N donors\", \"summed over its N indicators\"), or a\nfamily's indicators in any year, of which those with data are summed\n(\"summed over whichever of its N indicators hold data\").\n- Say plainly what could not be answered and the reason a tool result\nstates, in the user's terms, or none when it states none. State covered\nyears only as a result or plan record gives them, and a period the plan\nchose as a choice, with its reason.\n- Do not name how you work: no planner, plan step, search, matching,\ntranslation, data view, chart preparation or limit on your calls.",
+      "tools": [
+        {
+          "function_declarations": [
+            {
+              "description": "Search DFO's data per measure asked; returns spec_ids or candidates. With share_of, variable names the numerator alone.",
+              "name": "search",
+              "parameters_json_schema": {
+                "$defs": {
+                  "SearchEntity": {
+                    "additionalProperties": false,
+                    "description": "Places or parties, each with its role as spoken.",
+                    "properties": {
+                      "text": {
+                        "description": "The entity as spoken, e.g. 'France'.",
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "title": "Text",
+                        "type": "string"
+                      },
+                      "role": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Flow side: 'from' donor, 'to' recipient; 'creditor', 'debtor' for debt.",
+                        "title": "Role"
+                      },
+                      "members": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "True to ask for each member of a set of places.",
+                        "title": "Members"
+                      },
+                      "name": {
+                        "anyOf": [
+                          {
+                            "maxLength": 128,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Full name when text is ambiguous; not with dcid.",
+                        "title": "Name"
+                      },
+                      "dcid": {
+                        "anyOf": [
+                          {
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Candidate dcid from a refusal; not with name.",
+                        "title": "Dcid"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "title": "SearchEntity",
+                    "type": "object"
+                  },
+                  "SearchOperation": {
+                    "additionalProperties": false,
+                    "description": "What the question computes over this part.",
+                    "properties": {
+                      "verb": {
+                        "description": "What the question asks to compute.",
+                        "enum": [
+                          "rank",
+                          "aggregate",
+                          "growth",
+                          "share_of",
+                          "explain",
+                          "forecast",
+                          "report"
+                        ],
+                        "title": "Verb",
+                        "type": "string"
+                      },
+                      "phrase": {
+                        "description": "User's wording, e.g. 'top 5'. With share_of, variable names the numerator alone.",
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "title": "Phrase",
+                        "type": "string"
+                      },
+                      "over": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "place",
+                              "origin",
+                              "destination",
+                              "category",
+                              "year"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "origin: donors, creditors; destination: recipients, debtors; else no flow side.",
+                        "title": "Over"
+                      },
+                      "target_year": {
+                        "anyOf": [
+                          {
+                            "maximum": 2200,
+                            "minimum": 1000,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The year a forecast projects to.",
+                        "title": "Target Year"
+                      }
+                    },
+                    "required": [
+                      "verb",
+                      "phrase"
+                    ],
+                    "title": "SearchOperation",
+                    "type": "object"
+                  },
+                  "SearchPart": {
+                    "additionalProperties": false,
+                    "description": "One measured variable the question asks for.",
+                    "properties": {
+                      "variable": {
+                        "description": "What is measured, in the user's words.",
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "title": "Variable",
+                        "type": "string"
+                      },
+                      "entities": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "$ref": "#/$defs/SearchEntity"
+                            },
+                            "maxItems": 16,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Places or parties, each with its role as spoken.",
+                        "title": "Entities"
+                      },
+                      "time": {
+                        "anyOf": [
+                          {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "'YYYY', 'YYYY to YYYY', 'since YYYY', 'between YYYY and the latest' or 'latest'.",
+                        "title": "Time"
+                      },
+                      "unit": {
+                        "anyOf": [
+                          {
+                            "maxLength": 100,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Unit or price basis the user stated, if any.",
+                        "title": "Unit"
+                      },
+                      "open_roles": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "maxLength": 64,
+                              "minLength": 1,
+                              "type": "string"
+                            },
+                            "maxItems": 2,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Side to list by member, e.g. ['creditor']; none for a total or a named side.",
+                        "title": "Open Roles"
+                      },
+                      "operations": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "$ref": "#/$defs/SearchOperation"
+                            },
+                            "maxItems": 8,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "What the question computes over this part.",
+                        "title": "Operations"
+                      },
+                      "sources": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "$ref": "#/$defs/SearchSource"
+                            },
+                            "maxItems": 8,
+                            "minItems": 1,
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Publishers or datasets the user named.",
+                        "title": "Sources"
+                      },
+                      "source_code": {
+                        "anyOf": [
+                          {
+                            "maxLength": 64,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Indicator code, e.g. 'DT.TDS.DEGG.CD'.",
+                        "title": "Source Code"
+                      },
+                      "separate": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "True on each part of a comparison.",
+                        "title": "Separate"
+                      }
+                    },
+                    "required": [
+                      "variable"
+                    ],
+                    "title": "SearchPart",
+                    "type": "object"
+                  },
+                  "SearchSource": {
+                    "additionalProperties": false,
+                    "description": "Publishers or datasets the user named.",
+                    "properties": {
+                      "text": {
+                        "description": "The source as the user said it, e.g. 'IDS'.",
+                        "maxLength": 120,
+                        "minLength": 1,
+                        "title": "Text",
+                        "type": "string"
+                      },
+                      "ref": {
+                        "anyOf": [
+                          {
+                            "maxLength": 200,
+                            "minLength": 1,
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Chosen candidate's ref from source_ambiguous.",
+                        "title": "Ref"
+                      },
+                      "exclude": {
+                        "default": false,
+                        "description": "True when the user asks to leave it out.",
+                        "title": "Exclude",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "title": "SearchSource",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "parts": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "$ref": "#/$defs/SearchPart"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Parts"
+                  },
+                  "text": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Text"
+                  }
+                },
+                "title": "searchParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Retrieve the data behind a spec_id a search returned, as frames to chart.",
+              "name": "fetch",
+              "parameters_json_schema": {
+                "$defs": {
+                  "Breakdown": {
+                    "additionalProperties": false,
+                    "description": "One code axis to total by, at one level.",
+                    "properties": {
+                      "code_system": {
+                        "description": "Code system, e.g. \"crsPurpose\".",
+                        "minLength": 1,
+                        "title": "Code System",
+                        "type": "string"
+                      },
+                      "level": {
+                        "description": "Hierarchy depth; 0 is the top level.",
+                        "minimum": 0,
+                        "title": "Level",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "code_system",
+                      "level"
+                    ],
+                    "title": "Breakdown",
+                    "type": "object"
+                  },
+                  "FetchScope": {
+                    "additionalProperties": false,
+                    "description": "Replaces searched entities, window or facets.",
+                    "properties": {
+                      "entities": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Role -> names, e.g. {\"recipient\": [\"Togo\"]}.",
+                        "title": "Entities"
+                      },
+                      "window": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "e.g. {\"kind\": \"range\", \"start_year\": 2015}.",
+                        "title": "Window"
+                      },
+                      "facets": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": true,
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Axis -> {\"ref\": \"...\"}, e.g. provenance.",
+                        "title": "Facets"
+                      }
+                    },
+                    "title": "FetchScope",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "spec_id": {
+                    "title": "Spec Id",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/FetchScope"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  },
+                  "stat_vars": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "sum",
+                          "separate"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Stat Vars"
+                  },
+                  "breakdown": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Breakdown"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "spec_id"
+                ],
+                "title": "fetchParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Draw charts on the user's canvas from frames a fetch or plan returned, with the figures to state.",
+              "name": "make_charts",
+              "parameters_json_schema": {
+                "$defs": {
+                  "Chart": {
+                    "description": "One chart from a fetched or planned frame.",
+                    "properties": {
+                      "frame": {
+                        "description": "Id of a frame returned this turn.",
+                        "title": "Frame",
+                        "type": "string"
+                      },
+                      "type": {
+                        "description": "line_chart: a series over time, or up to 8 places over time as one chart with the place dimension listing them; bar_chart: places or categories compared at one period; stat_card: one headline value; table: the detail. A chart shows every period its frame covers. A frame whose rows all cover one period (a collapsed window such as 2020/2024) has no run of periods to draw as a line: show it as a bar_chart, a table or a stat_card. A facet dimension (provenance, unit, measurementMethod) holding several values in the frame's view is bound to one of them in select_json, whatever the type.",
+                        "enum": [
+                          "line_chart",
+                          "bar_chart",
+                          "stat_card",
+                          "table"
+                        ],
+                        "title": "Type",
+                        "type": "string"
+                      },
+                      "title": {
+                        "description": "what the chart shows, with no period or year: 'Aid to Kenya by donor'. make_charts adds the period the card shows, and refuses a title naming a year the frame covers",
+                        "title": "Title",
+                        "type": "string"
+                      },
+                      "latest_periods": {
+                        "anyOf": [
+                          {
+                            "maximum": 200,
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Show the N latest periods, e.g. 5.",
+                        "title": "Latest Periods"
+                      },
+                      "select_json": {
+                        "description": "a JSON object binding the frame's view to the series to draw. Each key is a dimension the view lists, and its value one value the view lists for it, or on one dimension a list of them: {\"observationAbout\": [\"country/GHA\", \"country/TGO\"]}, {\"financingRecipient\": \"country/MWI\"}. Bind every dimension the view lists with more than one value to one value, except the one dimension the chart compares, which you leave unbound (one series per value) or list. {} is accepted only when the view lists a single dimension with more than one value. A refusal names the dimensions still to bind: send the select again with each bound to a value the view lists. A line_chart draws at most 8 series, and a bar_chart or a table at most 24, a table fewer when its rows over the periods it covers would pass 2,000. When the compared dimension holds more than that, leave it unbound: the chart is cut for display to the largest at one period, and its title says how many and when. A cut chart shows; it does not answer which are largest, which needs a ranking calculated. Do not list a subset you chose to stand in for the largest. A chart with latest_periods, or over a frame whose view says rolling, is not cut: list its members from a ranking you asked for, at most as many as the chart draws.",
+                        "title": "Select Json",
+                        "type": "string"
+                      },
+                      "order_by_value": {
+                        "default": false,
+                        "description": "True to draw largest first.",
+                        "title": "Order By Value",
+                        "type": "boolean"
+                      },
+                      "state_values_for": {
+                        "description": "Series the user asked to be told a value of.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 24,
+                        "title": "State Values For",
+                        "type": "array"
+                      },
+                      "state_span": {
+                        "default": false,
+                        "description": "True to return first and last values.",
+                        "title": "State Span",
+                        "type": "boolean"
+                      },
+                      "state_period": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "One earlier period to return values at.",
+                        "title": "State Period"
+                      }
+                    },
+                    "required": [
+                      "frame",
+                      "type",
+                      "title",
+                      "select_json"
+                    ],
+                    "title": "Chart",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "charts": {
+                    "items": {
+                      "$ref": "#/$defs/Chart"
+                    },
+                    "title": "Charts",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "charts"
+                ],
+                "title": "make_chartsParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Ask the user one to three questions with likely answers, and end your turn after calling it.",
+              "name": "ask_user",
+              "parameters_json_schema": {
+                "$defs": {
+                  "AskOption": {
+                    "description": "Likely answers; empty for a unit question.",
+                    "properties": {
+                      "label": {
+                        "description": "The answer as the user reads it.",
+                        "title": "Label",
+                        "type": "string"
+                      },
+                      "spec_id": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The candidate's spec_id, for a candidate answer.",
+                        "title": "Spec Id"
+                      }
+                    },
+                    "required": [
+                      "label"
+                    ],
+                    "title": "AskOption",
+                    "type": "object"
+                  },
+                  "AskQuestion": {
+                    "description": "One question with the answers it offers.",
+                    "properties": {
+                      "question": {
+                        "description": "The question as the user reads it.",
+                        "title": "Question",
+                        "type": "string"
+                      },
+                      "options": {
+                        "description": "Likely answers; empty for a unit question.",
+                        "items": {
+                          "$ref": "#/$defs/AskOption"
+                        },
+                        "title": "Options",
+                        "type": "array"
+                      },
+                      "unit_of": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Spec_id of the part whose unit is asked.",
+                        "title": "Unit Of"
+                      },
+                      "prices": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "current",
+                              "constant"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Prices a skill prefers, on a unit question.",
+                        "title": "Prices"
+                      },
+                      "multi_select": {
+                        "default": false,
+                        "description": "True when several answers can hold together.",
+                        "title": "Multi Select",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "question"
+                    ],
+                    "title": "AskQuestion",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "questions": {
+                    "items": {
+                      "$ref": "#/$defs/AskQuestion"
+                    },
+                    "title": "Questions",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "questions"
+                ],
+                "title": "ask_userParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Hand a question whose answer needs a calculation to the planner; the user approves the plan before it runs.",
+              "name": "plan",
+              "parameters_json_schema": {
+                "$defs": {
+                  "AskedOutput": {
+                    "description": "One output the user asked for; every open side search goes in its by or over.",
+                    "properties": {
+                      "text": {
+                        "description": "The output in the user's terms, one line.",
+                        "title": "Text",
+                        "type": "string"
+                      },
+                      "by": {
+                        "default": [],
+                        "description": "Parties listed one by one, e.g. ['creditor']; [] for a total; not also in over.",
+                        "items": {
+                          "enum": [
+                            "donor",
+                            "recipient",
+                            "creditor",
+                            "debtor",
+                            "exporter",
+                            "importer"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "By",
+                        "type": "array"
+                      },
+                      "over": {
+                        "default": [],
+                        "description": "Parties totalled across, e.g. ['donor']; a share's whole totals its open side.",
+                        "items": {
+                          "enum": [
+                            "donor",
+                            "recipient",
+                            "creditor",
+                            "debtor",
+                            "exporter",
+                            "importer"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "Over",
+                        "type": "array"
+                      },
+                      "across_years": {
+                        "default": false,
+                        "description": "True for one figure across years the user named; false per year.",
+                        "title": "Across Years",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "title": "AskedOutput",
+                    "type": "object"
+                  }
+                },
+                "properties": {
+                  "brief": {
+                    "title": "Brief",
+                    "type": "string"
+                  },
+                  "asks": {
+                    "items": {
+                      "$ref": "#/$defs/AskedOutput"
+                    },
+                    "title": "Asks",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "brief",
+                  "asks"
+                ],
+                "title": "planParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Load a skill a search result named, or one of its files, a page at a time.",
+              "name": "get_skill",
+              "parameters_json_schema": {
+                "properties": {
+                  "skill_id": {
+                    "description": "Id of a skill a search result named.",
+                    "title": "Skill Id",
+                    "type": "string"
+                  },
+                  "path": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "A file path as the skill lists it.",
+                    "title": "Path"
+                  },
+                  "offset": {
+                    "default": 0,
+                    "description": "Page start: 0 or a closing line's offset.",
+                    "title": "Offset",
+                    "type": "integer"
+                  },
+                  "digest": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "description": "The digest a closing line names.",
+                    "title": "Digest"
+                  }
+                },
+                "required": [
+                  "skill_id"
+                ],
+                "title": "get_skillParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Describe what DFO is and what this assistant can do, with DFO's catalogue counts.",
+              "name": "explain_dfo"
+            },
+            {
+              "description": "Read back in full an earlier turn's plan records or search readings, or the conversation's canvas cards.",
+              "name": "recall",
+              "parameters_json_schema": {
+                "$defs": {
+                  "RecallPart": {
+                    "enum": [
+                      "plan",
+                      "readings",
+                      "canvas"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "properties": {
+                  "part": {
+                    "$ref": "#/$defs/RecallPart"
+                  },
+                  "turn": {
+                    "anyOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Turn"
+                  },
+                  "component_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Component Id"
+                  }
+                },
+                "required": [
+                  "part"
+                ],
+                "title": "recallParams",
+                "type": "object"
+              }
+            },
+            {
+              "description": "Take cards off the user's canvas; pinned cards stay and come back as kept_pinned.",
+              "name": "remove_cards",
+              "parameters_json_schema": {
+                "properties": {
+                  "component_ids": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "default": null,
+                    "title": "Component Ids"
+                  },
+                  "all_cards": {
+                    "default": false,
+                    "title": "All Cards",
+                    "type": "boolean"
+                  }
+                },
+                "title": "remove_cardsParams",
+                "type": "object"
+              }
+            }
+          ]
+        }
+      ],
+      "thinking_config": {
+        "include_thoughts": true,
+        "thinking_level": "LOW"
+      },
+      "automatic_continuation": true
+    }
+  }
+]

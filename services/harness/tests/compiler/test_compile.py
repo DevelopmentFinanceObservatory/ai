@@ -40,6 +40,7 @@ from data_mcp.definition_writes import windowed_identity
 from dfo_frame_grammar.frame import Frame
 from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN
 from harness.graph.state import ORCHESTRATOR_SPECS_KEY, store_search
+from harness.surface import FLASH_SURFACE, HYDROGEN_SURFACE, set_studio_surface
 from harness.tool_contracts import resolver_digest
 from planner.operations import (
     AggregateOperation,
@@ -2167,6 +2168,33 @@ def test_a_source_that_cannot_serve_the_requirement_is_reported_with_the_finding
     assert Code.SOURCE_UNUSABLE in _codes(result)
     unusable = next(i for i in result.issues if i.code is Code.SOURCE_UNUSABLE)
     assert "no entity named 'Uganda'" in unusable.reason
+
+
+@pytest.mark.parametrize(("variant", "issues"), [("hydrogen", 1), ("flash", 3)])
+def test_every_entity_the_source_lacks_is_reported_in_one_issue(
+    variant: str,
+    issues: int,
+    build: Callable[..., CompileResult],
+    decision: DecisionFactory,
+    requirement: RequirementFactory,
+    derived_requirement: DerivedRequirementFactory,
+) -> None:
+    # The referral closes on one issue, so a name per issue would cost the
+    # planner a plan round for each name the source lacks. Only the hydrogen
+    # variant joins them.
+    set_studio_surface(FLASH_SURFACE if variant == "flash" else HYDROGEN_SURFACE)
+    names = ("Uganda", "Vatican City", "North America")
+    plan = _draft(
+        [decision()],
+        [requirement(entities=[Entity(name=name) for name in names]), derived_requirement()],
+    )
+
+    result = build(plan, _translation(_retrieve(), _aggregate()))
+
+    unusable = [i for i in result.issues if i.code is Code.SOURCE_UNUSABLE]
+    assert [i.finding for i in unusable] == [EvidenceIssueCode.ENTITY_MISSING] * issues
+    reasons = " ".join(i.reason for i in unusable)
+    assert all(f"no entity named {name!r}" in reasons for name in names)
 
 
 def test_findings_that_do_not_block_come_back_as_warnings(

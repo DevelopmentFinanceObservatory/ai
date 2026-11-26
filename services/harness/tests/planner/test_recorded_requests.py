@@ -34,7 +34,8 @@ from ..scripted_genai import Reply, Request, ScriptedGenai, call_part, reply
 from ..test_planner_entry_eval import entry, validate
 from ..turn_driver import numbered_call_ids as _numbered_call_ids
 
-_MODEL = AgentSettings().planner_model_name
+# The recorded requests are Flash's bytes (`flash_studio`).
+pytestmark = pytest.mark.usefixtures("flash_studio")
 
 _CASES = [
     pytest.param(task, payload, id=f"{task.id}:{payload.label}")
@@ -87,7 +88,7 @@ async def test_each_request_equals_its_stored_expectation(
     sent, run = await _requests(task, payload)
 
     assert len(sent) == (3 if payload.refusal is not None else 1)
-    assert all(each.model == _MODEL for each in sent)
+    assert all(each.model == AgentSettings().planner_model_name for each in sent)
     assert run.probe.plan is not None
     assert all(len(_briefs(each)) == 1 for each in sent), "one brief a request"
     plan = run.probe.plan.model_dump(mode="json")

@@ -176,7 +176,7 @@ from harness.planner_run import (
     not_ready,
     referral_of,
 )
-from harness.prefix_cache import PrefixCache, gemini_model_name
+from harness.prefix_cache import PrefixCache
 from harness.sentences import (
     PlanWords,
     StopCode,
@@ -184,6 +184,7 @@ from harness.sentences import (
     refusal_sentence,
 )
 from harness.settings import Settings
+from harness.surface import resolved_model_name
 from harness.turn.node import NodeCtx
 from harness.turn_budget import TurnBudget, current_turn_budget
 from harness.turn_events import PLANNER_ASK
@@ -387,11 +388,11 @@ class PlannerAdapter:
         model_name = (
             agent_settings if agent_settings is not None else AgentSettings()
         ).planner_model_name
-        # The planner runs only the Gemini model the name resolves to, and
-        # both checks run before anything is built.
-        gemini_name = gemini_model_name(model_name)
-        if gemini_name is None:
-            raise ValueError(f"the planner runs a Gemini model only, and {model_name!r} names none")
+        # The planner runs only the Gemini model the name resolves to, under
+        # the name the surface and the orchestrator resolve it to
+        # (`harness.surface.resolved_model_name`), and both checks run before
+        # anything is built.
+        gemini_name = resolved_model_name(model_name, setting="PLANNER_MODEL_NAME")
         refuse_vertex_ai(gemini_name, client)
         self._model_name = gemini_name
         self._prefix_cache = prefix_cache
@@ -1878,7 +1879,7 @@ def _plan_context(prior_plan: dict[str, Any] | None, *, stated: Collection[str] 
     # and `workflow.evidence_bindings`, which say which requirement each
     # source answers. The compiler's own mechanics are left out: each step's
     # tool, its literal `args` and `bindings`, and the operations they were
-    # built from. `_PLANNING` tells the planner to "decide the methodology and
+    # built from. `_FLASH_PLANNING` tells the planner to "decide the methodology and
     # leave the mechanics alone: which data and which operations carry your
     # decisions out is worked out separately, after you propose, so name no
     # tool", and `Plan.amend` sets both fields to `None`, so the translator

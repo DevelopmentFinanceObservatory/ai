@@ -17,7 +17,10 @@ import json
 from typing import Any
 
 import pytest
-from harness.generative import _EDIT_INSTRUCTION, GeminiEdit
+from google.genai import types
+from harness.generative import _EDIT_INSTRUCTION, EDIT_AGENT_NAME, GeminiEdit
+from harness.settings import Settings
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 # The instruction as the model reads it, with its line wrapping folded.
 _EDIT_TEXT = " ".join(_EDIT_INSTRUCTION.split())
@@ -50,35 +53,41 @@ def test_edit_instruction_states_the_relative_period_grammar() -> None:
     assert "Its title names no year and no year range" in _EDIT_TEXT
 
 
-class _FakeResponse:
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.usage_metadata = None
-
-
 class _FakeModels:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, usage: types.GenerateContentResponseUsageMetadata | None) -> None:
         self._text = text
+        self._usage = usage
         self.contents: list[Any] = []
         self.configs: list[Any] = []
 
-    async def generate_content(self, **kwargs: Any) -> _FakeResponse:
+    async def generate_content(self, **kwargs: Any) -> types.GenerateContentResponse:
         self.contents.append(kwargs["contents"])
         self.configs.append(kwargs["config"])
-        return _FakeResponse(self._text)
+        return types.GenerateContentResponse(
+            candidates=[
+                types.Candidate(
+                    content=types.Content(role="model", parts=[types.Part(text=self._text)]),
+                    finish_reason=types.FinishReason.STOP,
+                )
+            ],
+            usage_metadata=self._usage,
+            model_version=kwargs["model"],
+        )
 
 
 class _FakeAio:
-    def __init__(self, text: str) -> None:
-        self.models = _FakeModels(text)
+    def __init__(self, text: str, usage: types.GenerateContentResponseUsageMetadata | None) -> None:
+        self.models = _FakeModels(text, usage)
 
 
 class _FakeClient:
     """Stands in for `google.genai.Client`: only the `.aio.models.
     generate_content` path `_ModelCall._generate` calls is faked."""
 
-    def __init__(self, text: str) -> None:
-        self.aio = _FakeAio(text)
+    def __init__(
+        self, text: str, usage: types.GenerateContentResponseUsageMetadata | None = None
+    ) -> None:
+        self.aio = _FakeAio(text, usage)
 
 
 _LATEST = {"anchor": "latest", "offset": 0}
@@ -154,3 +163,79 @@ async def test_edit_passes_a_recreates_period_through_as_the_model_wrote_it(
     # The call is bounded by the request's model-time budget, in milliseconds.
     (config,) = client.aio.models.configs
     assert config.http_options.timeout == 90_000
+
+
+_DRAFT = json.dumps({"text": "Done.", "patch_json": '{"title": "Aid"}', "recreate_json": None})
+
+
+async def _edit(client: _FakeClient, **kwargs: Any) -> dict[str, Any]:
+    return await GeminiEdit(model_name="test-model", timeout_s=90.0, client=client, **kwargs)(
+        message="retitle it",
+        stored_intent={"type": "bar_chart", "title": "Old"},
+        frame_view={"dimensions": []},
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "level"), [(None, "LOW"), (" medium ", "MEDIUM"), ("High", "HIGH"), ("", "LOW")]
+)
+async def test_the_edit_call_runs_at_the_edit_thinking_level(monkeypatch, raw, level) -> None:
+    if raw is None:
+        monkeypatch.delenv("EDIT_THINKING_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("EDIT_THINKING_LEVEL", raw)
+    client = _FakeClient(_DRAFT)
+
+    await _edit(client, thinking_level=Settings().edit_thinking_level)
+
+    (config,) = client.aio.models.configs
+    assert config.thinking_config == types.ThinkingConfig(thinking_level=types.ThinkingLevel(level))
+
+
+def test_an_unknown_edit_thinking_level_is_refused(monkeypatch) -> None:
+    monkeypatch.setenv("EDIT_THINKING_LEVEL", "MINIMAL")
+
+    with pytest.raises(ValueError, match="edit_thinking_level"):
+        Settings()
+
+
+async def test_the_edit_call_is_a_generation_span_with_its_usage(
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    usage = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=100,
+        cached_content_token_count=40,
+        candidates_token_count=10,
+        thoughts_token_count=5,
+    )
+
+    await _edit(_FakeClient(_DRAFT, usage))
+
+    (span,) = [s for s in exported_spans.get_finished_spans() if s.name == "chat test-model"]
+    attributes = dict(span.attributes or {})
+    assert {k: v for k, v in attributes.items() if k.startswith("gen_ai.")} == {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.agent.name": EDIT_AGENT_NAME,
+        "gen_ai.provider.name": "google",
+        "gen_ai.system": "google",
+        "gen_ai.request.model": "test-model",
+        "gen_ai.response.model": "test-model",
+        "gen_ai.response.finish_reasons": ("stop",),
+        "gen_ai.usage.input_tokens": 100,
+        "gen_ai.usage.output_tokens": 15,
+        "gen_ai.usage.cache_read.input_tokens": 40,
+        "gen_ai.usage.reasoning.output_tokens": 5,
+    }
+    assert json.loads(str(attributes["langfuse.observation.usage_details"])) == {
+        "input": 60,
+        "output": 10,
+        "input_cached_tokens": 40,
+        "output_reasoning_tokens": 5,
+    }
+    assert attributes["dfo.model.finish_reason"] == "STOP"
+    assert {k for k in attributes if k.startswith("studio.surface.")} == {
+        "studio.surface.prompt_variant",
+        "studio.surface.tool_desc",
+        "studio.surface.instruction_hash",
+        "studio.surface.declarations_hash",
+    }

@@ -16510,7 +16510,7 @@ def _undescribed_properties(schema: dict[str, Any]) -> list[str]:
 def test_propose_plans_declaration_describes_every_field() -> None:
     # Every argument and every property of every model `propose_plan`'s
     # declaration carries has a description, so the model sees what each
-    # field means without it having to live in `_PLANNING` prose.
+    # field means without it having to live in `_FLASH_PLANNING` prose.
     # `_undescribed_properties` walks `$defs`, the shape the model
     # is actually sent. The fields every requirement kind shares are described once,
     # on the `evidence_requirements` argument. `scope_options` carries none: its enum
@@ -16790,11 +16790,6 @@ def test_declaring_a_plan_ready_twice_changes_nothing(
 # --- Instruction prose ---------------------------------------------------------------------
 
 
-# The instruction the served planner carries: the translator attached, the
-# skill tools built and the question held by the planner adapter.
-_SERVED_INSTRUCTION = planner_instruction()
-
-
 def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> None:
     """Every `ReferralKind` is named, by its own value, in the planner's instruction,
     unless every referral of it carries its own guidance as `repair` (`REPAIR_OF`).
@@ -16805,14 +16800,15 @@ def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> 
     matches on the string it is sent. A kind in `REPAIR_OF` is told in the
     referral itself, which `Referral` refuses to send without that guidance.
     """
+    instruction = planner_instruction()
     unnamed = [
         kind.value
         for kind in ReferralKind
-        if kind.value not in _SERVED_INSTRUCTION and kind not in REPAIR_OF
+        if kind.value not in instruction and kind not in REPAIR_OF
     ]
     assert unnamed == [], (
         f"referral kinds the planner is never told how to read: {unnamed}. "
-        "Name each one in `_TRANSLATING` and say what the planner does about it."
+        "Name each one in `_FLASH_TRANSLATING` and say what the planner does about it."
     )
     for kind in REPAIR_OF:
         valid = _referral_of(kind, "a")
@@ -16824,7 +16820,7 @@ def test_the_instruction_names_every_referral_kind_the_translator_can_send() -> 
 def test_the_instruction_has_the_planner_ask_before_proposing_over_an_unmeetable_referral() -> None:
     """`requirement_unmeetable` and `unsupported_ask` name a choice that is the user's, so
     the planner is told to say what cannot be done and ask before it proposes anything."""
-    instruction = _SERVED_INSTRUCTION
+    instruction = planner_instruction()
 
     assert (
         "`unsupported_ask` or `requirement_unmeetable` referral means the requirement cannot be "
@@ -16852,7 +16848,7 @@ def test_across_states_a_party_nobody_named() -> None:
     # `across`'s own description carries the rule, and the instruction points
     # at it. Each column a result's `open_entity_axes` can carry is tied to
     # the party word the plan states.
-    instruction = _SERVED_INSTRUCTION
+    instruction = planner_instruction()
     across = DatasetRequirement.model_fields["across"].description or ""
 
     assert "goes in `across` (see `across`)" in instruction
@@ -16948,7 +16944,7 @@ def test_planner_instruction_carries_no_sentinel_range() -> None:
     # With no `window` on the envelope, the period is a decision like any
     # other, so "time window" stays in the opening decision list and the
     # instruction states no sentinel fallback range for it. "source" is not
-    # in that same list any more (`_PLANNING`'s own opening enumeration):
+    # in that same list any more (`_FLASH_PLANNING`'s own opening enumeration):
     # unlike the window, a verbatim source pin needs no `Decision`, so the
     # instruction states its own carve-out for it separately, not grouped
     # with the window's.

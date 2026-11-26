@@ -8,6 +8,12 @@ executes what it returns, so a malformed generation fails loudly there.
 Where a freeform mapping is needed (an intent's select), the schema asks for
 a JSON STRING and the caller parses it: Gemini's constrained decoding requires
 objects to declare their properties.
+
+Each call runs at its `thinking_level` (`EDIT_THINKING_LEVEL`) and inside a
+`chat <model>` span that carries the attributes Pydantic AI puts on the
+orchestrator's and the planner's model calls (`gen_ai.*`, under the agent
+name `EDIT_AGENT_NAME`), the model surface (`harness.gemini_wire.surface_attributes`)
+and the usage Langfuse reads from a GenAI span (`harness.gemini_wire.record_usage`).
 """
 
 from __future__ import annotations
@@ -16,10 +22,19 @@ import json
 from typing import Any
 
 from google.genai import Client, types
+from opentelemetry import trace
 
+from harness.gemini_wire import record_usage, surface_attributes
+from harness.settings import DEFAULT_EDIT_THINKING_LEVEL, ThinkingLevelName
 from harness.usage import log_usage
 
 _JSON_TEMPERATURE = 0.2
+
+# The agent name the Edit Card call's span carries, as `dfo_orchestrator` and
+# `dfo_planner` name theirs.
+EDIT_AGENT_NAME = "dfo_edit"
+
+_tracer = trace.get_tracer(__name__)
 
 
 def _schema(**properties: types.Schema) -> types.Schema:
@@ -47,12 +62,21 @@ class _ModelCall:
 
     `timeout_s` bounds the call, genai's own retries included, as the HTTP
     timeout of its request. The server passes the request's model-time budget
-    (`harness.settings.Settings.turn_model_time_s`).
+    (`harness.settings.Settings.turn_model_time_s`). `thinking_level` is the
+    call's reasoning effort (`harness.settings.Settings.edit_thinking_level`).
     """
 
-    def __init__(self, *, model_name: str, timeout_s: float, client: Client | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        timeout_s: float,
+        thinking_level: ThinkingLevelName = DEFAULT_EDIT_THINKING_LEVEL,
+        client: Client | None = None,
+    ) -> None:
         self.model_name = model_name
         self._timeout_ms = round(timeout_s * 1000)
+        self._thinking_level = thinking_level
         self._client = client
 
     def _resolved_client(self) -> Client:
@@ -63,19 +87,66 @@ class _ModelCall:
     async def _generate(
         self, *, instruction: str, content: str, schema: types.Schema
     ) -> dict[str, Any]:
-        response = await self._resolved_client().aio.models.generate_content(
-            model=self.model_name,
-            contents=content,
-            config=types.GenerateContentConfig(
-                system_instruction=instruction,
-                response_schema=schema,
-                response_mime_type="application/json",
-                temperature=_JSON_TEMPERATURE,
-                http_options=types.HttpOptions(timeout=self._timeout_ms),
+        config = types.GenerateContentConfig(
+            system_instruction=instruction,
+            response_schema=schema,
+            response_mime_type="application/json",
+            temperature=_JSON_TEMPERATURE,
+            thinking_config=types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel(self._thinking_level)
             ),
+            http_options=types.HttpOptions(timeout=self._timeout_ms),
         )
+        with _tracer.start_as_current_span(
+            f"chat {self.model_name}",
+            kind=trace.SpanKind.CLIENT,
+            attributes={
+                "gen_ai.operation.name": "chat",
+                "gen_ai.agent.name": EDIT_AGENT_NAME,
+                "gen_ai.provider.name": "google",
+                "gen_ai.system": "google",
+                "gen_ai.request.model": self.model_name,
+                **surface_attributes(config),
+            },
+        ) as span:
+            try:
+                response = await self._resolved_client().aio.models.generate_content(
+                    model=self.model_name, contents=content, config=config
+                )
+            except Exception as exc:
+                span.set_attribute("dfo.model.error", type(exc).__name__)
+                raise
+            _record_response(span, response, model_name=self.model_name)
         log_usage(type(self).__name__, response.usage_metadata)
         return json.loads(response.text or "{}")
+
+
+def _record_response(
+    span: trace.Span, response: types.GenerateContentResponse, *, model_name: str
+) -> None:
+    """Put on `span` the response model, finish reason and token usage of
+    `response`, under the names Pydantic AI and `harness.gemini_wire` give
+    them on the orchestrator's and the planner's model calls."""
+    if not span.is_recording():
+        return
+    span.set_attribute("gen_ai.response.model", response.model_version or model_name)
+    candidates = response.candidates or []
+    reason = candidates[0].finish_reason if candidates else None
+    span.set_attribute("dfo.model.finish_reason", reason.name if reason else "none")
+    if reason:
+        span.set_attribute("gen_ai.response.finish_reasons", (reason.name.lower(),))
+    usage = response.usage_metadata
+    if usage is None:
+        return
+    prompt = (usage.prompt_token_count or 0) + (usage.tool_use_prompt_token_count or 0)
+    span.set_attribute("gen_ai.usage.input_tokens", prompt)
+    span.set_attribute(
+        "gen_ai.usage.output_tokens",
+        (usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0),
+    )
+    if usage.cached_content_token_count is not None:
+        span.set_attribute("gen_ai.usage.cache_read.input_tokens", usage.cached_content_token_count)
+    record_usage(span, usage)
 
 
 _EDIT_INSTRUCTION = """\

@@ -97,6 +97,7 @@ from harness.scope_choices import (
     scope_money,
 )
 from harness.sentences import PlanWords
+from harness.surface import studio_surface
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import refusals_in_force, settled_by_readings
 from planner.licence import Licence, endpoint_licensed, pin_block_held_back, unlicensed_year
@@ -5896,8 +5897,11 @@ def _aligned_bases(
                 requirement_id=requirement_id,
                 reason=(
                     f"Search settles {requirement_id!r} on no one dataset "
-                    f"({unsettled[requirement_id].status}), so how it is counted cannot be matched "
-                    "to the other inputs'"
+                    f"({unsettled[requirement_id].status}), so how it is counted cannot be "
+                    "matched to the other inputs'"
+                    if studio_surface().variant == "flash"
+                    else f"Search settles {requirement_id!r} on no one dataset, so how it is "
+                    "counted cannot be matched to the other inputs'"
                 ),
             )
         for requirement_id in sorted(unsearched.keys() & under):
