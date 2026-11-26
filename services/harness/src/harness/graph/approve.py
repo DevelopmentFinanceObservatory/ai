@@ -129,7 +129,7 @@ def decide(
     user's `answer`, and `planner` drafts the question from the start, keeping
     the amendment the answer carries. So does a plan whose share rests on a
     whole an earlier release compiled (`rests_on_stale_whole`), with
-    `"stale_whole": True` as well: the whole is asked of Search again, and the
+    `"stale_whole": True` as well. The whole is asked of Search again, and the
     user approves the new card.
 
     An answer approves when it names the revision and says, under `at`, when

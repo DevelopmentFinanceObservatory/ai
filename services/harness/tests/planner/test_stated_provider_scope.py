@@ -2603,7 +2603,7 @@ async def test_a_plan_over_a_whole_pin_the_previous_release_compiled_is_planned_
 def _sector_plan_awaiting_approval(state: dict[str, Any]) -> None:
     """The summed plan of `_OLD_PLANS` stored in `state`, a turn's graph state,
     awaiting approval with its whole taken over every sector, as the release
-    before Search's `whole` request held a sector share: a shape this release's
+    before Search's `whole` request held a sector share, a shape this release's
     `Plan` rejects."""
     stored = json.loads(_OLD_PLANS["summed"])
     stored.update(status=PlanStatus.PENDING_APPROVAL.value, approved_at=None)
@@ -2617,10 +2617,10 @@ async def test_an_amended_plan_the_previous_release_left_pending_is_drafted_agai
     stored: str, decision: Any, requirement: Any, derived_requirement: Any
 ) -> None:
     """A plan the release before Search's `whole` request left awaiting approval,
-    with the planner's own record of it, amended after the deploy: a sector share,
-    whose stored shape this release rejects, or a donor share over a whole that
-    release compiled. The real `PlannerAdapter` drafts the question again from the
-    start: its model is shown the user's amendment, and the fresh draft its
+    with the planner's own record of it, amended after the deploy. The plan is a
+    sector share, whose stored shape this release rejects, or a donor share over a
+    whole that release compiled. The real `PlannerAdapter` drafts the question
+    again from the start. Its model is shown the user's amendment, and the fresh draft its
     `propose_plan` makes, stating no `amends_version`, is recorded in place of the
     old plan."""
     ctx = node_ctx()

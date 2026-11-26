@@ -85,7 +85,7 @@ class PlannerModel(Protocol):
     `refused` also carries `reason`, one sentence for the user, as `revise`'s
     does. `restart` is set on the entry that drafts the question again from
     the start because the plan on record could not be read or rests on a
-    stale whole (`harness.graph.planning`): the planner drops whatever plan
+    stale whole (`harness.graph.planning`). The planner drops whatever plan
     it recorded for the question before drafting, `amendment` or no.
 
     `ctx` is the planner node's own `NodeCtx`: a planner that runs a model
