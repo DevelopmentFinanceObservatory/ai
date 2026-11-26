@@ -66,6 +66,7 @@ from harness.settings import (
     COMBINED_MCP_MOUNT_PATH,
     DATA_MCP_MOUNT_PATH,
     PRESENTATION_MCP_MOUNT_PATH,
+    HistorySettings,
     Settings,
 )
 from harness.studio import StudioRunner, create_studio_router
@@ -515,6 +516,9 @@ def create_app(
     # planner reads as it is built (`harness.planner_adapter.PlannerAdapter`).
     init_telemetry(service_name=SERVICE_NAME)
     resolved_settings = settings or Settings()
+    # Each turn reads `STUDIO_HISTORY` as it begins; an unknown value or a
+    # share outside [0, 1] refuses startup here instead.
+    HistorySettings()
     model_name = resolved_model_name(resolved_settings.model_name)
     # The one surface the process runs, which every agent's texts follow
     # (`harness.surface`). An unmapped model or a mixed pair refuses startup.

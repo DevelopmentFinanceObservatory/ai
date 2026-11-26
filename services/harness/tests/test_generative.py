@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 from google.genai import types
+from harness.conversation import current_model_usage
 from harness.generative import _EDIT_INSTRUCTION, EDIT_AGENT_NAME, GeminiEdit
 from harness.settings import Settings
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -238,4 +239,21 @@ async def test_the_edit_call_is_a_generation_span_with_its_usage(
         "studio.surface.tool_desc",
         "studio.surface.instruction_hash",
         "studio.surface.declarations_hash",
+        "studio.surface.history",
     }
+
+
+async def test_the_edit_call_reports_its_usage_to_the_turn(
+    exported_spans: InMemorySpanExporter,
+) -> None:
+    heard: list[types.GenerateContentResponseUsageMetadata] = []
+    usage = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=100, candidates_token_count=10
+    )
+    token = current_model_usage.set(heard.append)
+    try:
+        await _edit(_FakeClient(_DRAFT, usage))
+    finally:
+        current_model_usage.reset(token)
+
+    assert heard == [usage]

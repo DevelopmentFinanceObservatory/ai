@@ -133,6 +133,7 @@ from harness.graph.state import (
 )
 from harness.provenance import CardLineage, CardLineageDecodeError, lineage_from_json
 from harness.run_ledger import end_unfinished
+from harness.settings import StudioHistory
 from harness.studio_state import (
     SEGMENT_TTL_S,
     TURN_LOG_EVENT,
@@ -191,6 +192,9 @@ _KEY_CLIENT_FEATURES = "client_features"
 _KEY_TIMED_OUT_CALLS = "timed_out_calls"
 _KEY_LICENCE = "licence"
 _KEY_CARRIED_HISTORY = "carried_history"
+_KEY_HISTORY_ASSIGNMENT = "history_assignment"
+# The history arms a stored assignment or turn usage may name.
+_HISTORY_ARMS: frozenset[str] = frozenset({"digest", "full"})
 _KEY_TURN_USER_MESSAGE = "turn_user_message"
 _KEY_TURN_USER_WORDS = "turn_user_words"
 _KEY_TURN_FINAL_TEXT = "turn_final_text"
@@ -215,6 +219,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_TIMED_OUT_CALLS,
         _KEY_LICENCE,
         _KEY_CARRIED_HISTORY,
+        _KEY_HISTORY_ASSIGNMENT,
         _KEY_TURN_USER_MESSAGE,
         _KEY_TURN_USER_WORDS,
         _KEY_TURN_FINAL_TEXT,
@@ -661,6 +666,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TIMED_OUT_CALLS: sorted(state.timed_out_calls),
         _KEY_LICENCE: state.licence,
         _KEY_CARRIED_HISTORY: state.carried_history,
+        _KEY_HISTORY_ASSIGNMENT: state.history_assignment,
         _KEY_TURN_USER_MESSAGE: state.turn_user_message,
         _KEY_TURN_USER_WORDS: state.turn_user_words,
         _KEY_TURN_FINAL_TEXT: state.turn_final_text,
@@ -729,6 +735,8 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.licence = dict(value) if value else None
         elif key == _KEY_CARRIED_HISTORY:
             state.carried_history = dict(value) if value else None
+        elif key == _KEY_HISTORY_ASSIGNMENT:
+            state.history_assignment = _history_assignment(value)
         elif key == _KEY_TURN_USER_MESSAGE:
             state.turn_user_message = value
         elif key == _KEY_TURN_USER_WORDS:
@@ -773,6 +781,18 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
         state.turn_usage = TurnUsage(trace_id=state.trace_id or None)
 
 
+def _history_assignment(value: Any) -> dict[str, Any] | None:
+    """The stored history arm a stored `history_assignment` holds
+    (`ConversationState.history_assignment`), or None when it holds no arm
+    and turn number, which the next turn under `split` assigns afresh."""
+    if not isinstance(value, dict):
+        return None
+    arm, turn = value.get("arm"), value.get("turn")
+    if arm not in _HISTORY_ARMS or not isinstance(turn, int) or isinstance(turn, bool):
+        return None
+    return {"arm": arm, "turn": turn}
+
+
 def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
     """The `TurnUsage` of the turn `trace_id` a stored `turn_usage` holds. A
     value that is not an object, or names another turn's trace id, reads as
@@ -791,6 +811,15 @@ def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
         items = stored.get(key)
         return [item for item in items if isinstance(item, str)] if isinstance(items, list) else []
 
+    def number(key: str) -> int | None:
+        item = stored.get(key)
+        return item if isinstance(item, int) and not isinstance(item, bool) else None
+
+    def arm(key: str) -> StudioHistory | None:
+        item = stored.get(key)
+        return item if item in _HISTORY_ARMS else None
+
+    mode = stored.get("history_mode")
     return TurnUsage(
         trace_id=trace_id,
         started_at=text("started_at"),
@@ -801,6 +830,18 @@ def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:
         prompt_source=text("prompt_source"),
         fetched_specs=specs("fetched_specs"),
         drawn_specs=specs("drawn_specs"),
+        turn=number("turn"),
+        history=arm("history"),
+        history_mode=mode if mode in ("split", "forced") else None,
+        history_arm=arm("history_arm"),
+        history_assigned_turn=number("history_assigned_turn"),
+        history_chain=text("history_chain"),
+        carried_tokens=number("carried_tokens"),
+        model_calls=number("model_calls") or 0,
+        input_tokens=number("input_tokens") or 0,
+        cached_tokens=number("cached_tokens") or 0,
+        output_tokens=number("output_tokens") or 0,
+        thinking_tokens=number("thinking_tokens") or 0,
     )
 
 
@@ -877,8 +918,9 @@ def _committed_lines(delta: Mapping[str, Any], *, stored: Mapping[str, Any]) -> 
 
 def _write_turn_lines(conversation_id: str, lines: Sequence[_TurnLine]) -> bool:
     """Write each of `lines`: its `TURN_LOG_EVENT` log line, with the turn's
-    identity, status, when it began, the deployed revision, its error code,
-    and the specs it fetched and drew, as JSON fields
+    identity, number, status, when it began, the deployed revision, its error
+    code, the specs it fetched and drew, and its history fields
+    (`harness.studio_state.TurnUsage`), as JSON fields
     (`common.logging.JSON_FIELDS`) and in the message, then its outcome
     observation, a `turn` for a close and a `turn.pause` for a pause
     (`common.telemetry.record_turn_outcome`). Then start their export
@@ -904,10 +946,13 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
     usage = line.usage
     release = deploy_release()
     logger.info(
-        "%s trace_id=%s status=%s caller=%s account=%s visitor=%s release=%s error=%s "
-        "fetched_specs=%d drawn_specs=%d",
+        "%s trace_id=%s turn=%s status=%s caller=%s account=%s visitor=%s release=%s error=%s "
+        "fetched_specs=%d drawn_specs=%d history=%s history_arm=%s history_mode=%s "
+        "history_assigned_turn=%s history_chain=%s carried_tokens=%s "
+        "model_calls=%d input_tokens=%d cached_tokens=%d output_tokens=%d thinking_tokens=%d",
         TURN_LOG_EVENT,
         line.trace_id,
+        usage.turn,
         line.status,
         usage.caller,
         usage.account,
@@ -916,6 +961,17 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
         line.error,
         len(usage.fetched_specs),
         len(usage.drawn_specs),
+        usage.history,
+        usage.history_arm,
+        usage.history_mode,
+        usage.history_assigned_turn,
+        usage.history_chain,
+        usage.carried_tokens,
+        usage.model_calls,
+        usage.input_tokens,
+        usage.cached_tokens,
+        usage.output_tokens,
+        usage.thinking_tokens,
         extra={
             JSON_FIELDS: {
                 "event": TURN_LOG_EVENT,
@@ -931,6 +987,18 @@ def _write_turn_line(conversation_id: str, line: _TurnLine) -> None:
                 "error": line.error,
                 "fetched_specs": list(usage.fetched_specs),
                 "drawn_specs": list(usage.drawn_specs),
+                "turn": usage.turn,
+                "history": usage.history,
+                "history_arm": usage.history_arm,
+                "history_mode": usage.history_mode,
+                "history_assigned_turn": usage.history_assigned_turn,
+                "history_chain": usage.history_chain,
+                "carried_tokens": usage.carried_tokens,
+                "model_calls": usage.model_calls,
+                "input_tokens": usage.input_tokens,
+                "cached_tokens": usage.cached_tokens,
+                "output_tokens": usage.output_tokens,
+                "thinking_tokens": usage.thinking_tokens,
             }
         },
     )
@@ -1611,7 +1679,7 @@ def keep_turn_records(conversation: ConversationState, state: Mapping[str, Any])
     store with the turn, whether the read of the turn's own words asked about
     projections (`ConversationState.turn_projection_asked`), and the
     conversation's licence that read left (`ConversationState.licence`), and
-    under `STUDIO_HISTORY=full` the orchestrator's conversation as the turn's
+    on the `full` history arm the orchestrator's conversation as the turn's
     reply left it (`ConversationState.turn_carried`). Each key holds the
     whole value, so the latest write replaces. The blocks stay in process
     (`turn_specs`) until the turn closes."""

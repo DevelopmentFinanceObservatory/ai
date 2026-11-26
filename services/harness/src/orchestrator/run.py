@@ -13,10 +13,10 @@ they happen:
   hand-back. It carries the hand-off's record and the history to store with
   the turn until the hand-back arrives.
 - `Answered`: the run ended on the reply. It carries the run's conversation
-  when the agent's run closed on that reply, which a turn under
-  `STUDIO_HISTORY=full` stores for the next turn to open from
-  (`Opening.carried`). Under `digest` nothing is stored, and the next turn
-  opens from the digests.
+  when the agent's run closed on that reply, which a turn of the `full`
+  history arm stores for the next turn to open from (`Opening.carried`). On
+  the `digest` arm nothing is stored, and the next turn opens from the
+  digests.
 
 A response with neither answer text nor a function call
 (`harness.gemini_agent.holds_no_answer`) is not sent back for another try.
@@ -160,7 +160,7 @@ class Opening:
     hand-back (`seeded`), the datasets the user brought from Search, when the
     turn opened with one.
 
-    `carried` is the previous turn's conversation under `STUDIO_HISTORY=full`
+    `carried` is the previous turn's conversation on the `full` history arm
     (`Answered.history`), which the opening extends whole. The conversation
     digest is then the digest's tail without its `turns`."""
 

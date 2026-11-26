@@ -65,6 +65,7 @@ from executor.run import UnrunnablePlan, approved_work, run_candidate
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
+from google.genai import types
 from planner.plan import (
     PlanStatus,
     current_earlier_block,
@@ -81,9 +82,12 @@ from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
 from harness.card_unit import UnitMove, stored_unit_change, unit_move
 from harness.conversation import (
+    TurnHistory,
     current_conversation_caller,
     current_conversation_id,
     current_conversation_key,
+    current_history,
+    current_model_usage,
     current_turn_id,
     current_user_message,
     ledger_conversation_id,
@@ -100,7 +104,7 @@ from harness.graph.state import (
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import ApprovedRun, StudioRunLedger
 from harness.seeds import seeds_slot
-from harness.settings import Settings, studio_history
+from harness.settings import Settings
 from harness.studio_edit import (
     CardSwap,
     EditClosed,
@@ -264,6 +268,28 @@ def studio_identity(
         account if _ACCOUNT_DIGEST.fullmatch(account) else None,
         caller if ADDRESS_CALLER.fullmatch(caller) else None,
     )
+
+
+def _set_turn_sinks(
+    store: StudioStore, principal: str, conversation_id: str, trace_id: str
+) -> None:
+    """Point the sinks a turn's work reports to at the turn `trace_id` of
+    `(principal, conversation_id)`: the specs it used
+    (`compiler.surface.current_spec_uses`) and the usage of its model calls
+    (`harness.conversation.current_model_usage`). Every request that runs
+    part of a turn sets them before anything runs."""
+    current_spec_uses.set(_spec_use_sink(store, principal, conversation_id, trace_id))
+
+    def note(usage: types.GenerateContentResponseUsageMetadata) -> None:
+        conversation = store.current(principal, conversation_id)
+        if (
+            conversation is not None
+            and conversation.trace_id == trace_id
+            and not conversation.turn_recorded
+        ):
+            conversation.note_model_usage(usage)
+
+    current_model_usage.set(note)
 
 
 def _spec_use_sink(
@@ -709,12 +735,15 @@ def _turn_opening(
         # One reference, the reserved shape: `graph.seed` reports it unused.
         seeds = body.seed_spec.model_dump(mode="json")
     text = body.message if chip_label is None else f"Count {chip_label}."
-    # Under `STUDIO_HISTORY=full` the orchestrator opens on the previous
-    # turn's conversation where it carried one, with the digest's tail; the
-    # planner reads the whole digest either way.
-    carried = conversation.carried_opening() if studio_history() == "full" else None
+    # On the `full` history arm the orchestrator opens on the previous turn's
+    # conversation where it carried one, with the digest's tail; the planner
+    # reads the whole digest either way. The arm is the one `begin_turn`
+    # fixed for the turn.
+    arm = conversation.turn_usage.history or "digest"
+    carried = conversation.carried_opening() if arm == "full" else None
     inputs = TurnInput(
         message=text,
+        history=arm,
         canvas_digest=json.dumps(digest) if digest else None,
         conversation_digest=json.dumps(history) if history else None,
         seeds=seeds,
@@ -2175,12 +2204,19 @@ def _set_turn_context(
     by PRINCIPAL as well as conversation, since two principals minting the
     same conversation_id must not share a canvas. The user's words are what
     a search sends. The budget bounds every model call the segment makes
-    (`harness.turn_budget`)."""
+    (`harness.turn_budget`). The turn's history arm, fixed as it began, names
+    every model span of the segment (`harness.conversation.current_history`)."""
     current_conversation_id.set(ledger_conversation_id(principal, conversation_id))
     current_conversation_key.set((principal, conversation_id))
     current_user_message.set(conversation.turn_user_words)
     current_earlier_block.set(conversation.earlier_block)
     current_recorded_identity.set(conversation.recorded_identity)
+    current_history.set(
+        TurnHistory(
+            arm=conversation.turn_usage.history or "digest",
+            mode=conversation.turn_usage.history_mode,
+        )
+    )
     start_turn_budget(settings)
 
 
@@ -2707,9 +2743,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # so do the in-process dfo-apis calls.
             current_turn_id.set(work.trace_id)
             set_supplied_turn(work.trace_id)
-            current_spec_uses.set(
-                _spec_use_sink(studio.store, principal, body.conversation_id, work.trace_id)
-            )
+            _set_turn_sinks(studio.store, principal, body.conversation_id, work.trace_id)
             work.auto_add = body.auto_add
             if body.client_features is not None:
                 work.client_features = declared_features(body.client_features)
@@ -3419,9 +3453,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # undo (`_PendingInterrupt.step_order`'s docstring). It and the
             # spec-use sink are set before anything below can run the graph
             # or close the turn.
-            current_spec_uses.set(
-                _spec_use_sink(studio.store, principal, body.conversation_id, conversation.trace_id)
-            )
+            _set_turn_sinks(studio.store, principal, body.conversation_id, conversation.trace_id)
             if studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
                     ledger_conversation_id(principal, body.conversation_id),
@@ -3790,9 +3822,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 (p for p in conversation.pending.values() if p.resuming_segment == segment_id),
                 None,
             )
-            current_spec_uses.set(
-                _spec_use_sink(studio.store, principal, conversation_id, conversation.trace_id)
-            )
+            _set_turn_sinks(studio.store, principal, conversation_id, conversation.trace_id)
             if answered is not None and studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
                     ledger_conversation_id(principal, conversation_id),

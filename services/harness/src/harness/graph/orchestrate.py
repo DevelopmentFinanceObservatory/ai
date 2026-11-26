@@ -64,7 +64,6 @@ from harness.graph.state import (
     unit_asks,
 )
 from harness.scope_choices import mark_planner_axes
-from harness.settings import studio_history
 from harness.tool_contracts import resolver_digest
 from harness.turn.node import Next, Node, NodeCtx, Pause, TurnKey
 from harness.turn_records import SearchReading
@@ -134,10 +133,10 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
         the date and the digests (`TurnInput`), with a seed hand-back after
         the message; a later run resumes the conversation the last one
         handed off with (`ORCHESTRATOR_HISTORY_KEY`), its waiting call
-        answered by the hand-back. Under `STUDIO_HISTORY=full` a turn may
-        open on the previous turn's conversation (`TurnInput.carried_history`),
-        and a run that closes on its reply stores its own
-        (`ORCHESTRATOR_CARRIED_KEY`). The run's first `ToolsAnswered` carries
+        answered by the hand-back. A turn of the `full` history arm
+        (`TurnInput.history`) may open on the previous turn's conversation
+        (`TurnInput.carried_history`), and its run that closes on the reply
+        stores its own (`ORCHESTRATOR_CARRIED_KEY`). The run's first `ToolsAnswered` carries
         that answer, so the node emits nothing else for it. Every event of
         the run is emitted as it comes.
 
@@ -162,8 +161,8 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
         opening: Opening | None = None
         history: StoredHistory | None = None
         resumed: HandBack | None = None
+        inputs = TurnInput.model_validate(ctx.inputs)
         if hand_back is None or hand_back.answers is None:
-            inputs = TurnInput.model_validate(ctx.inputs)
             carried = (
                 StoredHistory.model_validate_json(inputs.carried_history)
                 if inputs.carried_history is not None
@@ -203,7 +202,7 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
             if isinstance(event, HandedOff):
                 return _handed_off(ctx, event)
             if isinstance(event, Answered):
-                if event.history is not None and studio_history() == "full":
+                if event.history is not None and inputs.history == "full":
                     ctx.state[ORCHESTRATOR_CARRIED_KEY] = carried_record(event.history)
                 return Next("answered")
             ctx.emit(event)

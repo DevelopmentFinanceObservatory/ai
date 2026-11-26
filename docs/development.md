@@ -42,6 +42,8 @@ Each key resolves in order: a value already in `.env`, then an exported shell va
 MODEL_NAME=gemini-3.8-flash PLANNER_MODEL_NAME=gemini-3.8-flash just dev
 ```
 
+A local harness runs Studio under `STUDIO_HISTORY=split`, the code default, so a new conversation takes the `digest` or the `full` history arm by a hash of its id. Set `STUDIO_HISTORY=digest` or `full` to run one arm; [services/harness/README.md](../services/harness/README.md) describes both arms and the setting.
+
 With any Langfuse credential missing, the run starts anyway. Traces go to `OTEL_EXPORTER_OTLP_ENDPOINT` when it is set, and tracing is off otherwise. `/healthz` reports the resolved state as `telemetry: langfuse`, `otel` or `off`.
 
 To rotate a credential, add a new version to the secret in Secret Manager, delete that line from your `.env`, and run `just env`.
@@ -64,6 +66,6 @@ To rotate a credential, add a new version to the secret in Secret Manager, delet
 
 ## Branches and deploys
 
-`dev` is the trunk. CI (`lint`, `test`, `docker`) runs on every ready pull request into `dev` or `main`, and again on each push to `dev`. Merging to `dev` deploys the dev Cloud Run service. A release is a pull request from `dev` into `main`, and `deploy-prod.yml` deploys production on every push to `main`.
+`dev` is the trunk. CI (`lint`, `test`, `docker`) runs on every ready pull request into `dev` or `main`, and again on each push to `dev`. Merging to `dev` deploys the dev Cloud Run service. A release is a pull request from `dev` into `main`, and `deploy-prod.yml` deploys production on every push to `main`. No deploy config sets `STUDIO_HISTORY`, so each service runs the code default, `split`; setting `STUDIO_HISTORY=digest` on the service stops the `full` arm for every new turn and keeps each conversation's stored arm.
 
 CI builds one image and updates the existing Cloud Run service. The `infra` repository owns the service definition, including its runtime secrets. The `.env` flow above is for local development only. [deploy/README.md](../deploy/README.md) has the full division of responsibilities and the GitHub Environment setup.

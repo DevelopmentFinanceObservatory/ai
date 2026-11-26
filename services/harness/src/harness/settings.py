@@ -45,21 +45,32 @@ DEFAULT_ORCHESTRATOR_THINKING_LEVEL: ThinkingLevelName = "LOW"
 # `gemini-4-hydrogen`, which is more than one constrained JSON patch needs.
 DEFAULT_EDIT_THINKING_LEVEL: ThinkingLevelName = "LOW"
 
-# How a follow-up turn's orchestrator reads the earlier turns
-# (`STUDIO_HISTORY`): `digest`, the conversation digest rendered afresh in each
-# turn's opening, or `full`, the previous turn's orchestrator messages carried
-# whole, so the follow-up's first request extends the previous turn's last one
+# How a follow-up turn's orchestrator reads the earlier turns, the turn's
+# history arm: `digest`, the conversation digest rendered afresh in each turn's
+# opening, or `full`, the previous turn's orchestrator messages carried whole,
+# so the follow-up's first request extends the previous turn's last one
 # (`harness.studio_state.ConversationState.carried_opening`).
 type StudioHistory = Literal["digest", "full"]
-DEFAULT_STUDIO_HISTORY: StudioHistory = "digest"
+# `STUDIO_HISTORY`: one arm for every turn, or `split`, which gives each
+# conversation the arm stored with it, assigned on its first turn under `split`
+# (`harness.studio_state.history_arm`).
+type StudioHistorySetting = Literal["digest", "full", "split"]
+DEFAULT_STUDIO_HISTORY: StudioHistorySetting = "split"
+DEFAULT_STUDIO_HISTORY_FULL_SHARE = 0.5
 
 
 class HistorySettings(BaseServiceSettings):
     """`STUDIO_HISTORY`, read case-insensitively; blank means the default and
-    any other value is refused. A settings class of its own, so the model
-    wrapper reads it on each call without the service settings' checks."""
+    any other value is refused. `STUDIO_HISTORY_FULL_SHARE` is the share of
+    conversations `split` assigns the `full` arm, from 0 to 1; blank means the
+    default. A settings class of its own, read once as each turn begins
+    (`harness.studio_state.ConversationState.begin_turn`), and once at startup
+    so a bad value refuses it (`harness.server.create_app`)."""
 
-    studio_history: StudioHistory = DEFAULT_STUDIO_HISTORY
+    studio_history: StudioHistorySetting = DEFAULT_STUDIO_HISTORY
+    studio_history_full_share: float = Field(
+        default=DEFAULT_STUDIO_HISTORY_FULL_SHARE, ge=0, le=1, allow_inf_nan=False
+    )
 
     @field_validator("studio_history", mode="before")
     @classmethod
@@ -68,11 +79,12 @@ class HistorySettings(BaseServiceSettings):
             return value.strip().lower() or DEFAULT_STUDIO_HISTORY
         return value
 
-
-def studio_history() -> StudioHistory:
-    """How a follow-up turn's orchestrator reads the earlier turns, as
-    `STUDIO_HISTORY` names it."""
-    return HistorySettings().studio_history
+    @field_validator("studio_history_full_share", mode="before")
+    @classmethod
+    def _blank_share(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return DEFAULT_STUDIO_HISTORY_FULL_SHARE
+        return value
 
 
 # How long after its deadline `harness.live_refresh` cancels a refresh, and how

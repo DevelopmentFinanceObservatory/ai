@@ -4649,7 +4649,8 @@ async def test_a_closed_turn_writes_its_outcome_once_its_write_commits(
             "session_id": CONVERSATION,
             "user_id": _ACCOUNT,
             "tags": ["studio"],
-            "trace_metadata": {},
+            # The conftest runs every test on the forced `digest` arm.
+            "trace_metadata": {"history": "digest", "history_mode": "forced"},
             "request": "life expectancy in Kenya",
             "response": "done",
             "error": None,
@@ -4792,6 +4793,18 @@ async def test_a_closed_turn_logs_one_studio_turn_line_once_its_closing_write_co
         "error": "cancelled",
         "fetched_specs": ["spec_a"],
         "drawn_specs": ["spec_b"],
+        "turn": 1,
+        "history": "digest",
+        "history_arm": None,
+        "history_mode": "forced",
+        "history_assigned_turn": None,
+        "history_chain": None,
+        "carried_tokens": None,
+        "model_calls": 0,
+        "input_tokens": 0,
+        "cached_tokens": 0,
+        "output_tokens": 0,
+        "thinking_tokens": 0,
     }
 
 

@@ -336,7 +336,10 @@ studio-live: _check-env _check-apis
     if [ -n "$database_url" ]; then
         export DATABASE_URL="$database_url"
     fi
+    # Every conversation runs today's digest history unless STUDIO_HISTORY is
+    # set, so `just eval-studio` live cases never land on a random arm.
     DFO_APIS_URL={{DFO_APIS_URL}} SEED_FIXTURE_FRAMES=true PORT={{PORT}} \
+        STUDIO_HISTORY="${STUDIO_HISTORY:-digest}" \
         PRESENTATION_PUBLIC_URL=http://localhost:{{PORT}}/mcp/presentation \
         uv run --env-file {{ENV_FILE}} harness-server
 

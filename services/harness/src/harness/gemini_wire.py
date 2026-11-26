@@ -57,8 +57,9 @@ class of the exception the call raised (`_ERROR`). Pydantic AI's own
 `gen_ai.response.finish_reasons` maps several of Gemini's reasons onto one
 and leaves out a response that carried none. Each span also names the model
 surface the call was sent (`harness.surface.surface_fingerprint`). Those are
-the process's instruction set and tool descriptions, and short hashes of the
-system instruction and the declarations as sent.
+the process's instruction set and tool descriptions, the history arm of the
+Studio turn that sent it, and short hashes of the system instruction and the
+declarations as sent.
 """
 
 from __future__ import annotations
@@ -76,6 +77,7 @@ from google.genai import Client, errors, types
 from opentelemetry import trace
 from pydantic_ai.exceptions import ModelAPIError
 
+from harness.conversation import current_history, note_model_usage
 from harness.prefix_cache import CACHE_GONE_CODES, PrefixCache, against_cache
 from harness.sentences import StopCode
 from harness.surface import studio_surface, surface_fingerprint
@@ -98,6 +100,10 @@ CLIENT_CALL_ID_PREFIX = "adk-"
 # A planner call is sent at most this many times. The second send happens when
 # Gemini ends the first on a function call it could not parse.
 _ATTEMPTS = 2
+
+# How a Studio turn's history arm was chosen (`harness.conversation.TurnHistory`),
+# on each of its model spans beside `studio.surface.history`.
+HISTORY_MODE_ATTRIBUTE = "studio.history.mode"
 
 # Langfuse's `LangfuseOtelSpanAttributes.OBSERVATION_TYPE` is the observation
 # type Langfuse gives a span, ahead of the one it infers from the span's GenAI
@@ -263,6 +269,7 @@ class GeminiStream:
                     span.set_attribute(_FINISH_REASON, relay.finish_reason or "none")
             sent_any = sent_any or (relay.closing is None or relay.closing.sent)
             usage = relay.usage
+            note_model_usage(usage)
             spent = _added(spent, usage)
             record_usage(span, spent)
             replaced = (
@@ -431,7 +438,10 @@ def _added(spent: Usage | None, usage: Usage | None) -> Usage | None:
 def surface_attributes(config: types.GenerateContentConfig) -> dict[str, str]:
     """The surface attributes of a call sent `config`, in canonical form. They
     hold the hash of its system instruction and of its declarations, each as the
-    SDK's JSON less unset fields, in the order sent."""
+    SDK's JSON less unset fields, in the order sent, and the history arm of the
+    Studio turn that sent it (`harness.conversation.current_history`), with how
+    that arm was chosen as `studio.history.mode`. A call outside a Studio turn
+    carries no history, and names the `digest` arm and no mode."""
     declarations = [
         json.loads(declaration.model_dump_json(exclude_none=True))
         for tool in config.tools or []
@@ -439,11 +449,16 @@ def surface_attributes(config: types.GenerateContentConfig) -> dict[str, str]:
         for declaration in tool.function_declarations or []
     ]
     instruction = config.system_instruction
-    return surface_fingerprint(
+    turn = current_history.get()
+    attributes = surface_fingerprint(
         studio_surface(),
         instruction=instruction if isinstance(instruction, str) else None,
         declarations=json.dumps(declarations, ensure_ascii=False),
+        history=turn.arm if turn is not None else "digest",
     )
+    if turn is not None and turn.mode is not None:
+        attributes[HISTORY_MODE_ATTRIBUTE] = turn.mode
+    return attributes
 
 
 def record_usage(span: trace.Span, usage: Usage | None) -> None:
@@ -715,6 +730,7 @@ class _Client:
 
 __all__ = [
     "CLIENT_CALL_ID_PREFIX",
+    "HISTORY_MODE_ATTRIBUTE",
     "NO_PARAMETERS",
     "AfterResponse",
     "BeforeRequest",

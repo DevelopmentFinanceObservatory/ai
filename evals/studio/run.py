@@ -1261,12 +1261,28 @@ def main() -> int:
     parser.add_argument("--url", default="http://localhost:8080")
     parser.add_argument("--judge", action="store_true", help="score rubrics with the judge model")
     parser.add_argument("--case", action="append", help="run only these case ids", default=None)
+    parser.add_argument(
+        "--history",
+        choices=("digest", "full", "split"),
+        default="digest",
+        help=(
+            "scripted mode: the STUDIO_HISTORY the in-process studio runs. The case "
+            "conversation ids are fresh each run, so `split` puts a case on a random arm."
+        ),
+    )
     args = parser.parse_args()
+    if args.mode == "scripted":
+        # The paired eval gate compares cases run to run, so every case runs one
+        # arm, whatever the environment names.
+        os.environ["STUDIO_HISTORY"] = args.history
 
     if args.mode == "live" and args.judge is False:
         print("note: live mode without --judge runs the contract layer only\n")
 
     results, passed = asyncio.run(_main_suite(args))
+    for record in results:
+        # A live server runs the arm its own environment names.
+        record["history"] = args.history if args.mode == "scripted" else None
     counts: dict[str, int] = {}
     for record in results:
         counts[record["status"]] = counts.get(record["status"], 0) + 1
