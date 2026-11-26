@@ -734,6 +734,30 @@ async def test_a_part_the_users_words_cannot_repair_names_its_next_search(
     assert ["retry_with_text" in part for part in found["parts"]] == [retried, retried]
 
 
+async def test_a_year_held_back_refusal_still_counts_toward_the_text_search_it_waits_for():
+    # The year step holds back the retry on the first reply; the refusal is recorded, so
+    # the next refusal for the same reason without the departure is offered the search.
+    set_studio_surface(HYDROGEN_SURFACE)
+    refused = {"variable": "climate finance", "status": "no_data", "reason": "role_not_resolved"}
+    digests = [
+        _digest({**refused, "departures": [_YEARS_OUT]}, kind="resolution"),
+        _digest(refused, kind="resolution"),
+    ]
+
+    async def resolver(**call: Any) -> dict[str, Any]:
+        return digests.pop(0)
+
+    tools, ctx = _tools(resolver)
+    repaired = {**_RETRY_PART, "entities": [{"text": "Kenya", "role": "from"}]}
+
+    first = await tools["search"](ctx, [_RETRY_PART])
+    second = await tools["search"](ctx, [repaired])
+
+    assert "retry_with_text" not in first["parts"][0]
+    assert first["parts"][0]["next_step"] == orchestrator_tools.NEXT_STEP_YEAR_UNAVAILABLE
+    assert "retry_with_text" in second["parts"][0]
+
+
 async def test_a_text_search_is_offered_once_per_part_and_never_on_its_own_result():
     # Flash offers a `text` search for these reasons; Hydrogen names a next search.
     set_studio_surface(FLASH_SURFACE)

@@ -1284,7 +1284,9 @@ def _repaired_first() -> frozenset[str]:
 # group the data does not hold (`entity_not_resolved`), a phrase the data does
 # not record (`qualifier_not_bound`), or a window outside the years it covers
 # (the `year_unavailable` departure). A part refused for one of the two reasons
-# is offered no `text` search; the window's step follows the reason's repair.
+# is offered no `text` search; the window's step follows the reason's repair. A
+# part with the departure is offered no `text` search whatever its reason, until
+# Search returns it without the departure.
 NEXT_STEP_UNRESOLVED_ENTITY = (
     "Search this measure again without the place or group it could not use, or with the "
     "nearest place or group the data holds."
@@ -1401,7 +1403,9 @@ def _offer_text_retries(
     When they are not, no reading is offered one once any `text` search has
     run this turn. A reading refused for a reason in `_repaired_first` is
     offered one only when a part with its measure was already refused for
-    that reason this turn, so the parsed repair comes first."""
+    that reason this turn, so the parsed repair comes first. On the `hydrogen`
+    surface a reading with a `year_unavailable` departure is offered none, but
+    its refusal is still recorded for the reason above."""
     searched = set(state.get(_TEXT_SEARCHED_KEY) or ())
     untied_and_searched = not tied and _TEXT_SEARCH_RAN in searched
     keys = [_part_key(part) for part in parts] if tied else None
@@ -1411,14 +1415,14 @@ def _offer_text_retries(
     for index, reading in enumerate(readings):
         if reading.get("status") not in _RETRY_STATUSES or _reason_step(reading):
             continue
-        if _names_next_step(reading) and _years_unavailable(reading):
-            continue
         reason = reading.get("reason")
         if reason in repaired_first:
             repair = json.dumps([_words(str(reading.get("variable") or "")), reason])
             refused.append(repair)
             if repair not in due:
                 continue
+        if _names_next_step(reading) and _years_unavailable(reading):
+            continue
         if untied_and_searched or (keys is not None and keys[index] in searched):
             continue
         reading["retry_with_text"] = RETRY_WITH_TEXT

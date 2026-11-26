@@ -97,6 +97,7 @@ from harness.conversation import (
     current_turn_id,
 )
 from harness.db.migrate import apply_pending
+from harness.settings import Settings
 from harness.surface import FLASH_SURFACE, HYDROGEN_SURFACE, set_studio_surface
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from planner.plan import (
@@ -113,6 +114,7 @@ from planner.plan import (
     SpecId,
     Unit,
 )
+from planner.settings import AgentSettings
 from planner.workflow import ResolvedEntity, SelectedSource
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -247,13 +249,16 @@ def _reset_studio_surface(monkeypatch: pytest.MonkeyPatch) -> Any:
     sets, directly or through `create_app` or an eval's studio, must not reach a
     later test. The next `studio_surface()` resolves it again from settings.
 
-    Every test also starts without `MODEL_NAME` and `PLANNER_MODEL_NAME`, so a
-    shell that sets them cannot change the surface a test that pins none gets.
+    Every test also starts with `MODEL_NAME` and `PLANNER_MODEL_NAME` set to the
+    code defaults, so neither a shell nor a `.env` file in the working directory
+    can change the surface a test that pins none gets.
     Autouse fixtures run before the others, so `flash_studio`,
     `hydrogen_studio` and a test's own `setenv` still win.
     """
-    monkeypatch.delenv("MODEL_NAME", raising=False)
-    monkeypatch.delenv("PLANNER_MODEL_NAME", raising=False)
+    monkeypatch.setenv("MODEL_NAME", Settings.model_fields["model_name"].default)
+    monkeypatch.setenv(
+        "PLANNER_MODEL_NAME", AgentSettings.model_fields["planner_model_name"].default
+    )
     yield
     set_studio_surface(None)
 
