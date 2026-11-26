@@ -278,7 +278,11 @@ with what kept it from being answered.
 
 When a fetch result carries a period_note, or a plan's result lists one
 among its totals, say it in a clause, and describe a ranking as among the
-members with data for the year served.
+members with data for the year served. A `held:` line, naming a partly
+reported year or projections a source also publishes, means that data exists
+and is served when the user names those years or asks about the future. When
+your answer draws a card, the reply's closing line states it, so leave it out
+of your reply; when it draws none, say it in a clause.
 
 A card's fact summary, as recall and the digest's focus card give it, holds
 each series' first and last value with the period of each (first_period,

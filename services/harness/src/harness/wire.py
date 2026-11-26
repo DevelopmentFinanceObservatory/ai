@@ -43,6 +43,7 @@ from common.place_type import PartyClass
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     JsonValue,
@@ -93,11 +94,31 @@ class Source(_WireModel):
     retrieved: str | None = None
 
 
+class HeldPeriod(_WireModel):
+    """A run of periods a source marks partial or projected. `served` is true
+    when the card's data includes them and false when the read held them back.
+    `start` equals `end` for one period. `share` and `basis` state how much of
+    the `against` period a partial run holds so far."""
+
+    status: Literal["partial", "projected"]
+    start: str
+    end: str
+    served: bool
+    source_name: str | None = None
+    share: float | None = None
+    basis: Literal["value", "series"] | None = None
+    against: str | None = None
+
+
 class Freshness(_WireModel):
+    """`data_through` is the latest reported (non-projected) year of the
+    card's data, which a card drawing projected years only does not hold."""
+
     data_through: str
     last_refreshed: str
     partial_period: bool
     next_expected: str | None = None
+    held: list[HeldPeriod] = Field(default_factory=list)
 
 
 class WarningSeverity(StrEnum):
@@ -365,6 +386,24 @@ class Surface(StrEnum):
     STUDIO = "studio"
     DOWNLOAD = "download"
     EMBED = "embed"
+
+
+class PromptSource(StrEnum):
+    """Where a turn's question text came from when the user did not type it
+    (`TurnRequest.prompt_source`): `example`, a Studio landing example;
+    `availability`, the button asking what data is available;
+    `search_example`, a Search example handed over to the Studio."""
+
+    EXAMPLE = "example"
+    AVAILABILITY = "availability"
+    SEARCH_EXAMPLE = "search_example"
+
+
+def _known_prompt_source(value: object) -> PromptSource | None:
+    """`value` as a `PromptSource`, or None for anything else, so a value the
+    harness does not know leaves the turn untagged and the request standing."""
+    known = {source.value for source in PromptSource}
+    return PromptSource(value) if isinstance(value, str) and value in known else None
 
 
 # A Search API resolution has at most six parts, and a Studio handoff seeds
@@ -1007,6 +1046,11 @@ class TurnRequest(_WireModel):
     `unit_question` is missing, a `multi_select` one a `single_select` when
     `multi_select` is missing (`harness.studio_translate._asked_question`).
 
+    `prompt_source` names where the question text came from when the user
+    did not type it (`PromptSource`). A value the harness does not know is
+    dropped, as an absent one. The turn's `studio.turn` line and Langfuse
+    trace carry it (`harness.studio_state.TurnUsage.prompt_source`).
+
     `after_turn` is a precondition: the index of the turn this request
     follows, as a state read reports it (0 before the first turn). The
     request is refused 409 `edit_conflict` with `constraint_id`
@@ -1032,6 +1076,11 @@ class TurnRequest(_WireModel):
     apply_unit: ApplyUnit | None = None
     after_turn: int | None = Field(default=None, ge=0)
     client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
+    prompt_source: Annotated[
+        PromptSource | None,
+        BeforeValidator(_known_prompt_source),
+        WithJsonSchema({"enum": [*(source.value for source in PromptSource), None]}),
+    ] = None
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
@@ -1958,10 +2007,12 @@ class ApplyChoiceSuggestion(_WireModel):
 
 
 class Suggestions(_WireModel):
-    """Follow-up chips. Empty unless the answer used readings with scope
-    choices or other counts, which give one `ApplyChoiceSuggestion` per
+    """Follow-up chips. First, one `SuggestionItem` asking for the projected
+    years a card the turn drew left out, where one left any out
+    (`harness.turn_records.projection_chip`). Then, for readings the answer
+    used with scope choices or other counts, one `ApplyChoiceSuggestion` per
     other option or count Search can serve
-    (`harness.turn_records.scope_chips`)."""
+    (`harness.turn_records.scope_chips`). Empty when there are neither."""
 
     event: Literal["suggestions"]
     seq: int = Field(ge=0)

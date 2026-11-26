@@ -846,6 +846,16 @@ A state read's stored card (`closed_since[].cards[]`, `StoredCard`) gains `unit_
 
 Each is left out when it has no value. `schema_version` stays 1.
 
+## Where a typed question came from (delta 33, v1.18)
+
+`turn.request` gains an optional `prompt_source`, set when the page filled in the question for the user: `"example"` for a Studio landing example, `"availability"` for the button asking what data is available, and `"search_example"` for a Search example handed over to the Studio. A question the user typed carries none. The harness drops any other value, as it does an absent one, and runs the turn. The turn's `studio.turn` log line names it as `prompt_source`, and its Langfuse trace holds it under the metadata key `prompt_source`; a resume or an answer to the turn's pause keeps it.
+
+A release from before this delta refuses `prompt_source` with a 422, as it refuses any member it does not name, so the harness deploys before a page that sends it. `schema_version` stays 1.
+
+```json
+{"kind": "turn.request", "schema_version": 1, "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E", "message": "How much aid did Kenya receive in 2023?", "prompt_source": "example"}
+```
+
 ## Sample fixture values (delta 10)
 
 Fixture values that are samples:
@@ -969,3 +979,4 @@ Fixture values that are samples:
 1. `elicitation.request` questions gain `input: "unit"` with a `unit` offer, and `multi_select` is emitted; answers gain `{kind: "unit", ...}` and `{kind: "options", option_ids}`. `turn.request` and `interrupt.response` gain `client_features`; a client that declares no `unit_question` or `multi_select` gets those questions as `single_select` (see "Question forms a client declares"). `component.created` gains `unit_change` and `replaces`; `turn.request` gains `apply_unit`, which comes alone (see "A unit question, a card's unit change and several answers").
 1. `plan.proposed.decisions[]` gains `unit` on the row stating a unit question's whole unit, whose `options` are whole units; `interrupt.response` gains `unit` on a `switch` (see "A unit row on the plan card").
 1. `turn.cancel` gains an optional `turn_index`; a Stop naming another turn than the latest is answered 200 `{"code": "turn_moved", "turn_index"}` and leaves the conversation as it was. A state read's stored card gains `unit_change` and `replaces` (see "A Stop that names its turn, and a stored card's unit and slot").
+1. `turn.request` gains an optional `prompt_source` (`"example"`, `"availability"` or `"search_example"`), which the turn's `studio.turn` line and Langfuse trace metadata carry; any other value is dropped (see "Where a typed question came from").

@@ -267,6 +267,9 @@ class GetDataScope(BaseModel):
         description=(
             "Replaces the whole window member, e.g. "
             '{"kind": "range", "start_year": 2015, "end_year": 2024}. '
+            'Add "include": ["partial"] or ["projected"] to serve the partly '
+            "reported or projected years a read holds back: partial for years the "
+            "user named, projected for a question about what comes next. "
             "Omit to leave the window untouched."
         ),
     )

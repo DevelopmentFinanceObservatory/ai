@@ -1,6 +1,6 @@
-"""The `seed` node: opens the turn with the runs an earlier turn left
-unfinished, carried on, and the datasets the user brought from Search or
-the chip the user clicked."""
+"""The `seed` node: opens the turn with one read of the user's words, the
+runs an earlier turn left unfinished, carried on, and the datasets the user
+brought from Search or the chip the user clicked."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any
 
 from compiler.surface import ToolSurface
 from orchestrator.call import OrchestratorCall
+from planner.stated_scope import StatedScopeReader, start_stated_scope_read
 from pydantic import ValidationError
 from translator.discovery import (
     DefinitionNotResolvedError,
@@ -92,14 +93,24 @@ def seed_node(
     definition_surface: ToolSurface,
     resume: ResumeRuns | None = None,
     fetch: Fetch | None = None,
+    stated_scope: StatedScopeReader | None = None,
 ) -> Node[GraphEvent]:
-    """The `seed` node, carrying on unfinished runs through `resume`,
-    resolving seeds and applying a chip through `definition_surface`,
-    fetching a chip's data with `fetch`, the orchestrator's `fetch` tool
-    (`chip_fetch`), and recording its steps through `executor`."""
+    """The `seed` node, reading the turn's words through `stated_scope`,
+    carrying on unfinished runs through `resume`, resolving seeds and applying
+    a chip through `definition_surface`, fetching a chip's data with `fetch`,
+    the orchestrator's `fetch` tool (`chip_fetch`), and recording its steps
+    through `executor`."""
 
     async def receive_seeds(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next:
-        """Carry on the runs an earlier turn left unfinished (`resume`,
+        """Start the one read of the turn's words
+        (`planner.stated_scope.start_stated_scope_read`), which updates the
+        conversation's licence to read partly reported and projected years,
+        and go on without waiting: the first read of the turn's licence or
+        reading awaits it, and so does a pause or the turn's end
+        (`harness.graph.workflow.turn_graph`). A read that fails is recorded
+        for the turn and licenses nothing, and one that raises is logged,
+        records nothing and licenses nothing. Then
+        carry on the runs an earlier turn left unfinished (`resume`,
         `harness.graph.resume`), then hand the agent the datasets the user
         brought from Search, or the data of the chip the user clicked
         (`APPLY_CHOICE_STATE_KEY`, `harness.graph.switch.apply_stored_choice`).
@@ -118,6 +129,8 @@ def seed_node(
             RuntimeError: If the turn applies a chip and the node has no `fetch`.
         """
         del node_input
+        if stated_scope is not None:
+            start_stated_scope_read(ctx.state, stated_scope)
         raw = TurnInput.model_validate(ctx.inputs).seeds
         resumed = await resume(ctx) if resume is not None else None
         seeded = await take(ctx, [] if raw is None else raw)

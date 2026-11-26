@@ -21,6 +21,7 @@ import pyarrow as pa
 import pytest
 from analysis_mcp import verbs as analysis_verbs
 from analysis_mcp.runner_client import RunnerClient, runner_holder
+from common.live_apis import LiveApisError
 from common.materialisation import (
     FrameRef,
     FrameTooLarge,
@@ -106,6 +107,7 @@ from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT, ErrorData
 from orchestrator.agent import INSTRUCTION
 from orchestrator.call import OrchestratorCall
 from orchestrator.declarations import tool_declaration
+from planner.licence import Licence
 from planner.parties import PartyRole
 from planner.plan import (
     MAX_ASK_CHARS,
@@ -117,6 +119,15 @@ from planner.plan import (
     current_recorded_identity,
 )
 from planner.records import Period
+from planner.stated_scope import (
+    LICENCE_STATE_KEY,
+    STATED_SCOPE_STATE_KEY,
+    LicenceRecord,
+    StatedScopeRecord,
+    TextReading,
+    read_stated_scope,
+)
+from planner.tool_results import ProblemCode
 from planner.workflow import ToolId
 from presentation_mcp import server as presentation_server
 from presentation_mcp.platform_contract import Refusal, RetryMode
@@ -248,6 +259,7 @@ def _tools(
     canvas_series=None,
     canvas_cards=None,
     remove_cards=None,
+    stated_scope=None,
 ):
     tools = build_orchestrator_tools(
         resolver=resolver or _resolver(_digest()),
@@ -258,6 +270,7 @@ def _tools(
         canvas_series=canvas_series,
         canvas_cards=canvas_cards,
         remove_cards=remove_cards,
+        stated_scope=stated_scope,
     )
     by_name = {fn.__name__: fn for fn in tools}
     return by_name, OrchestratorCall(state={"surface": surface_name}, turn_id="turn-1")
@@ -1701,6 +1714,415 @@ async def test_fetch_keeps_how_its_data_was_served_on_the_readings_and_from_the_
         "Africa's countries only · "
         "gross disbursements, current USD."
     )
+
+
+_WINDOW_TO_2025 = {"kind": "range", "start_year": 2023, "end_year": 2025}
+_CRS_2025 = {"kind": "partial", "source": "dfo/crs", "start_year": 2025, "end_year": 2025}
+_IDS_2026 = {"kind": "projected", "source": "dfo/ids", "start_year": 2026, "end_year": 2030}
+
+
+def _held_block(*held_back: dict[str, Any], **identity: Any) -> dict[str, Any]:
+    """The education-aid block under `SPEC_AID`, its coverage stating `held_back`."""
+    block = _role_open_block(SPEC_AID, **identity)
+    block["resolved"]["coverage"] = {
+        **block["resolved"].get("coverage", {}),
+        "held_back": list(held_back),
+    }
+    return block
+
+
+@pytest.mark.parametrize(
+    ("searched", "scope", "named_years", "projection", "sent_window"),
+    [
+        pytest.param(
+            {**_WINDOW_TO_2025, "include": ["partial"]},
+            None,
+            (),
+            False,
+            _WINDOW_TO_2025,
+            id="a-search-time-opting-in-unnamed",
+        ),
+        pytest.param(
+            {"kind": "latest"},
+            {
+                "window": {
+                    "kind": "range",
+                    "start_year": 2023,
+                    "end_year": 2027,
+                    "include": ["partial", "projected"],
+                }
+            },
+            (2025,),
+            False,
+            {"kind": "range", "start_year": 2023, "end_year": 2027, "include": ["partial"]},
+            id="a-model-window-keeping-only-the-named-class",
+        ),
+        pytest.param(
+            {"kind": "latest", "include": ["projected"]},
+            None,
+            (),
+            True,
+            {"kind": "latest"},
+            id="a-latest-window-asking-for-projections",
+        ),
+    ],
+)
+async def test_fetch_drops_an_include_the_users_words_do_not_license(
+    searched: dict[str, Any],
+    scope: dict[str, Any] | None,
+    named_years: tuple[int, ...],
+    projection: bool,
+    sent_window: dict[str, Any],
+) -> None:
+    """On the fetch path, the window serving 2025 came from the model's
+    search time or its own scope, and the user's words do not name the year, so
+    the fetch reads the window without that class and says so. A window that is
+    not a range with both ends keeps no `include`, licensed or not."""
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor)
+    ctx.state["orchestrator:specs"] = {
+        SPEC_AID: _held_block({**_CRS_2025, "served": True}, _IDS_2026, requested_window=searched)
+    }
+    words = "How much health aid went to Africa?"
+    ctx.state[STATED_SCOPE_STATE_KEY] = StatedScopeRecord(
+        words=words,
+        readings={words: TextReading(named_years=named_years, projection=projection)},
+    ).model_dump(mode="json")
+    token = current_user_message.set(words)
+    try:
+        found = await tools["fetch"](SPEC_AID, ctx, scope=scope)
+    finally:
+        current_user_message.reset(token)
+
+    (sent,) = [args for tool, args in executor.calls if tool == "get_data"]
+    assert sent["scope"]["window"] == sent_window
+    assert "window_note" in found
+
+
+_BOTH_TO_2027 = {
+    "kind": "range",
+    "start_year": 2023,
+    "end_year": 2027,
+    "include": ["partial", "projected"],
+}
+
+
+@pytest.mark.parametrize(
+    ("words", "named_years", "projection", "held_back", "window", "kept", "noted", "held"),
+    [
+        pytest.param(
+            "Kenya's health aid in 2025",
+            (2025,),
+            False,
+            [_CRS_2025, _IDS_2026],
+            _BOTH_TO_2027,
+            ["partial"],
+            True,
+            Licence(),
+            id="the-year-named",
+        ),
+        pytest.param(
+            "Kenya's health aid and what is projected",
+            (),
+            True,
+            [_CRS_2025, _IDS_2026],
+            _BOTH_TO_2027,
+            ["partial", "projected"],
+            False,
+            Licence(),
+            id="projections-asked-through-the-partial-year",
+        ),
+        pytest.param(
+            "Kenya's health aid in 2025",
+            (2025,),
+            False,
+            [],
+            {"kind": "range", "start_year": 2020, "end_year": 2025, "include": ["partial"]},
+            [],
+            False,
+            Licence(),
+            id="a-named-year-the-search-showed-holds-nothing",
+        ),
+        pytest.param(
+            None,
+            (),
+            False,
+            [_CRS_2025, _IDS_2026],
+            _BOTH_TO_2027,
+            ["partial", "projected"],
+            False,
+            Licence(projection=True),
+            id="a-chip-turn-reads-the-held-licence",
+        ),
+        pytest.param(
+            None,
+            (),
+            False,
+            [_CRS_2025, _IDS_2026],
+            _BOTH_TO_2027,
+            [],
+            True,
+            Licence(),
+            id="a-chip-turn-holding-no-licence",
+        ),
+        pytest.param(
+            "and for Uganda?",
+            (),
+            False,
+            [_CRS_2025, _IDS_2026],
+            _BOTH_TO_2027,
+            ["partial", "projected"],
+            False,
+            Licence(named=(2020, 2030), projection=True),
+            id="a-typed-follow-up-naming-none-carries-the-licence",
+        ),
+        pytest.param(
+            "Kenya's health aid since 2015",
+            (2015,),
+            False,
+            [_CRS_2025],
+            {"kind": "range", "start_year": 2015, "end_year": 2025, "include": ["partial"]},
+            [],
+            True,
+            Licence(),
+            id="one-named-year-licenses-no-partial-year-after-it",
+        ),
+        pytest.param(
+            "Kenya's health aid 2015 to 2025",
+            (2015, 2025),
+            False,
+            [_CRS_2025],
+            {"kind": "range", "start_year": 2015, "end_year": 2025, "include": ["partial"]},
+            ["partial"],
+            False,
+            Licence(),
+            id="a-partial-year-between-the-named-ones",
+        ),
+    ],
+)
+async def test_fetch_keeps_an_include_the_users_words_license(
+    words: str | None,
+    named_years: tuple[int, ...],
+    projection: bool,
+    held_back: list[dict[str, Any]],
+    window: dict[str, Any],
+    kept: list[str],
+    noted: bool,
+    held: Licence,
+) -> None:
+    """The conversation's licence, `held` from earlier turns and set by the
+    turn's words read through the stated-scope reader, licenses what they name
+    or the projections they ask for. A licensed class stays where the block
+    states a run of it the read reaches, and is dropped with no note where the
+    read reaches none. A turn with no words of
+    the user's, such as a count chip re-fetching a stored reading, reads the held
+    licence, and a typed turn naming no year carries it."""
+    executor = FakeExecutor()
+
+    async def reader(texts: Sequence[str]) -> list[TextReading]:
+        return [TextReading(named_years=named_years, projection=projection) for _ in texts]
+
+    tools, ctx = _tools(executor=executor, stated_scope=reader)
+    ctx.state[LICENCE_STATE_KEY] = LicenceRecord(
+        named_years=held.named, projection=held.projection
+    ).model_dump(mode="json")
+    ctx.state["orchestrator:specs"] = {SPEC_AID: _held_block(*held_back, requested_window=window)}
+    token = current_user_message.set(words)
+    try:
+        found = await tools["fetch"](SPEC_AID, ctx)
+    finally:
+        current_user_message.reset(token)
+
+    (sent,) = [args for tool, args in executor.calls if tool == "get_data"]
+    sent_window = (sent.get("scope") or {}).get("window", window)
+    expected = {key: value for key, value in window.items() if key != "include"}
+    assert sent_window == ({**expected, "include": kept} if kept else expected)
+    # Only a class the words do not license is noted. One that cannot change the
+    # read is dropped quietly.
+    assert ("window_note" in found) is noted
+
+
+@pytest.mark.parametrize("on_record", [True, False], ids=["block-on-record", "no-block"])
+async def test_fetch_with_no_reader_drops_a_model_written_include(on_record: bool) -> None:
+    """With no stated-scope reader, a typed turn's words are not read, so they
+    license nothing. The model's `include` is dropped and the result says so,
+    whether or not a block on record states the runs the read reaches."""
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor)
+    if on_record:
+        ctx.state["orchestrator:specs"] = {
+            SPEC_AID: _held_block(_CRS_2025, _IDS_2026, requested_window={"kind": "latest"})
+        }
+    token = current_user_message.set("Kenya ODA 2015 to 2025")
+    try:
+        found = await tools["fetch"](SPEC_AID, ctx, scope={"window": _BOTH_TO_2027})
+    finally:
+        current_user_message.reset(token)
+
+    (sent,) = [args for tool, args in executor.calls if tool == "get_data"]
+    assert sent["scope"]["window"] == {"kind": "range", "start_year": 2023, "end_year": 2027}
+    assert "window_note" in found
+
+
+async def test_a_typed_follow_up_keeps_the_licence_an_earlier_turn_set() -> None:
+    """Turn 1 asks for projections and is served them. Turn 2, "and for Uganda?",
+    names no year and asks nothing of the future, so it carries turn 1's licence
+    and its fetch keeps the same `include`, with no note."""
+    readings = {
+        "Kenya debt service 2023 to 2027 including projections": TextReading(
+            named_years=(2023, 2027), projection=True
+        ),
+        "and for Uganda?": TextReading(),
+    }
+
+    async def reader(texts: Sequence[str]) -> list[TextReading]:
+        return [readings[text] for text in texts]
+
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor, stated_scope=reader)
+    held = {"held_back": [_CRS_2025, _IDS_2026]}
+    ctx.state["orchestrator:specs"] = {
+        spec_id: {
+            **(block := _role_open_block(spec_id, requested_window={"kind": "latest"})),
+            "resolved": {
+                **block["resolved"],
+                "coverage": {**block["resolved"].get("coverage", {}), **held},
+            },
+        }
+        for spec_id in (SPEC_AID, SPEC_LIFE)
+    }
+    found = []
+    for (words, _), spec_id in zip(readings.items(), (SPEC_AID, SPEC_LIFE), strict=True):
+        token = current_user_message.set(words)
+        try:
+            found.append(await tools["fetch"](spec_id, ctx, scope={"window": _BOTH_TO_2027}))
+        finally:
+            current_user_message.reset(token)
+
+    # Turn 2 asks for the same data over the same window, so turn 1's read
+    # answers it, where a window without `include` would be read again.
+    sent = [args["scope"]["window"] for tool, args in executor.calls if tool == "get_data"]
+    assert sent == [_BOTH_TO_2027]
+    assert found[1]["same_data_as"] == SPEC_AID
+    assert ["window_note" in result for result in found] == [False, False]
+
+
+async def test_a_reader_fault_licenses_nothing_for_the_fetch_and_is_raised_to_the_planner() -> None:
+    """A reader that answers no reading for the turn's words is a fault past
+    Search's contract. The fetch logs it and reads without `include`, so the
+    turn continues. A reader fault records nothing for the words, so the
+    planner's read in the same turn reads them again and raises it."""
+
+    async def reader(texts: Sequence[str]) -> list[TextReading]:
+        return []
+
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor, stated_scope=reader)
+    ctx.state[LICENCE_STATE_KEY] = LicenceRecord(projection=True).model_dump(mode="json")
+    ctx.state["orchestrator:specs"] = {
+        SPEC_AID: _held_block(_CRS_2025, _IDS_2026, requested_window={"kind": "latest"})
+    }
+    token = current_user_message.set("Kenya debt service 2023 to 2027 with projections")
+    try:
+        found = await tools["fetch"](SPEC_AID, ctx, scope={"window": _BOTH_TO_2027})
+        with pytest.raises(ValueError):
+            await read_stated_scope(ctx.state, reader)
+    finally:
+        current_user_message.reset(token)
+
+    (sent,) = [args for tool, args in executor.calls if tool == "get_data"]
+    assert sent["scope"]["window"] == {"kind": "range", "start_year": 2023, "end_year": 2027}
+    assert "window_note" in found
+
+
+class _ManifestSurface:
+    """Answers `retrieval_manifest` with `manifest` for every frame, as the
+    Studio surface recorder answers it for a frame `get_data` minted."""
+
+    def __init__(self, manifest: dict[str, Any]) -> None:
+        self.manifest = manifest
+
+    def retrieval_manifest(self, *, frame_ref: Mapping[str, str | None]) -> dict[str, Any] | None:
+        return self.manifest
+
+
+async def test_fetch_states_the_held_lines_of_the_manifest_it_read() -> None:
+    """A fetch with no search this turn reads a window ending in 2024 that left
+    the partly reported 2025 out: its result says 2025 is held and left out, in
+    the line the get_data digest gives, with no `include` hint, and the same
+    fetch again answers the same line. A projected run the window does not
+    reach is not named."""
+    manifest = {
+        "definition": {"spec_id": SPEC_AID},
+        "coverage": {
+            "window": {"start_year": 2015, "end_year": 2024},
+            "held_back": [_CRS_2025, {**_IDS_2026, "start_year": 2027}],
+        },
+    }
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor, surface=_ManifestSurface(manifest))
+    ctx.state["orchestrator:specs"] = {
+        SPEC_AID: _held_block(_CRS_2025, requested_window={"kind": "latest"})
+    }
+
+    found = await tools["fetch"](SPEC_AID, ctx)
+    again = await tools["fetch"](SPEC_AID, ctx)
+
+    assert found["held"] == ["held: 2025 partial, left out"]
+    assert again["held"] == found["held"]
+    assert len([tool for tool, _ in executor.calls if tool == "get_data"]) == 1
+
+
+async def test_fetch_of_a_block_with_a_null_identity_reads_with_no_window() -> None:
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor)
+    block = _role_open_block(SPEC_AID)
+    block["definition"]["identity"] = None
+    ctx.state["orchestrator:specs"] = {SPEC_AID: block}
+
+    found = await tools["fetch"](SPEC_AID, ctx)
+
+    assert "window_note" not in found
+    assert [args["spec_id"] for tool, args in executor.calls if tool == "get_data"] == [SPEC_AID]
+
+
+async def test_a_failed_read_of_the_turns_words_is_retried_once_and_licenses_nothing() -> None:
+    """Search's stated-scope route keeps failing. The turn's words are read, and
+    read again once by the next fetch, since a 503 can pass. Every later read of
+    the turn, the planner's included, answers the same refusal. The turn licenses
+    nothing, so each fetch reads without `include`, and the conversation's licence
+    stays for later turns."""
+    reads: list[Sequence[str]] = []
+
+    async def reader(texts: Sequence[str]) -> list[TextReading]:
+        reads.append(texts)
+        raise LiveApisError(status=503, code=None, retryable=True)
+
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor, stated_scope=reader)
+    held = LicenceRecord(named_years=(2023, 2027), projection=True).model_dump(mode="json")
+    ctx.state[LICENCE_STATE_KEY] = held
+    ctx.state["orchestrator:specs"] = {
+        SPEC_AID: _held_block(_CRS_2025, _IDS_2026, requested_window={"kind": "latest"})
+    }
+    windows = [
+        {"kind": "range", "start_year": start, "end_year": 2027, "include": ["projected"]}
+        for start in (2021, 2022, 2023)
+    ]
+    token = current_user_message.set("Kenya debt service 2023 to 2027 with projections")
+    try:
+        found = [await tools["fetch"](SPEC_AID, ctx, scope={"window": w}) for w in windows]
+        refusal = await read_stated_scope(ctx.state, reader)
+    finally:
+        current_user_message.reset(token)
+
+    assert len(reads) == 2
+    sent = [args["scope"]["window"] for tool, args in executor.calls if tool == "get_data"]
+    assert sent == [{k: v for k, v in w.items() if k != "include"} for w in windows]
+    assert all("window_note" in result for result in found)
+    assert refusal is not None
+    assert refusal["code"] == ProblemCode.STATED_SCOPE_UNAVAILABLE.value
+    assert ctx.state[LICENCE_STATE_KEY] == held
 
 
 class _NotedExecutor(FakeExecutor):

@@ -40,6 +40,8 @@ from typing import Any, NamedTuple, cast
 
 from common.breakdown_labels import NO_LABELS, CellLabels
 from common.composite import ManifestComponent, manifest_components, year_spans, years_of
+from common.held_back import reached_held_back, served_window
+from common.held_note import held_lines, include_hint
 from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import WHOLE_SIDE_POPULATIONS
@@ -318,7 +320,8 @@ def render_get_data_digest(
         A short prose digest: an acknowledgement of what was retrieved, its
         coverage, the components of a composite frame (`trace.components`), the group totals apis left out of the frame
         (`trace.party_totals_left_out`), any warnings that qualify that coverage, the period note
-        of a one-year frame (`common.period_note.period_note`), the frame
+        of a one-year frame (`common.period_note.period_note`), the partial and
+        projected years the frame holds or left out (`_held_lines`), the frame
         reference for downstream tools, then the citation, per-series statistics, any
         dropped-role, remint-persistence, or operation-poll
         notes, any degraded-fetch note, the `stat_vars_summed` warning, and
@@ -350,6 +353,7 @@ def render_get_data_digest(
     sections.extend(_warning_lines(shown_coverage))
     if note := period_note(manifest.coverage.model_dump(mode="json")):
         sections.append(note)
+    sections.extend(_held_lines(manifest))
     sections.append(_frame_reference_line(frame_ref))
     if description is not None:
         sections.extend(_description_lines(description))
@@ -506,15 +510,28 @@ def _joined_with_cap(items: Sequence[str], cap: int) -> str:
     return f"{text}, and {remainder} more" if text else f"{remainder} more"
 
 
+def _held_lines(manifest: Manifest) -> list[str]:
+    """The partial and projected years the frame holds or left out that its
+    window reaches, one data line each (`common.held_note.held_lines`), with one
+    line, after them, naming the window member that serves the years left out
+    (`include_hint`, over `common.held_back.reached_held_back`)."""
+    dumped = manifest.model_dump(mode="json")
+    lines = held_lines([dumped])
+    if hint := include_hint(reached_held_back(dumped.get("coverage") or {})):
+        lines.append(hint)
+    return lines
+
+
 def _coverage_line(coverage: CoverageModel, definition: DefinitionModel) -> str:
     row_word = "row" if coverage.rows == 1 else "rows"
     pieces = [f"{coverage.rows} {row_word}"]
     dims_text = ", ".join(f"{dim.count} {dim.label}" for dim in coverage.dimensions)
     if dims_text:
         pieces.append(dims_text)
-    window_text = _coverage_window_text(
-        coverage.window, definition.identity.get("requested_window")
-    )
+    window = coverage.window
+    if window is not None:
+        window = served_window(window, coverage.held_back)
+    window_text = _coverage_window_text(window, definition.identity.get("requested_window"))
     if window_text:
         pieces.append(window_text)
     return "Coverage: " + " · ".join(pieces)

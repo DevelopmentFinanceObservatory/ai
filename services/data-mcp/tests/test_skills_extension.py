@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Callable
 from typing import Any
 
 import httpx2
@@ -222,3 +224,28 @@ def test_the_extension_declares_the_skills_identifier_with_no_settings() -> None
 
     assert (extension.identifier, extension.settings()) == (SKILLS_EXTENSION_ID, {})
     assert SKILLS_EXTENSION_ID == "io.modelcontextprotocol/skills"
+
+
+@pytest.mark.parametrize(
+    ("uri", "outcome", "skill_id"),
+    [
+        (f"skill://{SKILL_ID}/SKILL.md", "ok", SKILL_ID),
+        ("skill://no-such-skill/SKILL.md", "skill_not_found", None),
+        ("https://example.org/x", "request_invalid", None),
+    ],
+    ids=["served", "unknown_skill", "not_a_skill_uri"],
+)
+async def test_skills_get_logs_one_skill_read_line(
+    read_lines: Callable[[], list[dict[str, Any]]], uri: str, outcome: str, skill_id: str | None
+) -> None:
+    with contextlib.suppress(MCPError):
+        await _request(serving_skill(), "skills/get", {"uri": uri})
+
+    [line] = read_lines()
+    assert (line["via"], line["kind"], line["outcome"], line["skill_id"]) == (
+        "extension",
+        "load",
+        outcome,
+        skill_id,
+    )
+    assert line["path"] == ("SKILL.md" if outcome == "ok" else None)

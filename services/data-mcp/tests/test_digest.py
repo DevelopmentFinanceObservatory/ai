@@ -136,6 +136,109 @@ def test_definite_digest_carries_sentence_spec_id_confidence_coverage() -> None:
     assert "unit US dollars (default)" in digest
 
 
+def test_a_definite_part_states_the_years_search_held_back_and_how_to_serve_them() -> None:
+    held_back = {
+        "kind": "projected",
+        "source": "dfo/ids",
+        "source_name": "World Bank IDS",
+        "start_year": 2026,
+        "end_year": 2030,
+        "reported_share": None,
+    }
+    envelope = _envelope(
+        "definite",
+        spec=_spec(coverage={"kind": "bare", "has_data": True, "held_back": [held_back]}),
+    )
+
+    lines = render_digest(envelope).splitlines()
+
+    assert lines[-2:] == [
+        "held: 2026-2030 projected (World Bank IDS), left out",
+        "When the user names these years or asks about projections, get_data serves"
+        " them if its scope.window is a range naming those years and adds"
+        ' "include": ["projected"].',
+    ]
+
+
+def test_a_definite_part_states_a_served_run_as_drawn_with_no_include_line() -> None:
+    held_back = {
+        "kind": "projected",
+        "served": True,
+        "source": "dfo/ids",
+        "source_name": "World Bank IDS",
+        "start_year": 2026,
+        "end_year": 2030,
+        "reported_share": None,
+    }
+    envelope = _envelope(
+        "definite",
+        spec=_spec(coverage={"kind": "bare", "has_data": True, "held_back": [held_back]}),
+    )
+
+    lines = render_digest(envelope).splitlines()
+
+    assert lines[-1] == "held: 2026-2030 projected (World Bank IDS), served"
+    assert not any("include" in line for line in lines)
+
+
+def test_a_definite_part_whose_window_stops_short_of_a_run_left_out_says_nothing_of_it() -> None:
+    """Search states every run its source holds whatever the part's window, so
+    an IDS part of 2000 to 2010 states projections from 2026 it never reaches."""
+    held_back = {
+        "kind": "projected",
+        "source": "dfo/ids",
+        "source_name": "World Bank IDS",
+        "start_year": 2026,
+        "end_year": 2030,
+        "reported_share": None,
+    }
+    coverage = {
+        "kind": "bare",
+        "has_data": True,
+        "window": {"start_year": 2000, "end_year": 2010},
+        "held_back": [held_back],
+    }
+
+    digest = render_digest(_envelope("definite", spec=_spec(coverage=coverage)))
+
+    assert "projections" not in digest
+    assert "include" not in digest
+
+
+@pytest.mark.parametrize(
+    ("served", "window"),
+    [(False, "4 observations, 2024-2024"), (True, "4 observations, 2024-2025")],
+)
+def test_a_definite_parts_coverage_ends_before_a_partial_year_left_out(
+    served: bool, window: str
+) -> None:
+    """CRS education aid over 2024 to 2025 whose partly reported 2025 is left
+    out ends its coverage line at 2024, the newest year the figures hold. A
+    read serving 2025 keeps it."""
+    held_back = {
+        "kind": "partial",
+        "served": served,
+        "source": "dfo/crs",
+        "source_name": "OECD CRS",
+        "start_year": 2025,
+        "end_year": 2025,
+        "reported_share": {"basis": "value", "share": 0.005, "against": 2024},
+    }
+    coverage = {
+        "kind": "exact",
+        "has_data": True,
+        "observation_count": 4,
+        "window": {"start_year": 2024, "end_year": 2025},
+        "held_back": [held_back],
+    }
+
+    lines = render_digest(_envelope("definite", spec=_spec(coverage=coverage))).splitlines()
+
+    assert lines[1] == f"confidence high · {window} · has data"
+    state = "served" if served else "left out"
+    assert f"held: 2025 partial, 0.5% of 2024 value reported, {state}" in lines
+
+
 def test_definite_digest_per_series_facet_renders_as_varies() -> None:
     envelope = _envelope(
         "definite", spec=_spec(facets={"unit": {"basis": "bound", "selection": "per_series"}})

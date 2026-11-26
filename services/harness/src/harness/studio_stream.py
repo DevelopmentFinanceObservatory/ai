@@ -800,6 +800,7 @@ async def own_segment[E, R](
         session_id=conversation_id,
         user_id=usage.user_id,
         tags=usage.tags,
+        trace_metadata=usage.trace_metadata,
     )
     end = Ending(None, Status.UNCLOSED, saved=False)
     frames: list[BaseModel] = []

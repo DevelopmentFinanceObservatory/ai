@@ -327,6 +327,95 @@ def test_a_frame_with_nothing_to_note_renders_no_period_note() -> None:
     assert frame.startswith("Frame:")
 
 
+def test_a_frame_states_the_partial_and_projected_years_it_holds_or_left_out() -> None:
+    payload = _manifest_payload(
+        window={"kind": "range", "start_year": 2020, "end_year": 2030},
+        citation_sources=[{"ref": "dfo/ids", "label": "World Bank"}],
+        year_counts={
+            "held_back": [
+                {
+                    "kind": "partial",
+                    "source": "dfo/crs",
+                    "source_name": "OECD CRS",
+                    "start_year": 2025,
+                    "end_year": 2025,
+                    "reported_share": {"basis": "value", "share": 0.001, "against": 2024},
+                },
+                {
+                    "kind": "projected",
+                    "served": True,
+                    "source": "dfo/ids",
+                    "source_name": "World Bank",
+                    "start_year": 2026,
+                    "end_year": 2030,
+                },
+            ]
+        },
+    )
+    payload["incomplete_after"] = [
+        {
+            "provenance": "dfo/ids",
+            "stat_vars": [],
+            "source": "dfo/ids",
+            "status": "projected",
+            "partial_period": "2026",
+        }
+    ]
+    manifest = strip_manifest(payload)
+
+    digest = render_get_data_digest(
+        manifest=manifest,
+        frame_ref=_frame_ref(manifest),
+        entity_labels={},
+        dropped_roles=[],
+        series_stats=None,
+    )
+
+    coverage, served, held, hint, frame = digest.split("\n\n")[1:6]
+    assert coverage.startswith("Coverage:")
+    assert served == "held: 2026-2030 projected (World Bank), served"
+    assert held == "held: 2025 partial, 0.1% of 2024 value reported, left out"
+    assert hint == (
+        "When the user names these years or asks about projections, get_data serves"
+        " them if its scope.window is a range naming those years and adds"
+        ' "include": ["partial"].'
+    )
+    assert frame.startswith("Frame:")
+
+
+def test_a_frame_whose_window_stops_short_of_a_run_left_out_says_nothing_of_it() -> None:
+    """dfo-apis states every run its source holds whatever the window, so a CRS
+    read of 2005 to 2010 states the partly reported 2025. Its digest names
+    neither the run nor the include that would serve it."""
+    payload = _manifest_payload(
+        window={"kind": "range", "start_year": 2005, "end_year": 2010},
+        year_counts={
+            "held_back": [
+                {
+                    "kind": "partial",
+                    "source": "dfo/crs",
+                    "source_name": "OECD CRS",
+                    "start_year": 2025,
+                    "end_year": 2025,
+                    "reported_share": None,
+                }
+            ]
+        },
+    )
+    manifest = strip_manifest(payload)
+
+    digest = render_get_data_digest(
+        manifest=manifest,
+        frame_ref=_frame_ref(manifest),
+        entity_labels={},
+        dropped_roles=[],
+        series_stats=None,
+    )
+
+    assert "partly reported" not in digest
+    assert "include" not in digest
+
+
 def test_coverage_line_handles_a_missing_window() -> None:
     digest = _digest(window=None)
 

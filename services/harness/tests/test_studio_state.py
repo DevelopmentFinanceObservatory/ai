@@ -4649,6 +4649,7 @@ async def test_a_closed_turn_writes_its_outcome_once_its_write_commits(
             "session_id": CONVERSATION,
             "user_id": _ACCOUNT,
             "tags": ["studio"],
+            "trace_metadata": {},
             "request": "life expectancy in Kenya",
             "response": "done",
             "error": None,
@@ -4786,6 +4787,7 @@ async def test_a_closed_turn_logs_one_studio_turn_line_once_its_closing_write_co
         "account": _ACCOUNT,
         "visitor": _VISITOR,
         "surface": None,
+        "prompt_source": None,
         "release": "dfo-dev-ai-00042-abc",
         "error": "cancelled",
         "fetched_specs": ["spec_a"],
@@ -4856,7 +4858,7 @@ async def test_a_save_whose_write_raises_logs_no_line(new_store, monkeypatch, ca
 
 @pytest.mark.parametrize("cancelled_by", ["caller", "close-timeout"])
 async def test_a_write_cancelled_during_its_commit_still_logs_the_record_it_commits(
-    new_store, caplog, cancelled_by
+    new_store, caplog, monkeypatch, cancelled_by
 ) -> None:
     """A request cancelled while its save commits, and a closing write whose
     timeout fires while it commits, still land the record and write its one
@@ -4882,11 +4884,27 @@ async def test_a_write_cancelled_during_its_commit_still_logs_the_record_it_comm
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, timeout=5)
         else:
+            # A budget no clock reaches, pulled in once the write waits at its
+            # COMMIT, so the timeout fires there however slow the statements.
+            budget = 3600.0
+            real_timeout = asyncio.timeout
+            scopes: list[asyncio.Timeout] = []
+
+            def capture(delay: float | None) -> asyncio.Timeout:
+                scope = real_timeout(delay)
+                if delay == budget:
+                    scopes.append(scope)
+                return scope
+
+            monkeypatch.setattr(asyncio, "timeout", capture)
             closing = asyncio.ensure_future(
-                store.close_segment("principal", CONVERSATION, segment_id, timeout=0.05)
+                store.close_segment("principal", CONVERSATION, segment_id, timeout=budget)
             )
             await asyncio.wait_for(committing.wait(), timeout=5)
-            await asyncio.sleep(0.1)  # the timeout fires while the commit waits
+            (scope,) = scopes
+            scope.reschedule(asyncio.get_running_loop().time())
+            while not scope.expired():  # the cancel reaches the write at COMMIT
+                await asyncio.sleep(0)
             proceed.set()
             assert await asyncio.wait_for(closing, timeout=5) is SegmentClose.SAVED
 

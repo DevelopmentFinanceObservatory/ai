@@ -284,6 +284,51 @@ def test_scope_choices_this_release_cannot_read_are_logged_and_left_out(
     assert any("spec_1" in record.getMessage() for record in caplog.records)
 
 
+@pytest.mark.parametrize(
+    ("window", "kept"),
+    [
+        pytest.param({"start_year": 2005, "end_year": 2010}, [], id="window-short-of-both"),
+        pytest.param({"start_year": 2015, "end_year": 2024}, [2025], id="window-reaching-crs"),
+        pytest.param(
+            {"start_year": 2015, "end_year": 2025}, [2025, 2026], id="window-reaching-both"
+        ),
+    ],
+)
+def test_reading_facts_keep_only_the_held_back_runs_the_reads_window_reaches(
+    window: dict[str, int], kept: list[int]
+) -> None:
+    """dfo-apis states every run a source holds whatever the window. A read of
+    2005 to 2010 reaches neither CRS's partly reported 2025 nor IDS's 2026 to
+    2030 projections, so the planner is shown neither."""
+    runs = [
+        {"kind": "partial", "source": "dfo/crs", "start_year": 2025, "end_year": 2025},
+        {"kind": "projected", "source": "dfo/ids", "start_year": 2026, "end_year": 2030},
+    ]
+    block = {"resolved": {"coverage": {"kind": "exact", "window": window, "held_back": runs}}}
+
+    facts = reading_facts(block)
+
+    assert [run["start_year"] for run in facts.get("held_back", [])] == kept
+
+
+def test_reading_facts_end_a_served_run_where_the_reads_window_ends() -> None:
+    """A 2020 to 2027 read serving IDS's 2026 to 2030 projections holds 2026 to
+    2027, so the reading the planner and recall read records that span."""
+    run = {
+        "kind": "projected",
+        "served": True,
+        "source": "dfo/ids",
+        "start_year": 2026,
+        "end_year": 2030,
+    }
+    window = {"start_year": 2020, "end_year": 2027}
+    block = {"resolved": {"coverage": {"kind": "exact", "window": window, "held_back": [run]}}}
+
+    facts = reading_facts(block)
+
+    assert [(r["start_year"], r["end_year"]) for r in facts["held_back"]] == [(2026, 2027)]
+
+
 def test_definite_part_yields_its_spec_id_and_counts_defaulted_facets() -> None:
     facets = {
         "source": {"basis": "bound"},
@@ -567,6 +612,74 @@ def test_a_part_summary_carries_the_departures_search_states() -> None:
     assert departed["part_digests"][0]["departures"] == [
         {"code": departure["code"], "text": departure["text"]}
     ]
+
+
+@pytest.mark.parametrize(
+    ("window", "served", "projected_served", "held"),
+    [
+        pytest.param(
+            {"start_year": 2005, "end_year": 2010},
+            False,
+            False,
+            None,
+            id="window-short-of-both",
+        ),
+        pytest.param(
+            {"start_year": 2024, "end_year": 2025},
+            True,
+            False,
+            [
+                "held: 2025 partial, 0.5% of 2024 value reported, served",
+                "held: 2026-2030 projected (World Bank IDS), left out",
+            ],
+            id="served-partial-and-projections-left-out",
+        ),
+        pytest.param(
+            {"start_year": 2020, "end_year": 2027},
+            True,
+            True,
+            [
+                "held: 2025 partial, 0.5% of 2024 value reported, served",
+                "held: 2026-2027 projected (World Bank IDS), served",
+            ],
+            id="served-projections-end-where-the-window-ends",
+        ),
+    ],
+)
+def test_a_definite_part_summary_states_the_held_runs_its_window_reaches(
+    window: dict[str, int], served: bool, projected_served: bool, held: list[str] | None
+) -> None:
+    """Education aid asked for 2024 to 2028 reads CRS to 2025, a partly
+    reported year the read serves: the summary the orchestrator reads says
+    so as data lines, with no `include` line, since `fetch` sets `include`
+    itself. A window short of every run it left out states none."""
+    part = _definite("spec_a")
+    part["spec"]["resolved"]["coverage"] = {
+        "kind": "exact",
+        "window": window,
+        "held_back": [
+            {
+                "kind": "partial",
+                "served": served,
+                "source": "dfo/crs",
+                "start_year": 2025,
+                "end_year": 2025,
+                "reported_share": {"basis": "value", "share": 0.005, "against": 2024},
+            },
+            {
+                "kind": "projected",
+                "served": projected_served,
+                "source": "dfo/ids",
+                "source_name": "World Bank IDS",
+                "start_year": 2026,
+                "end_year": 2030,
+            },
+        ],
+    }
+
+    summary = graph_envelope({"parts": [part]})["part_digests"][0]
+
+    assert summary.get("held") == held
 
 
 @pytest.mark.parametrize(

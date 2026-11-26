@@ -121,7 +121,14 @@ from harness.studio_state import (
 from harness.studio_store import StudioStore, keep_turn_records
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
-from harness.turn_records import basis_line, chip_kept, loose_match_notes, scope_chips
+from harness.turn_records import (
+    basis_line,
+    chip_kept,
+    held_back_line,
+    loose_match_notes,
+    projection_chip,
+    scope_chips,
+)
 from harness.unit_offer import (
     offers_another_unit,
     row_units,
@@ -328,6 +335,7 @@ def closed_on_reply(
     suggestions: bool,
     say: bool = True,
     user_display: str | None = None,
+    held_line: str | None = None,
 ) -> list[MessageComplete | Suggestions | Done]:
     """Record the turn closed on `text`, its reply, and return the frames
     that close its stream, numbered: `message.complete`, an empty
@@ -335,13 +343,19 @@ def closed_on_reply(
     agent, such as an Edit Card or a declined plan. A reply that is not `say`
     is recorded and sent as no `message.complete`: the stream shows no text,
     and a state read gives the reply as empty. `user_display` is the line a
-    state read shows as the user's message (`ConversationState.close_turn`)."""
+    state read shows as the user's message (`ConversationState.close_turn`).
+    `held_line` (`harness.turn_records.held_back_line`) follows `text` in
+    `message.complete` and is recorded under its own key, so a later turn's
+    model reads `text` alone as the reply."""
     conversation.turn_final_text = text
-    conversation.close_turn(final_text=text, reply_shown=say, user_display=user_display)
+    conversation.close_turn(
+        final_text=text, held_line=held_line, reply_shown=say, user_display=user_display
+    )
     frames: list[MessageComplete | Suggestions | Done] = []
     if say:
+        shown = f"{text}\n\n{held_line}" if held_line else text
         frames.append(
-            MessageComplete(event="message.complete", seq=conversation.next_seq(), text=text)
+            MessageComplete(event="message.complete", seq=conversation.next_seq(), text=shown)
         )
     if suggestions:
         frames.append(Suggestions(event="suggestions", seq=conversation.next_seq(), items=[]))
@@ -2368,6 +2382,7 @@ class _Translator:
                 component,
                 intent=intent,
                 unit_card=unit_card.as_json() if unit_card is not None else None,
+                lineage=card_lineage,
             )
 
         return await self._recorder.store.change_canvas(
@@ -3131,6 +3146,12 @@ class _Translator:
                     return str(reading["text"])
         return None
 
+    def _block_of(self, spec_id: str) -> dict[str, Any] | None:
+        """The spec block of `spec_id`: this turn's, else an earlier turn's."""
+        return self._conversation.turn_specs.get(spec_id) or self._conversation.earlier_block(
+            spec_id
+        )
+
     def _record_chips(self, chips: list[ApplyChoiceSuggestion]) -> None:
         """Record the turn's chip events in telemetry, each a `scope_choice.*` event.
 
@@ -3189,13 +3210,17 @@ class _Translator:
         """Frames that close a segment that ran to the end of its events. A
         segment that did not pause closes the turn on the agent's answer,
         followed by one sentence for each loose match the turn used
-        (`harness.turn_records.loose_match_notes`) and the line on how its
-        figures were counted (`harness.turn_records.basis_line`), sent as a
-        last `message.delta` so the deltas still add up to the
-        `message.complete` text and the stored turn keeps them. The turn
-        record keeps the notes and the line apart from the answer
-        (`ConversationState.close_turn`), so a later turn's model reads the
-        answer alone, with no text of the code's own to restate.
+        (`harness.turn_records.loose_match_notes`), the line on how its
+        figures were counted (`harness.turn_records.basis_line`) and the
+        sentences on the partial and projected years its cards drew or left
+        out (`harness.turn_records.held_back_line`), sent as a last
+        `message.delta` so the deltas still add up to the `message.complete`
+        text and the stored turn keeps them. The turn record keeps the notes
+        and the lines apart from the answer (`ConversationState.close_turn`),
+        so a later turn's model reads the answer alone, with no text of the
+        code's own to restate. An answered turn's chips are the one that asks
+        for the projected years a card left out
+        (`harness.turn_records.projection_chip`), then its scope chips.
 
         A turn whose agent closed with no text, or with whitespace, after the turn
         drew cards is answered by its cards. Its reply is the text the agent
@@ -3252,7 +3277,7 @@ class _Translator:
         if not self._final_text and shown_cards:
             shown = self._final_text = "\n\n".join(self._narration)
             answer = self._conversation.cards_answer()
-        notes, basis = None, None
+        notes, basis, held = None, None, None
         # A set-aside turn's reply is the code's own, with no figures to note.
         answered = (bool(self._final_text) or shown_cards) and not set_aside
         if answered or self._final_text:
@@ -3277,7 +3302,15 @@ class _Translator:
                 if answered
                 else None
             )
-            blocks = [block for block in (notes, basis) if block]
+            held = (
+                held_back_line(
+                    self._conversation.turn_cards_shown(),
+                    projection_asked=self._conversation.turn_projection_asked,
+                )
+                if answered
+                else None
+            )
+            blocks = [block for block in (notes, basis, held) if block]
             closing = (
                 "".join(f"\n\n{block}" for block in blocks)
                 if self._final_text
@@ -3313,16 +3346,30 @@ class _Translator:
             else []
         )
         self._record_chips(chips)
+        projection = (
+            projection_chip(
+                self._conversation.turn_cards_shown(),
+                block_of=self._block_of,
+                projection_asked=self._conversation.turn_projection_asked,
+            )
+            if answered
+            else None
+        )
         self._conversation.close_turn(
             final_text=answer,
             match_notes=notes,
             basis_line=basis,
+            held_line=held,
             new_question=new_question,
             asked_for_question=asked_for_question,
             shown_answer=shown,
         )
         frames.append(
-            Suggestions(event="suggestions", seq=self._conversation.next_seq(), items=chips)
+            Suggestions(
+                event="suggestions",
+                seq=self._conversation.next_seq(),
+                items=[*([projection] if projection is not None else []), *chips],
+            )
         )
         frames.append(
             Done(

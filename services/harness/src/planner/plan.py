@@ -67,6 +67,7 @@ from data_mcp.scope import ChoiceProvenance, ScopeAxis
 from harness.scope_choices import PLANNER_AXES_BLOCK_KEY, WholeAxis
 from pydantic import Field, ValidationError, field_validator, model_validator
 
+from planner.licence import Licence, include_for, pin_block_held_back
 from planner.operations import Translation
 from planner.parties import (
     PARTY_ROLES,
@@ -4961,6 +4962,11 @@ def _serialised_chars(value: Any) -> int:
     return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False))
 
 
+# The most calendar years a plan holds as the user's words name them
+# (`Plan.named_years`). Search lists a range's ends only, so a question names a
+# handful. Past this, the newest are kept (`planner.stated_scope.turn_licence`).
+MAX_NAMED_YEARS = 64
+
 # The most provider options one turn's words are read to name. Search names at most
 # one per provider scope, four today; the limit sits several times above that.
 MAX_SCOPE_MENTIONS = 16
@@ -5121,6 +5127,17 @@ class Plan(StrictModel):
     # stated them (`submission.service.scope_words`); the planner cannot set it.
     scope_words: Annotated[ScopeWords | None, HASHED_WHEN_SET] = Field(
         default=None, exclude_if=lambda words: words is None
+    )
+    # The calendar years the user's words name, ascending, and whether they ask about
+    # the future. They are the conversation's licence as the proposal's turn holds
+    # it (`planner.stated_scope.turn_licence`), and the planner cannot set either.
+    # Each is left out of every dump while unset, so a plan holding neither keeps
+    # its revision.
+    named_years: Annotated[tuple[int, ...], HASHED_WHEN_SET] = Field(
+        default=(), max_length=MAX_NAMED_YEARS, exclude_if=lambda years: not years
+    )
+    projection_asked: Annotated[bool, HASHED_WHEN_SET] = Field(
+        default=False, exclude_if=lambda asked: not asked
     )
     translation: Translation | None = None
     workflow: Workflow | None = None
@@ -5436,9 +5453,11 @@ class Plan(StrictModel):
         may no longer fit the new ones, so the new version starts where a first
         draft does. It clears `period_licences` too, which `propose_plan`
         writes on the amended plan from this one's
-        (`period_licences_held`). The patch applies to the plan the model
-        wrote (`authored`), so the amended plan carries no
-        `rolling_copies`, and its validation splits it again.
+        (`period_licences_held`). It keeps `named_years` and
+        `projection_asked`, which `propose_plan` replaces with the licence the
+        amending turn holds (`planner.stated_scope.turn_licence`). The patch
+        applies to the plan the model wrote (`authored`), so the amended plan
+        carries no `rolling_copies`, and its validation splits it again.
 
         Args:
             decisions: The decisions this patch adds or replaces, keyed by
@@ -6787,17 +6806,31 @@ class SessionState(Protocol):
     def __setitem__(self, key: str, value: Any, /) -> None: ...
 
 
-def period_window(period: Period, *, end_open: bool = False) -> dict[str, object]:
+def period_window(
+    period: Period, *, end_open: bool = False, include: Iterable[str] = ()
+) -> dict[str, object]:
     """`period` as an identity's `requested_window`.
 
     With `end_open` the range states `start_year` alone, the form apis
     ends at the current year at every mint
     (`datasets_api.adapter.window_to_identity` writes no `end_year` key
     either), so the definition reaches years published after the plan.
+
+    `include` names the held-back classes (`"partial"`, `"projected"`) the
+    window opts into, in the identity's normal form: sorted, de-duplicated,
+    and omitted when empty. An open window never carries it, since apis
+    leaves held-back rows out of open reads.
     """
     if end_open:
         return open_window(period.start)
-    return {"kind": "range", "start_year": period.start, "end_year": period.end}
+    window: dict[str, object] = {
+        "kind": "range",
+        "start_year": period.start,
+        "end_year": period.end,
+    }
+    if classes := sorted(set(include)):
+        window["include"] = classes
+    return window
 
 
 def open_window(start_year: int) -> dict[str, object]:
@@ -6805,19 +6838,58 @@ def open_window(start_year: int) -> dict[str, object]:
     return {"kind": "range", "start_year": start_year}
 
 
+def licensed_include(
+    requirement: DatasetRequirement, plan: Plan, block: Mapping[str, Any] | None
+) -> tuple[str, ...]:
+    """The held-back classes `requirement` is retrieved with, as a window's `include`:
+    those the plan's licence (`Plan.named_years`, `Plan.projection_asked`) grants its
+    `period` over the runs `block` states (`planner.licence.include_for`). `block`
+    is the one `include_block` resolves, `None` where none is on record. A
+    requirement stating `period_end_open` opts into none."""
+    if requirement.period_end_open:
+        return ()
+    period = requirement.period
+    licence = Licence(named=plan.named_years, projection=plan.projection_asked)
+    runs = None if block is None else pin_block_held_back(block)
+    return include_for(period.start, period.end, licence=licence, runs=runs)
+
+
+def include_block(
+    spec_id: str,
+    *,
+    blocks: Mapping[str, PinSource],
+    copies: Mapping[str, WindowedPin],
+) -> Mapping[str, Any] | None:
+    """The spec block a retrieval of the pin `spec_id` reads its `include` against
+    (`licensed_include`): for a windowed copy in `copies` (`windowed_pins`), the
+    block of the pin it was copied from; otherwise the pin's own, from `blocks`,
+    the blocks on record. Admission (`submission.service._window_pins`) and
+    discovery (`translator.discovery`) both resolve it here. `None` where neither
+    is on record."""
+    copy = copies.get(spec_id)
+    origin = copy.windowed_from if copy is not None else spec_id
+    source = blocks.get(origin)
+    return source.spec_block(origin) if source is not None else None
+
+
 def retrieves_period(
-    window: object, requirement: DatasetRequirement, *, first_year: int | None
+    window: object,
+    requirement: DatasetRequirement,
+    *,
+    first_year: int | None,
+    include: Iterable[str] = (),
 ) -> bool:
     """Whether `window`, an identity's `requested_window`, is one `requirement` is retrieved over.
 
-    A closed requirement is retrieved over its `period` exactly. One stating
+    A closed requirement is retrieved over its `period` exactly, opting into
+    the held-back classes `include` names (`licensed_include`). One stating
     `period_end_open` is retrieved over a range with no end year, from
     `first_year` where it reads its dataset's whole history, the year the
     plan's split reads it from (`HistorySplit.whole_history`), and from its
     period's start otherwise (`submission.service._window_pins`).
     """
     if not requirement.period_end_open:
-        return window == period_window(requirement.period)
+        return window == period_window(requirement.period, include=include)
     start = requirement.period.start if first_year is None else first_year
     return window == open_window(start)
 

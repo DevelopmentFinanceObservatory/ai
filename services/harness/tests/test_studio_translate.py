@@ -24,6 +24,7 @@ import asyncpg
 import httpx2
 import pytest
 from aiohttp.client_reqrep import ConnectionKey
+from common.held_note import NO_PROJECTIONS_NOTE
 from compiler.surface import (
     FixtureSurface,
     ProgressCallback,
@@ -42,6 +43,7 @@ from harness.decision_pick import DecisionPick, decision_pick
 from harness.graph.events import PlannerStarted, StepProgress
 from harness.graph.planning import planner_ask_pause
 from harness.graph.state import ORCHESTRATOR_PRIOR_LEDGER_KEY, save_card_unit_offers
+from harness.mcp_client import _held_periods
 from harness.orchestrator_tools import _search_context
 from harness.plan_display import decision_choice_id, decision_option_id
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
@@ -90,6 +92,7 @@ from harness.wire import (
     PlanProposed,
     PlanStep,
     StepStatus,
+    SuggestionItem,
     Suggestions,
     UnitChoice,
     UnitCurrency,
@@ -3823,15 +3826,27 @@ async def _answered(
     text: str = "The US gave $7.9bn.",
     narrations: Sequence[str] = (),
     cards: bool = False,
+    held: Sequence[Sequence[Mapping[str, Any]]] = (),
+    specs: Mapping[str, Any] | None = None,
+    projection_asked: bool = False,
 ) -> tuple[_Translator, list[Any]]:
     """A translator that closed a turn answering with `readings` and the frames it
     sent. Earlier responses each streamed one of `narrations` beside a call, and with
-    `cards` the turn drew a card. The closing response's `text` is streamed after
-    narrations, and is otherwise held as streamed already."""
+    `cards` the turn drew a card. Each entry of `held` is a further card the turn
+    drew, reading `spec_{n}` and listing those partial and projected runs on its
+    freshness. `specs` are the turn's spec blocks, and `projection_asked` whether
+    the turn's own words asked about projections. The closing response's `text` is
+    streamed after narrations, and is otherwise held as streamed already."""
     current_conversation_id.set("c1")
     translator = _translator()
     translator._conversation.turn_user_message = "total health aid from the US to Africa"
     translator._conversation.turn_readings = readings
+    translator._conversation.turn_specs = dict(specs or {})
+    translator._conversation.turn_projection_asked = projection_asked
+    for number, runs in enumerate(held):
+        land_component(
+            translator._conversation, _held_card(number, runs), lineage=_held_lineage(number, runs)
+        )
     frames: list[Any] = []
     for index, narration in enumerate(narrations):
         frames += translator._agent_text(narration)
@@ -3950,6 +3965,451 @@ async def test_an_answer_using_no_part_with_scope_choices_states_no_basis_line()
 
     assert not any(isinstance(frame, MessageDelta) for frame in frames)
     assert next(f for f in frames if isinstance(f, MessageComplete)).text == "The US gave $7.9bn."
+
+
+def _held_card(number: int, runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """A drawn card reading `spec_{number}` whose freshness lists `runs`."""
+    return {
+        "component_id": f"cmp_held_{number}",
+        "revision": 1,
+        "type": "line_chart",
+        "payload": {"component": {"title": {"text": f"Card {number}"}}},
+        "provenance": {
+            "inputs": [{"spec_id": f"spec_{number}", "content_version": "v1"}],
+            "freshness": {"held": list(runs)},
+        },
+    }
+
+
+def _held_lineage(number: int, runs: Sequence[Mapping[str, Any]]) -> CardLineage:
+    """The lineage of card `number`: one retrieval whose manifest states
+    `runs`, wire `HeldPeriod` dicts, as `coverage.held_back` runs of the
+    source each names, with no window, so the card reaches every one."""
+    held_back = [
+        {
+            "kind": run["status"],
+            "served": run["served"],
+            "source": run["source_name"],
+            "source_name": run["source_name"],
+            "start_year": int(run["start"]),
+            "end_year": int(run["end"]),
+            "reported_share": (
+                {"basis": run["basis"], "share": run["share"], "against": int(run["against"])}
+                if run.get("share") is not None
+                else None
+            ),
+        }
+        for run in runs
+    ]
+    return CardLineage(
+        component_id=f"cmp_held_{number}",
+        frame=(f"spec_{number}", "v1"),
+        lineage=(ProvenanceInput(f"spec_{number}", "v1", {"coverage": {"held_back": held_back}}),),
+    )
+
+
+# CRS 2025 partly reported, drawn by the card.
+_PARTIAL_DRAWN = {
+    "status": "partial",
+    "start": "2025",
+    "end": "2025",
+    "served": True,
+    "source_name": "OECD CRS",
+    "share": 0.001,
+    "basis": "value",
+    "against": "2024",
+}
+# CRS 2025 partly reported, left out of the card.
+_PARTIAL_LEFT = {**_PARTIAL_DRAWN, "served": False}
+# IDS projections for 2026 to 2030, left out of the card.
+_PROJECTED_LEFT = {
+    "status": "projected",
+    "start": "2026",
+    "end": "2030",
+    "served": False,
+    "source_name": "World Bank IDS",
+}
+_PROJECTED_DRAWN = {**_PROJECTED_LEFT, "served": True}
+_PARTIAL_DRAWN_LINE = (
+    "2025 is partly reported: 0.1% of 2024's value so far. The newest complete year is 2024."
+)
+_PARTIAL_LEFT_LINE = (
+    "2025 is partly reported (0.1% of 2024's value so far) and is left out of these"
+    " figures, which end in 2024."
+)
+_PROJECTED_LEFT_LINE = (
+    "World Bank IDS also publishes projections for 2026 to 2030, which these figures leave out."
+)
+_PROJECTED_DRAWN_LINE = (
+    "Figures for 2026 to 2030 are World Bank IDS projections. The latest reported year is 2025."
+)
+
+
+def _projection_chips(frames: list[Any]) -> list[SuggestionItem]:
+    chips = next(frame for frame in frames if isinstance(frame, Suggestions))
+    return [chip for chip in chips.items if isinstance(chip, SuggestionItem)]
+
+
+async def test_a_two_card_turn_says_each_cards_runs_once_and_offers_one_chip() -> None:
+    """One card draws CRS's partly reported 2025, two leave IDS's projections
+    out. The reply closes with each sentence once, the drawn run first, and
+    offers one projection chip ahead of any scope chip. The stored turn keeps
+    the line apart from the answer, and the digest a later turn's model reads
+    holds no run."""
+    translator, frames = await _answered(
+        [_fetched(_example_part())],
+        held=[[_PARTIAL_DRAWN], [_PROJECTED_LEFT], [_PROJECTED_LEFT]],
+    )
+
+    line = f"{_PARTIAL_DRAWN_LINE} {_PROJECTED_LEFT_LINE}"
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    chips = next(frame for frame in frames if isinstance(frame, Suggestions)).items
+    assert complete.text.endswith(f"\n\n{line}")
+    assert complete.text.count(_PROJECTED_LEFT_LINE) == 1
+    assert _projection_chips(frames) == chips[:1]
+    stored = translator._conversation.turns[-1]
+    assert (stored["assistant"], stored["held_line"]) == ("The US gave $7.9bn.", line)
+    assert _closed_turn(1, translator._conversation).reply == complete.text
+    assert "World Bank IDS" not in json.dumps(translator._conversation.conversation_digest_state())
+
+
+async def test_a_replanned_turn_says_the_runs_of_the_cards_drawn_before_and_after() -> None:
+    """A plan run drew a card leaving CRS's 2025 out, the plan was revised, and
+    the revised run drew a card of IDS projections. The reply says both cards'
+    runs, and a run one card left out is not said where another card drew it."""
+    _, frames = await _answered([], held=[[_PARTIAL_LEFT], [_PROJECTED_DRAWN], [_PROJECTED_LEFT]])
+
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    assert complete.text == (f"The US gave $7.9bn.\n\n{_PROJECTED_DRAWN_LINE} {_PARTIAL_LEFT_LINE}")
+    assert _projection_chips(frames) == []
+
+
+async def test_a_turn_its_cards_answer_says_each_run_whatever_its_narration_says() -> None:
+    """The agent narrated a fetch of the IDS projections, the card left them
+    out, and the agent closed with no text. The closing line says the
+    projections were left out, whatever the narration names."""
+    narration = "I'll fetch Kenya's debt service with the IDS projections for 2026 to 2030."
+    translator, frames = await _answered(
+        [], text="", narrations=[narration], held=[[_PROJECTED_LEFT]]
+    )
+
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    assert complete.text == f"{narration}\n\n{_PROJECTED_LEFT_LINE}"
+    assert translator._conversation.turns[-1]["held_line"] == _PROJECTED_LEFT_LINE
+
+
+@pytest.mark.parametrize(
+    ("specs", "prompt"),
+    [
+        pytest.param(
+            {"spec_0": {"resolved": {"concept_label": "external debt service"}}},
+            "Show projected external debt service for 2026 to 2030",
+            id="labelled",
+        ),
+        pytest.param({}, "Show projections for 2026 to 2030", id="unlabelled"),
+    ],
+)
+async def test_a_card_leaving_projections_out_offers_the_chip_named_by_its_part(
+    specs: dict[str, Any], prompt: str
+) -> None:
+    """The chip names the card's part by Search's label for the spec it reads,
+    and by its label alone where no block names it."""
+    _, frames = await _answered([], held=[[_PROJECTED_LEFT]], specs=specs)
+
+    assert _projection_chips(frames) == [
+        SuggestionItem(label="Show projections for 2026 to 2030", prompt=prompt)
+    ]
+
+
+async def test_a_turn_that_drew_no_card_says_nothing_of_held_years() -> None:
+    """A prose answer whose search left projected and partial years out, on a
+    turn whose words asked about projections, draws no card: the reply states
+    no held sentence, no "no projections" note and offers no chip."""
+    reading = {
+        "text": "debt service",
+        "status": "definite",
+        "spec_id": "spec_0",
+        "held_back": [
+            {"kind": "projected", "source": "dfo/ids", "start_year": 2026, "end_year": 2030}
+        ],
+    }
+
+    translator, frames = await _answered([reading], projection_asked=True)
+
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    assert complete.text == "The US gave $7.9bn."
+    assert _projection_chips(frames) == []
+    assert "held_line" not in translator._conversation.turns[-1]
+
+
+@pytest.mark.parametrize(
+    ("held", "asked", "noted"),
+    [
+        pytest.param([[_PARTIAL_DRAWN]], True, True, id="asked-none-held"),
+        pytest.param([[]], True, True, id="asked-card-states-nothing"),
+        pytest.param([[_PARTIAL_DRAWN]], False, False, id="not-asked-this-turn"),
+        pytest.param([[_PARTIAL_DRAWN], [_PROJECTED_LEFT]], True, False, id="one-card-holds-some"),
+    ],
+)
+async def test_the_data_holds_no_projections_only_when_this_turn_asked_and_no_card_holds_any(
+    held: list[list[dict[str, Any]]], asked: bool, noted: bool
+) -> None:
+    """The note follows the turn's own words, not the licence a conversation
+    carries, and only when no card the turn drew lists a projected run."""
+    _, frames = await _answered([], held=held, projection_asked=asked)
+
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    assert complete.text.endswith(NO_PROJECTIONS_NOTE) is noted
+
+
+# An IDS frame serving projections for 2026 to 2030.
+_IDS_SERVED = {
+    "citation": {"sources": [{"ref": "dfo/ids", "label": "World Bank IDS"}]},
+    "incomplete_after": [{"source": "dfo/ids", "status": "projected", "partial_period": "2026"}],
+    "coverage": {
+        "held_back": [
+            {
+                "kind": "projected",
+                "served": True,
+                "source": "dfo/ids",
+                "source_name": "World Bank IDS",
+                "start_year": 2026,
+                "end_year": 2030,
+            }
+        ]
+    },
+}
+# An IDS frame leaving its projections for 2026 to 2030 out.
+_IDS_LEFT = {
+    "coverage": {
+        "held_back": [
+            {
+                "kind": "projected",
+                "source": "dfo/ids",
+                "source_name": "World Bank IDS",
+                "start_year": 2026,
+                "end_year": 2030,
+            }
+        ]
+    }
+}
+
+
+def _land_drawn(
+    conversation: ConversationState,
+    number: int,
+    *,
+    manifest: dict[str, Any],
+    window: tuple[str, str],
+) -> None:
+    """Land card `number`, drawing `window` from a frame whose one retrieval's
+    manifest is `manifest`. Its freshness lists the runs cut to the window,
+    as `harness.mcp_client` writes them."""
+    lineage = CardLineage(
+        component_id=f"cmp_held_{number}",
+        frame=(f"spec_{number}", "v1"),
+        lineage=(ProvenanceInput(f"spec_{number}", "v1", manifest),),
+    )
+    drawn = {"start": window[0], "end": window[1]}
+    component = {
+        **_held_card(number, _held_periods(lineage.lineage, drawn=drawn)),
+        "fact_summary": {"window": drawn},
+    }
+    land_component(conversation, component, lineage=lineage)
+
+
+async def _closed_on(
+    cards: Sequence[tuple[dict[str, Any], tuple[str, str]]], *, projection_asked: bool = False
+) -> tuple[str, list[SuggestionItem], ConversationState]:
+    """The reply, projection chips and conversation of a turn drawing
+    `cards`, each a manifest and the window drawn from it."""
+    current_conversation_id.set("c1")
+    translator = _translator()
+    translator._conversation.turn_projection_asked = projection_asked
+    for number, (manifest, window) in enumerate(cards):
+        _land_drawn(translator._conversation, number, manifest=manifest, window=window)
+    translator._final_text = "Debt service rises."
+    frames = await translator.finish()
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    return complete.text, _projection_chips(frames), translator._conversation
+
+
+@pytest.mark.parametrize(
+    ("window", "years"),
+    [
+        pytest.param(("2028", "2030"), ("2026", "2030"), id="drawn-from-inside-the-run"),
+        pytest.param(("2020", "2027"), ("2026", "2027"), id="drawn-to-inside-the-run"),
+    ],
+)
+async def test_a_card_drawing_part_of_a_projected_run_names_the_runs_own_reported_year(
+    window: tuple[str, str], years: tuple[str, str]
+) -> None:
+    """A card drawing 2028 to 2030 of IDS's 2026-2030 projections keeps the
+    run's first year in the turn record, and the reply names 2025 as the
+    latest reported year (2027 is a projection). A card drawing 2020 to
+    2027 names the run to 2027, the years it holds. Another card leaving the
+    same run out is not said beside it, and offers no chip."""
+    text, chips, conversation = await _closed_on(
+        [(_IDS_SERVED, window), (_IDS_LEFT, ("2015", "2025"))]
+    )
+
+    drawn = conversation.turns[-1]["cards"][0]
+    assert [(run["start"], run["end"]) for run in drawn["runs"]] == [years]
+    assert text == (
+        f"Debt service rises.\n\nFigures for {years[0]} to {years[1]} are World Bank IDS"
+        " projections. The latest reported year is 2025."
+    )
+    assert chips == []
+
+
+# An IDS frame leaving its projections for 2026 to 2028 out, of an indicator
+# projected over fewer years.
+_IDS_LEFT_TO_2028 = {
+    "coverage": {"held_back": [{**_IDS_LEFT["coverage"]["held_back"][0], "end_year": 2028}]}
+}
+
+
+@pytest.mark.parametrize(
+    "cards",
+    [
+        pytest.param(
+            [(_IDS_SERVED, ("2015", "2024")), (_IDS_LEFT, ("2015", "2025"))],
+            id="a-served-run-no-card-reaches",
+        ),
+        pytest.param(
+            [(_IDS_LEFT_TO_2028, ("2015", "2025")), (_IDS_LEFT, ("2015", "2025"))],
+            id="two-runs-of-one-source",
+        ),
+    ],
+)
+async def test_the_projection_chip_offers_the_years_the_closing_line_names(
+    cards: list[tuple[dict[str, Any], tuple[str, str]]],
+) -> None:
+    """A served run a card does not reach puts no projections on the canvas,
+    so the run another card left out is said and offered. Two cards leaving
+    out runs of one source are said and offered as one run."""
+    text, chips, _ = await _closed_on(cards)
+
+    assert text == f"Debt service rises.\n\n{_PROJECTED_LEFT_LINE}"
+    assert [chip.label for chip in chips] == ["Show projections for 2026 to 2030"]
+
+
+async def test_a_run_one_card_drew_and_another_left_out_is_said_once_whatever_the_citation_names() -> (
+    None
+):
+    """Card A draws IDS's projections from a frame whose citation names no
+    source for the composite component that marks them. Card B leaves the
+    same run out. The reply states the run once, by the catalogue name the
+    run carries, and offers no chip for years already on the canvas."""
+    name = "World Bank International Debt Statistics"
+    run = {**_IDS_SERVED["coverage"]["held_back"][0], "source_name": name}
+    drew = {
+        "citation": {"sources": [{"ref": "dfo/ids", "label": "World Bank IDS"}]},
+        "incomplete_after": [
+            {"source": "dfo/ids/component", "status": "projected", "partial_period": "2026"}
+        ],
+        "coverage": {"held_back": [run]},
+    }
+    left_out = {"coverage": {"held_back": [{**run, "served": False}]}}
+
+    text, chips, _ = await _closed_on([(drew, ("2015", "2030")), (left_out, ("2015", "2025"))])
+
+    assert text == (
+        f"Debt service rises.\n\nFigures for 2026 to 2030 are {name} projections."
+        " The latest reported year is 2025."
+    )
+    assert chips == []
+
+
+@pytest.mark.parametrize(
+    ("manifest", "window"),
+    [
+        pytest.param(_IDS_LEFT, ("2000", "2020"), id="left-out-past-the-window"),
+        pytest.param(_IDS_SERVED, ("2024", "2024"), id="served-outside-the-window"),
+    ],
+)
+async def test_a_card_whose_frame_states_projections_never_says_the_data_holds_none(
+    manifest: dict[str, Any], window: tuple[str, str]
+) -> None:
+    """A turn asking about the future draws a card whose window reaches none
+    of the projected years its frame states. The card reaches no run, and the
+    reply does not say the data holds no projections."""
+    text, _, conversation = await _closed_on([(manifest, window)], projection_asked=True)
+
+    assert not any(run["reached"] for run in conversation.turns[-1]["cards"][0]["runs"])
+    assert NO_PROJECTIONS_NOTE not in text
+
+
+async def test_a_turn_asking_about_the_future_names_projections_its_card_stops_short_of() -> None:
+    """Over a card ending in 2020 whose frame left IDS's projections out, a
+    turn asking about the future is told they exist and offered them; a turn
+    that did not ask hears nothing of them."""
+    asked, asked_chips, _ = await _closed_on([(_IDS_LEFT, ("2000", "2020"))], projection_asked=True)
+    unasked, unasked_chips, _ = await _closed_on([(_IDS_LEFT, ("2000", "2020"))])
+
+    assert asked == f"Debt service rises.\n\n{_PROJECTED_LEFT_LINE}"
+    assert [chip.label for chip in asked_chips] == ["Show projections for 2026 to 2030"]
+    assert (unasked, unasked_chips) == ("Debt service rises.", [])
+
+
+async def test_a_table_whose_reads_stop_short_of_a_run_left_out_says_nothing_of_it() -> None:
+    """A table states no drawn window, so the card reaches runs against its
+    manifest's window. An IDS read of 2000 to 2010 leaving 2026 to 2030 out
+    gets no sentence and no chip, while a turn asking about the future is
+    still told the projections exist."""
+    manifest = {
+        **_IDS_LEFT,
+        "coverage": {**_IDS_LEFT["coverage"], "window": {"start_year": 2000, "end_year": 2010}},
+    }
+
+    async def closed(*, asked: bool) -> tuple[str, list[SuggestionItem]]:
+        current_conversation_id.set("c1")
+        translator = _translator()
+        translator._conversation.turn_projection_asked = asked
+        lineage = CardLineage(
+            component_id="cmp_held_0",
+            frame=("spec_0", "v1"),
+            lineage=(ProvenanceInput("spec_0", "v1", manifest),),
+        )
+        component = _held_card(0, _held_periods(lineage.lineage, drawn={}))
+        land_component(translator._conversation, component, lineage=lineage)
+        translator._final_text = "Debt service rises."
+        frames = await translator.finish()
+        complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+        return complete.text, _projection_chips(frames)
+
+    assert await closed(asked=False) == ("Debt service rises.", [])
+    text, chips = await closed(asked=True)
+    assert text == f"Debt service rises.\n\n{_PROJECTED_LEFT_LINE}"
+    assert [chip.label for chip in chips] == ["Show projections for 2026 to 2030"]
+
+
+@pytest.mark.parametrize(
+    ("held", "asked", "reply"),
+    [
+        pytest.param(
+            [{**_PROJECTED_DRAWN, "start": "2028"}], False, "Debt service rises.", id="cut-run"
+        ),
+        pytest.param([], True, "Debt service rises.", id="dropped-projected-run"),
+    ],
+)
+async def test_a_card_read_from_no_manifest_states_no_run_and_no_absence(
+    held: list[dict[str, Any]], asked: bool, reply: str
+) -> None:
+    """A card whose lineage is not found lists only runs cut to, or dropped
+    by, the window it draws: the reply words no cut run as a whole one, and a
+    turn asking about the future does not hear the data holds no
+    projections."""
+    current_conversation_id.set("c1")
+    translator = _translator()
+    translator._conversation.turn_projection_asked = asked
+    land_component(translator._conversation, _held_card(0, held), lineage=None)
+    translator._final_text = "Debt service rises."
+    frames = await translator.finish()
+
+    complete = next(frame for frame in frames if isinstance(frame, MessageComplete))
+    assert complete.text == reply
+    assert _projection_chips(frames) == []
 
 
 async def test_a_later_search_carries_the_stored_scope_choices_and_not_the_basis_line() -> None:

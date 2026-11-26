@@ -673,10 +673,27 @@ async def test_read_stated_scopes_reads_each_text_in_order_with_no_principal() -
     )
 
 
+async def test_read_stated_scopes_reads_named_years_and_projection() -> None:
+    projected = {**TOTAL_ODA, "named_years": [2025, 2030], "projection": True}
+    calls = Calls(ok({"readings": [projected, TOTAL_ODA]}))
+
+    async with make_client(calls) as client:
+        with_fields, without = await client.read_stated_scopes(texts=["a", "b"])
+
+    assert (with_fields.named_years, with_fields.projection) == ((2025, 2030), True)
+    assert (without.named_years, without.projection) == ((), False)
+
+
 @pytest.mark.parametrize(
     "answer",
     [
         pytest.param({"readings": [NET_BILATERAL]}, id="one-reading-short"),
+        pytest.param(
+            {"readings": [NET_BILATERAL, {**TOTAL_ODA, "named_years": ["2025"]}]}, id="named-years"
+        ),
+        pytest.param(
+            {"readings": [NET_BILATERAL, {**TOTAL_ODA, "projection": "yes"}]}, id="projection"
+        ),
         pytest.param({"readings": [NET_BILATERAL, {**TOTAL_ODA, "total": "yes"}]}, id="total"),
         pytest.param({"readings": [NET_BILATERAL, {**TOTAL_ODA, "mentions": [1]}]}, id="mention"),
         pytest.param(

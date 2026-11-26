@@ -93,7 +93,13 @@ from harness.mcp_client import McpExecutor
 from harness.mcp_deadlines import McpTimeoutPolicy
 from harness.plan_display import decision_option_id
 from harness.planner_adapter import PlannerAdapter, _reading_pin_sources
-from harness.provenance import CARD_FRAME_KEY, ProvenanceStore
+from harness.provenance import (
+    CARD_FRAME_KEY,
+    CARD_LINEAGE_KEY,
+    CardLineage,
+    ProvenanceInput,
+    ProvenanceStore,
+)
 from harness.scripted import SCRIPTED_SPEC, ScriptedPlannerModel, ScriptedSurface
 from harness.sentences import FAILURE_CLASS, StopCode, refusal_sentence
 from harness.settings import Settings
@@ -165,6 +171,7 @@ from planner.plan import (
     plan_revision,
 )
 from planner.plan import Plan as PlannerPlan
+from planner.stated_scope import TextReading
 from planner.tool_results import ProblemCode
 from planner.workflow import SelectedSource, ToolId, Workflow, WorkflowStep
 from presentation_mcp.platform_contract import RESOLVED_PAYLOAD_META_KEY
@@ -499,6 +506,7 @@ def _app(
     early_mints: EarlyMints | None = None,
     heartbeat_seconds: float | None = None,
     provenance: ProvenanceStore | None = None,
+    stated_scope: Any = None,
 ) -> FastAPI:
     """`orchestrator_app` on this test's database, its agent's model
     answering from `script` and kept as `app.state.model`. The executor
@@ -523,6 +531,7 @@ def _app(
         early_mints=early_mints,
         heartbeat_seconds=heartbeat_seconds,
         provenance=provenance,
+        stated_scope=stated_scope,
     )
     app.state.model = model
     return app
@@ -11011,8 +11020,183 @@ async def test_a_recreated_edit_card_reaches_the_turn_record() -> None:
             "type": "bar_chart",
             "title": "Aid to Kenya",
             "action": "recreated",
+            # No lineage was recorded, so whether its data holds projections is not known.
+            "projected": None,
+            "specs": [SPEC_A],
         }
     ]
+
+
+# CRS 2025 partly reported, drawn by a card, as its freshness lists it.
+_PARTIAL_HELD = {
+    "status": "partial",
+    "start": "2025",
+    "end": "2025",
+    "served": True,
+    "source_name": "OECD CRS",
+    "share": 0.001,
+    "basis": "value",
+    "against": "2024",
+}
+_PARTIAL_HELD_LINE = (
+    "2025 is partly reported: 0.1% of 2024's value so far. The newest complete year is 2024."
+)
+
+
+# The lineage of a card drawn from a CRS frame of 2018 to 2025 that served
+# its partly reported 2025, as `harness.mcp_client` returns it beside the card.
+_PARTIAL_LINEAGE = CardLineage(
+    component_id="cmp_01test0001",
+    frame=(SPEC_A, "v1"),
+    lineage=(
+        ProvenanceInput(
+            SPEC_A,
+            "v1",
+            {
+                "coverage": {
+                    "window": {"start_year": 2018, "end_year": 2025},
+                    "held_back": [
+                        {
+                            "kind": "partial",
+                            "served": True,
+                            "source": "dfo/crs",
+                            "source_name": "OECD CRS",
+                            "start_year": 2025,
+                            "end_year": 2025,
+                            "reported_share": {"basis": "value", "share": 0.001, "against": 2024},
+                        }
+                    ],
+                }
+            },
+        ),
+    ),
+)
+
+
+def _drawing_partial(component: dict[str, Any], **changes: Any) -> dict[str, Any]:
+    """`component`, changed by `changes`, with a freshness listing CRS's
+    partly reported 2025 as drawn."""
+    provenance = component["provenance"]
+    freshness = {**provenance["freshness"], "partial_period": True, "held": [_PARTIAL_HELD]}
+    return {**component, **changes, "provenance": {**provenance, "freshness": freshness}}
+
+
+@pytest.mark.parametrize("patched", [False, True], ids=["rebuilt", "revised"])
+async def test_an_edited_card_drawing_a_partial_year_says_so_and_records_its_runs(
+    patched: bool,
+) -> None:
+    """A card edit that rebuilds or revises a card drawing CRS's partly
+    reported 2025 closes on the sentence a turn drawing it closes on, kept
+    apart from the answer as the turn's `held_line`, and the turn record
+    keeps the card's runs."""
+    if patched:
+        component = _drawing_partial(
+            COMPONENT,
+            revision=2,
+            fact_summary={**COMPONENT["fact_summary"], "revision": 2},
+        )
+        reply = {"text": "Renamed the card.", "patch": {"title": "Aid"}, "recreate": None}
+        results = [
+            *_card_results(write_token=WRITE_TOKEN),
+            _described(),
+            _VIEW,
+            {
+                "outcome": "ok",
+                "frame_refs": [],
+                "component": component,
+                CARD_LINEAGE_KEY: _PARTIAL_LINEAGE,
+            },
+        ]
+    else:
+        component = _drawing_partial(COMPONENT, component_id="cmp_01test0002", type="bar_chart")
+        reply = {
+            "text": "Done -- the card was rebuilt with your change.",
+            "patch": None,
+            "recreate": {"type": "bar_chart", "title": "Aid to Kenya", "select": {"s": "v"}},
+        }
+        results = [
+            *_card_results(),
+            {
+                "outcome": "ok",
+                "frame_refs": [],
+                "component_body": {"stored_intent": {"frame_ref": REF_A}},
+            },
+            {"outcome": "ok", "frame_refs": []},
+            {
+                "outcome": "ok",
+                "frame_refs": [],
+                "component": component,
+                CARD_LINEAGE_KEY: _PARTIAL_LINEAGE,
+            },
+        ]
+    store = StudioStore(_engine())
+    app = _app(
+        *_card(),
+        resolver=_search(),
+        executor=ScriptedExecutor(results),
+        store=store,
+        edit_model=ScriptedEditModel(reply),
+    )
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        frames = await _stream(client, "/api/studio/turn", _edit_body("change it"))
+
+    assert _frame(frames, "message.complete")["text"] == f"{reply['text']}\n\n{_PARTIAL_HELD_LINE}"
+    turn = store.current(PRINCIPAL, CONVERSATION).turns[-1]
+    assert (turn["assistant"], turn["held_line"]) == (reply["text"], _PARTIAL_HELD_LINE)
+    (card,) = turn["cards"]
+    assert set(card) - {"component_id", "type", "title", "action", "window"} == {"runs", "specs"}
+    assert card["runs"] == [{**_PARTIAL_HELD, "source": "dfo/crs", "reached": True}]
+    assert card["specs"] == [SPEC_A]
+
+
+@pytest.mark.parametrize(
+    ("patch", "said"),
+    [
+        pytest.param({"title": "Aid"}, False, id="title"),
+        pytest.param({"window": {"start": "2020", "end": "2025"}}, True, id="window"),
+    ],
+)
+async def test_an_edit_says_the_held_line_only_when_it_changes_what_the_card_reads(
+    patch: dict[str, Any], said: bool
+) -> None:
+    """A card drew CRS's partly reported 2025 and its turn said so. Renaming
+    it reads no data and keeps its runs, so the edit closes on its reply
+    alone, and changing its window says the line again."""
+    drawn = _drawing_partial(COMPONENT)
+    component = _drawing_partial(
+        COMPONENT, revision=2, fact_summary={**COMPONENT["fact_summary"], "revision": 2}
+    )
+    reply = {"text": "Done.", "patch": patch, "recreate": None}
+    results = [
+        *_card_results(drawn, write_token=WRITE_TOKEN, **{CARD_LINEAGE_KEY: _PARTIAL_LINEAGE}),
+        _described(),
+        _VIEW,
+        {
+            "outcome": "ok",
+            "frame_refs": [],
+            "component": component,
+            CARD_LINEAGE_KEY: _PARTIAL_LINEAGE,
+        },
+    ]
+    store = StudioStore(_engine())
+    app = _app(
+        *_card(),
+        resolver=_search(),
+        executor=ScriptedExecutor(results),
+        store=store,
+        edit_model=ScriptedEditModel(reply),
+    )
+    async with _client(app) as client:
+        await _conversation_with_component(client)
+        frames = await _stream(client, "/api/studio/turn", _edit_body("change it"))
+
+    held = f"\n\n{_PARTIAL_HELD_LINE}" if said else ""
+    assert _frame(frames, "message.complete")["text"] == f"Done.{held}"
+    turn = store.current(PRINCIPAL, CONVERSATION).turns[-1]
+    assert turn.get("held_line") == (_PARTIAL_HELD_LINE if said else None)
+    (card,) = turn["cards"]
+    assert card["runs"] == [{**_PARTIAL_HELD, "source": "dfo/crs", "reached": True}]
 
 
 async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() -> None:
@@ -11078,6 +11262,9 @@ async def test_a_recreated_edit_cards_resolved_window_reaches_the_turn_record() 
             "title": "Aid to Kenya",
             "action": "recreated",
             "window": "2018-2024",
+            # No lineage was recorded, so whether its data holds projections is not known.
+            "projected": None,
+            "specs": [SPEC_A],
         }
     ]
 
@@ -13643,3 +13830,178 @@ def test_a_spec_use_heard_after_the_turn_is_recorded_is_dropped() -> None:
 
     assert conversation.turn_usage.fetched_specs == []
     assert conversation.turn_usage.drawn_specs == []
+
+
+# --- the user's licence to read projected years across turns -------------------
+
+_PROJECTED_RUN = {"kind": "projected", "source": "dc/wb_ids", "start_year": 2026, "end_year": 2030}
+
+
+def _projected_envelope() -> dict[str, Any]:
+    """A search answer reading SPEC_A, whose coverage states IDS's projections."""
+    envelope = definite_envelope(spec_id=SPEC_A)
+    envelope["parts"][0]["spec"]["resolved"]["coverage"]["held_back"] = [_PROJECTED_RUN]
+    return envelope
+
+
+def _window(start: int, end: int, *include: str) -> dict[str, Any]:
+    window: dict[str, Any] = {"kind": "range", "start_year": start, "end_year": end}
+    return {**window, "include": list(include)} if include else window
+
+
+@pytest.mark.parametrize(
+    "turns",
+    [
+        pytest.param(
+            [
+                (
+                    "Kenya debt service 2020 to 2030 including projections",
+                    TextReading(named_years=(2020, 2030), projection=True),
+                    _window(2020, 2030, "projected"),
+                    _window(2020, 2030, "projected"),
+                ),
+                (
+                    "and for Uganda?",
+                    TextReading(),
+                    _window(2020, 2030, "projected"),
+                    _window(2020, 2030, "projected"),
+                ),
+            ],
+            id="a-follow-up-carries-the-licence",
+        ),
+        pytest.param(
+            [
+                (
+                    "Kenya debt service projections to 2030",
+                    TextReading(named_years=(2030,), projection=True),
+                    _window(2015, 2030, "projected"),
+                    _window(2015, 2030, "projected"),
+                ),
+                (
+                    "just show 2015 to 2020",
+                    TextReading(named_years=(2015, 2020)),
+                    _window(2015, 2020),
+                    _window(2015, 2020),
+                ),
+                (
+                    "and for Uganda?",
+                    TextReading(),
+                    _window(2015, 2030, "projected"),
+                    _window(2015, 2030),
+                ),
+            ],
+            id="a-turn-answered-without-include-withdraws-it",
+        ),
+    ],
+)
+async def test_the_licence_the_users_words_set_holds_for_later_turns(
+    turns: list[tuple[str, TextReading, dict[str, Any], dict[str, Any]]],
+) -> None:
+    """Each typed turn reads its words once as it opens and updates the
+    conversation's licence, which the turn's close keeps for the next. A
+    follow-up naming no year carries it, so "and for Uganda?" is served the
+    projections turn 1 asked for. A turn whose words name years without
+    asking about the future replaces it even when its own fetch asks for no
+    projected year, so a later follow-up is served none."""
+    readings = {words: reading for words, reading, _, _ in turns}
+    reads: list[list[str]] = []
+
+    async def reader(texts: Sequence[str]) -> list[TextReading]:
+        reads.append(list(texts))
+        return [readings[text] for text in texts]
+
+    script = [
+        part
+        for _, _, window, _ in turns
+        for part in (
+            search_call("debt service"),
+            fetch_call(SPEC_A, scope={"window": window}),
+            _text("Here it is."),
+        )
+    ]
+    executor = ScriptedExecutor()
+    app = _app(
+        *script,
+        resolver=CannedSearch(*[_projected_envelope() for _ in turns]),
+        executor=executor,
+        stated_scope=reader,
+    )
+    async with _client(app) as client:
+        for words, *_ in turns:
+            frames = await _stream(client, "/api/studio/turn", _turn_body(words))
+            assert _events(frames)[-1] == "done"
+
+    sent = [
+        call["args"]["scope"]["window"] for call in executor.calls if call["tool"] == "get_data"
+    ]
+    assert sent == [served for *_, served in turns]
+    assert reads == [[words] for words, *_ in turns]
+
+
+async def test_a_turn_that_never_reads_its_licence_still_keeps_it_at_its_close() -> None:
+    """The read the seed starts goes on while the turn runs, and a turn
+    answered with no fetch, which never reads its licence, takes that read as
+    it ends, so its close keeps the licence and the next turn's fetch is
+    served the projections the first turn's words asked for."""
+    readings = {
+        "Kenya debt service projections to 2030": TextReading(named_years=(2030,), projection=True),
+        "and for Uganda?": TextReading(),
+    }
+    reads: list[list[str]] = []
+
+    async def reader(texts: Sequence[str]) -> list[TextReading]:
+        reads.append(list(texts))
+        return [readings[text] for text in texts]
+
+    executor = ScriptedExecutor()
+    app = _app(
+        _text("Which years should I show?"),
+        search_call("debt service"),
+        fetch_call(SPEC_A, scope={"window": _window(2015, 2030, "projected")}),
+        _text("Here it is."),
+        resolver=CannedSearch(_projected_envelope()),
+        executor=executor,
+        stated_scope=reader,
+    )
+    async with _client(app) as client:
+        for words in readings:
+            frames = await _stream(client, "/api/studio/turn", _turn_body(words))
+            assert _events(frames)[-1] == "done"
+
+    sent = [
+        call["args"]["scope"]["window"] for call in executor.calls if call["tool"] == "get_data"
+    ]
+    assert sent == [_window(2015, 2030, "projected")]
+    assert reads == [[words] for words in readings]
+
+
+async def test_a_stated_scope_read_that_raises_licenses_nothing_and_the_turn_answers() -> None:
+    """A reader fault outside `LiveApisError`, such as a reading that fails
+    validation, is logged as the turn opens and records nothing, so the fetch
+    reads the words again. That read's fault is logged too, the fetch is
+    served no projected year, and the turn still answers."""
+    reads: list[list[str]] = []
+
+    async def reader(texts: Sequence[str]) -> list[TextReading]:
+        reads.append(list(texts))
+        raise ValueError("a provider option outside the contract")
+
+    executor = ScriptedExecutor()
+    app = _app(
+        search_call("debt service"),
+        fetch_call(SPEC_A, scope={"window": _window(2020, 2030, "projected")}),
+        _text("Here it is."),
+        resolver=CannedSearch(_projected_envelope()),
+        executor=executor,
+        stated_scope=reader,
+    )
+    words = "Kenya debt service 2020 to 2030 including projections"
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body(words))
+
+    assert _events(frames)[-1] == "done"
+    sent = [
+        call["args"]["scope"]["window"] for call in executor.calls if call["tool"] == "get_data"
+    ]
+    assert sent == [_window(2020, 2030)]
+    assert reads == [[words], [words]]

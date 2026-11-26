@@ -536,19 +536,22 @@ def start_turn_segment(
     session_id: str | None = None,
     user_id: str | None = None,
     tags: Sequence[str] = (),
+    trace_metadata: Mapping[str, str] | None = None,
 ) -> Any | None:
     """Open the `TURN_SEGMENT_NAME` span `turn_segment` opens, for a caller
     whose segment starts and ends in different places, and return an opaque
     handle for `use_turn_segment` and `end_turn_segment`. `None` when
     telemetry never came up or the span fails to open, and the caller then
     runs untraced. The span is not current anywhere until `use_turn_segment`
-    makes it current for a block."""
+    makes it current for a block. `trace_metadata` is set on the Langfuse
+    trace, as `record_turn_outcome` sets it."""
     return _start_turn_span(
         external_id,
         name=TURN_SEGMENT_NAME,
         session_id=session_id,
         user_id=user_id,
         tags=tags,
+        trace_metadata=trace_metadata,
     )
 
 
@@ -592,6 +595,7 @@ def record_turn_outcome(
     session_id: str | None = None,
     user_id: str | None = None,
     tags: Sequence[str] = (),
+    trace_metadata: Mapping[str, str] | None = None,
     request: Any = None,
     response: Any = None,
     error: str | None = None,
@@ -611,7 +615,9 @@ def record_turn_outcome(
     when there is one. A clean close writes
     no `dfo.turn_error`. A pause holds `dfo.turn_status` `paused`, and a close
     holds no `dfo.turn_status`. `session_id`, `user_id` and `tags` mean what
-    they do for `turn_segment`. Off Langfuse the observation is a plain span
+    they do for `turn_segment`. On Langfuse each `trace_metadata` entry is
+    set on the trace's metadata under its own key, from this observation and
+    every span opened under it. Off Langfuse the observation is a plain span
     with the `dfo.external_id` attribute, and the arguments other than
     `paused` are ignored.
 
@@ -631,6 +637,7 @@ def record_turn_outcome(
         user_id=user_id,
         tags=tags,
         metadata=metadata,
+        trace_metadata=trace_metadata,
     )
     _end_turn_span(
         handle,
@@ -710,6 +717,7 @@ def _start_turn_span(
     user_id: str | None = None,
     tags: Sequence[str] = (),
     metadata: Mapping[str, str] | None = None,
+    trace_metadata: Mapping[str, str] | None = None,
     trace_id: int | None = None,
 ) -> _TurnSpan | None:
     """Open one root span named `name` on the trace of `external_id`, or on
@@ -725,7 +733,8 @@ def _start_turn_span(
     closes mid-stream), the span is a root of its trace that Langfuse marks as
     one, or on OTLP a child of the turn's synthetic parent, the same shape a
     close on another instance writes. `metadata` joins `dfo.external_id` in
-    the Langfuse observation's metadata.
+    the Langfuse observation's metadata, and `trace_metadata` goes on the
+    Langfuse trace's.
     """
     if _backend is None:
         return None
@@ -748,6 +757,7 @@ def _start_turn_span(
             user_id,
             list(tags),
             dict(metadata or {}),
+            dict(trace_metadata or {}),
         )
         otel_context = context.run(otel_context_api.get_current)
         # Held beside the call meta, so `root_if_span_ended` reads the turn
@@ -771,11 +781,13 @@ def _enter_turn_scope(
     user_id: str | None,
     tags: list[str],
     extra_metadata: dict[str, str],
+    trace_metadata: dict[str, str],
 ) -> tuple[Any, Any | None]:
     """Open the turn span named `name` as the current span of the calling
     context and return the entered context manager with the Langfuse
     observation, `None` off Langfuse. On Langfuse, the trace name, a
-    `session_id`, a `user_id` and the `tags` are propagated to every span
+    `session_id`, a `user_id`, the `tags` and the `trace_metadata` entries
+    are propagated to every span
     started under the turn, the session, user and tags are held for
     `turn_call_meta`, and the returned scope exits the attribute propagation
     and the `_hold_turn_call_meta` hold before the span."""
@@ -800,6 +812,7 @@ def _enter_turn_scope(
                     session_id=session_id or None,
                     user_id=user_id or None,
                     tags=tags or None,
+                    metadata=trace_metadata or None,
                 )
             )
             call_meta: dict[str, Any] = {}

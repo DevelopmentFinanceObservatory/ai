@@ -30,6 +30,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
+from common.held_note import (
+    drawn_window,
+    held_period,
+    held_runs,
+    holds_projections,
+    period_year,
+    reaches,
+)
 from common.telemetry import end_turn_segment, start_turn_segment
 from compiler.sources import alternative_definitions, source_from_spec_block
 from compiler.surface import SpecUse
@@ -45,6 +53,9 @@ from harness.card_unit import CARD_UNIT_KEY
 from harness.conversation import current_conversation_key
 from harness.reply_figures import drawn_series
 from harness.turn_records import (
+    TURN_CARD_PROJECTED,
+    TURN_CARD_RUNS,
+    TURN_CARD_SPECS,
     PlanRecord,
     PlanSource,
     RecordedIdentity,
@@ -79,6 +90,7 @@ from harness.wire import (
 )
 
 if TYPE_CHECKING:
+    from harness.provenance import CardLineage
     from harness.studio_store import StudioStore
 
 logger = logging.getLogger(__name__)
@@ -521,7 +533,9 @@ class TurnUsage:
     the conversation (`harness.conversation.current_conversation_caller`).
     `account` is the website's digest of a signed-in account, `visitor` the
     website's `ip:` caller, and `surface` the turn's `harness.wire.Surface`
-    value; each is `None` when the request named none. `fetched_specs` holds
+    value; each is `None` when the request named none. `prompt_source` is
+    the `harness.wire.PromptSource` value of a turn whose question came from
+    an example the page offered, and `None` for a typed one or a value outside those three. `fetched_specs` holds
     each spec a foreground `get_data` call retrieved and `drawn_specs` each
     spec a card drawn this turn rests on, once each, in the order first used
     (`compiler.surface.current_spec_uses`). `trace_id` is the turn's
@@ -537,6 +551,7 @@ class TurnUsage:
     account: str | None = None
     visitor: str | None = None
     surface: str | None = None
+    prompt_source: str | None = None
     fetched_specs: list[str] = field(default_factory=list)
     drawn_specs: list[str] = field(default_factory=list)
 
@@ -549,6 +564,12 @@ class TurnUsage:
     def tags(self) -> list[str]:
         """The Langfuse tags of the turn: its surface, when it names one."""
         return [self.surface] if self.surface else []
+
+    @property
+    def trace_metadata(self) -> dict[str, str]:
+        """The Langfuse trace metadata of the turn: its `prompt_source`, when
+        it has one."""
+        return {"prompt_source": self.prompt_source} if self.prompt_source else {}
 
     def copy(self) -> TurnUsage:
         """A copy whose spec lists are lists of their own."""
@@ -628,6 +649,14 @@ class ConversationState:
     # wait bought nothing (`_stream_fatal`'s timeout handling reads and
     # updates this).
     timed_out_calls: set[str] = field(default_factory=set)
+    # The user's licence to read partly reported and projected years, as
+    # JSON (`planner.stated_scope.LicenceRecord`), `None` before any turn's
+    # words set one. It is not reset per turn. `harness.studio` puts it into
+    # each turn's graph state (`planner.stated_scope.LICENCE_STATE_KEY`), the
+    # turn's read of the user's words updates it there, and
+    # `harness.studio_store.keep_turn_records` keeps it back here. No model
+    # reads it.
+    licence: dict[str, Any] | None = None
     # The current turn's record-in-progress; reset by begin_turn.
     # `turn_user_message` is the history record's text: the message, each
     # amendment and answer, and each switch on a plan card (`add_to_turn`).
@@ -646,6 +675,11 @@ class ConversationState:
     # (`harness.turn.store.TurnStore.specs`), so storage keeps only the
     # blocks `close_turn` keeps.
     turn_plans: list[dict[str, Any]] = field(default_factory=list)
+    # Whether the turn's own words asked about projections, as the read of
+    # them at the turn's opening found (`planner.stated_scope`), whatever
+    # the conversation's licence carries; read only by the turn's closing
+    # line (`harness.turn_records.held_back_line`).
+    turn_projection_asked: bool = False
     turn_readings: list[dict[str, Any]] = field(default_factory=list)
     turn_specs: dict[str, Any] = field(default_factory=dict)
     # The chip the turn was asked to apply, `{"choice_id", "option_id"}`, set
@@ -1028,6 +1062,7 @@ class ConversationState:
         error: str | None = None,
         match_notes: str | None = None,
         basis_line: str | None = None,
+        held_line: str | None = None,
         new_question: str | None = None,
         asked_for_question: bool = False,
         reply_shown: bool = True,
@@ -1045,8 +1080,9 @@ class ConversationState:
         be built is replaced by a minimal one (`turn`, `user`, `assistant`,
         the close's own `error` code when it has one, `trace_id` and `usage`).
 
-        `match_notes` (`harness.turn_records.loose_match_notes`) and
-        `basis_line` (`harness.turn_records.basis_line`) are the text the code
+        `match_notes` (`harness.turn_records.loose_match_notes`),
+        `basis_line` (`harness.turn_records.basis_line`) and `held_line`
+        (`harness.turn_records.held_back_line`) are the text the code
         appends to the reply after the model's `final_text`, in that order.
         The record keeps each under its own key, beside the answer, so the
         conversation digest (`_history_turn`) shows a later turn's model the
@@ -1075,7 +1111,11 @@ class ConversationState:
         record: dict[str, Any]
         try:
             record = self._turn_record(
-                final_text=final_text, error=error, match_notes=match_notes, basis_line=basis_line
+                final_text=final_text,
+                error=error,
+                match_notes=match_notes,
+                basis_line=basis_line,
+                held_line=held_line,
             )
         except Exception as exc:
             # A record that cannot be built must not leave the turn open, since
@@ -1125,6 +1165,7 @@ class ConversationState:
         error: str | None,
         match_notes: str | None,
         basis_line: str | None,
+        held_line: str | None,
     ) -> dict[str, Any]:
         """The turn's full record, which `close_turn` appends. May raise, on a
         stored plan record that no longer validates, say."""
@@ -1136,6 +1177,8 @@ class ConversationState:
             record["match_notes"] = match_notes
         if basis_line:
             record["basis_line"] = basis_line
+        if held_line:
+            record["held_line"] = held_line
         if self.turn_components:
             record["cards"] = list(self.turn_components)
         if self.turn_approved:
@@ -1385,6 +1428,7 @@ class ConversationState:
         self.turn_final_text = ""
         self.turn_components = []
         self.turn_plans = []
+        self.turn_projection_asked = False
         self.turn_readings = []
         self.turn_specs = {}
         self.turn_applied_choice = None
@@ -1488,6 +1532,7 @@ def record_unstreamed_span(
             session_id=conversation_id,
             user_id=usage.user_id if usage is not None else None,
             tags=usage.tags if usage is not None else (),
+            trace_metadata=usage.trace_metadata if usage is not None else None,
         ),
         status=status,
         level="ERROR" if status == "failed" else "WARNING",
@@ -1499,7 +1544,7 @@ def _recorded_reply(record: Mapping[str, Any]) -> str:
     the user was shown and the text the code appended to it, in that order
     (`ConversationState.close_turn`)."""
     shown = record["shown_answer"] if "shown_answer" in record else record.get("assistant")
-    parts = [shown, record.get("match_notes"), record.get("basis_line")]
+    parts = [shown, record.get("match_notes"), record.get("basis_line"), record.get("held_line")]
     return "\n\n".join(part for part in parts if part)
 
 
@@ -1689,7 +1734,11 @@ def _history_turn(
     cards = turn.get("cards") or []
     kept = [
         {
-            **card,
+            **{
+                key: value
+                for key, value in card.items()
+                if key not in (TURN_CARD_RUNS, TURN_CARD_PROJECTED, TURN_CARD_SPECS)
+            },
             **(
                 {"title": _cut_text(card["title"], _HISTORY_CARD_TITLE_BYTE_CAP >> shrink)}
                 if isinstance(card.get("title"), str)
@@ -1906,11 +1955,18 @@ def _model_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _turn_component_entry(
-    *, component_id: str, type: str | None, title: str | None, action: str, window: Any
+    *,
+    component_id: str,
+    type: str | None,
+    title: str | None,
+    action: str,
+    window: Any,
+    runs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One `conversation.turn_components` entry, `window` included only when
-    the digest entry resolved one (`_digest_shows`' `time`). See
-    `land_component`'s docstring for what reads it back."""
+    the digest entry resolved one (`_digest_shows`' `time`), and the card's
+    partial and projected runs (`runs`, `card_runs`) where it states any.
+    See `land_component`'s docstring for what reads it back."""
     entry: dict[str, Any] = {
         "component_id": component_id,
         "type": type,
@@ -1919,7 +1975,80 @@ def _turn_component_entry(
     }
     if window:
         entry["window"] = window
+    entry.update(runs or {})
     return entry
+
+
+def card_runs(component: Mapping[str, Any], lineage: CardLineage | None) -> dict[str, Any]:
+    """The keys a turn card entry records for the partial and projected runs
+    of `component`, a card drawn from the frame of `lineage`: every run its
+    manifests state (`TURN_CARD_RUNS`, `common.held_note.held_runs`), with
+    its `source` and marked `reached` where the card's window, or its
+    manifests' where it states none, reaches it (`common.held_note.reaches`,
+    `drawn_window`). A run keeps its first year, which names the latest
+    reported year before it. A drawn (`served`) run ends at the card's drawn
+    end where that falls inside it (`_drawn_end`), as the card's label does
+    (`harness.mcp_client._held_periods`), and a run left out keeps its whole
+    span. The keys also record whether a manifest states a projected run at
+    all (`TURN_CARD_PROJECTED`, `common.held_note.holds_projections`) and the
+    spec_ids the card reads (`TURN_CARD_SPECS`). The reply's closing line and
+    projection chip read them (`harness.turn_records.held_back_line`,
+    `projection_chip`).
+
+    A card with no lineage, or a lineage holding no manifest, records no
+    runs, since its freshness lists runs already cut to the window it draws,
+    which would word a cut run's first year as the run's. Whether its data
+    holds projections is then unknown, so a card reading any spec_id records
+    `TURN_CARD_PROJECTED` as `None`, and the reply does not say the data
+    holds none. Any other card stating no run records none of these keys.
+    """
+    manifests = [member.manifest for member in lineage.lineage] if lineage is not None else []
+    runs: list[dict[str, Any]] = []
+    projected: bool | None = None if _card_specs(component) else False
+    if manifests:
+        summary = component.get("fact_summary")
+        drawn = summary.get("window") if isinstance(summary, Mapping) else None
+        drawn = drawn_window(drawn if isinstance(drawn, Mapping) else {}, manifests)
+        periods = [(held_period(fact), fact.source) for fact in held_runs(manifests)]
+        runs = [
+            {
+                **_drawn_end(period, drawn=drawn),
+                "source": source,
+                "reached": reaches(period, drawn=drawn),
+            }
+            for period, source in periods
+        ]
+        projected = any(holds_projections(manifest) for manifest in manifests)
+    keys: dict[str, Any] = {}
+    if runs:
+        keys[TURN_CARD_RUNS] = runs
+    if projected is not False:
+        keys[TURN_CARD_PROJECTED] = projected
+    if keys:
+        keys[TURN_CARD_SPECS] = _card_specs(component)
+    return keys
+
+
+def _drawn_end(period: dict[str, Any], *, drawn: Mapping[str, Any]) -> dict[str, Any]:
+    """`period`, a wire `HeldPeriod` dict, with a drawn (`served`) run's end
+    cut to the end of `drawn`, the card's `{start, end}` window, where that
+    falls inside the run."""
+    last = period_year(drawn.get("end"))
+    start, end = period_year(period.get("start")), period_year(period.get("end"))
+    if not period.get("served") or last is None or start is None or end is None:
+        return period
+    return {**period, "end": str(last)} if start <= last < end else period
+
+
+def _card_specs(component: Mapping[str, Any]) -> list[str]:
+    """The spec_ids a component's wire provenance reads (`Provenance.inputs`)."""
+    provenance = component.get("provenance")
+    inputs = provenance.get("inputs") if isinstance(provenance, Mapping) else None
+    return [
+        str(ref["spec_id"])
+        for ref in inputs or ()
+        if isinstance(ref, Mapping) and ref.get("spec_id")
+    ]
 
 
 def _digest_shows(component: dict[str, Any]) -> dict[str, Any]:
@@ -2027,6 +2156,7 @@ def land_component(
     *,
     intent: dict[str, Any] | None = None,
     unit_card: dict[str, Any] | None = None,
+    lineage: CardLineage | None = None,
 ) -> Literal["created", "held"]:
     """Land `component` on `conversation`'s canvas. `harness.studio_translate`
     calls this at drain time for a write `make_charts` stamped through
@@ -2045,9 +2175,12 @@ def land_component(
     Otherwise a new block is appended and the return is `"created"`.
 
     Either way a `turn_components` entry records it, carrying `window` when
-    the digest entry resolved one (`_digest_shows`' `time`). `close_turn`
-    folds it into `conversation.turns`, in landing order, where the
-    conversation digest reads it.
+    the digest entry resolved one (`_digest_shows`' `time`) and the partial
+    and projected runs of the card and of the manifests of its frame's
+    `lineage` (`card_runs`), which the reply's closing line and projection
+    chip read (`harness.turn_records.held_back_line`).
+    `close_turn` folds it into `conversation.turns`, in landing order, where
+    the conversation digest reads it without the runs.
 
     A canvas that already holds the component's block gets no second one
     and the return is `"created"`. `StudioStore.change_canvas` runs it once
@@ -2066,6 +2199,7 @@ def land_component(
             title=_block_title(component),
             action="created",
             window=entry.get("time"),
+            runs=card_runs(component, lineage),
         )
     )
     if not conversation.auto_add:

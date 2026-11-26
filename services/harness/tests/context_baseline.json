@@ -4,8 +4,8 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 0,
-      "total_chars": 73714,
-      "system_instruction_chars": 20343,
+      "total_chars": 73972,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 40867,
       "declarations": [
         {
@@ -45,8 +45,8 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 1,
-      "total_chars": 106597,
-      "system_instruction_chars": 20343,
+      "total_chars": 106855,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 40867,
       "declarations": [
         {
@@ -96,8 +96,8 @@
       "agent": "planner",
       "scenario": "bounded-context",
       "call_index": 2,
-      "total_chars": 107233,
-      "system_instruction_chars": 20343,
+      "total_chars": 107491,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 40867,
       "declarations": [
         {
@@ -157,8 +157,8 @@
       "agent": "planner",
       "scenario": "keep-resumed",
       "call_index": 0,
-      "total_chars": 61398,
-      "system_instruction_chars": 20343,
+      "total_chars": 61656,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 39999,
       "declarations": [
         {
@@ -194,8 +194,8 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 0,
-      "total_chars": 68281,
-      "system_instruction_chars": 20343,
+      "total_chars": 68539,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 40867,
       "declarations": [
         {
@@ -235,8 +235,8 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 1,
-      "total_chars": 101164,
-      "system_instruction_chars": 20343,
+      "total_chars": 101422,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 40867,
       "declarations": [
         {
@@ -286,8 +286,8 @@
       "agent": "planner",
       "scenario": "realistic",
       "call_index": 2,
-      "total_chars": 102341,
-      "system_instruction_chars": 20343,
+      "total_chars": 102599,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 40867,
       "declarations": [
         {
@@ -347,8 +347,8 @@
       "agent": "planner",
       "scenario": "stated-scope",
       "call_index": 0,
-      "total_chars": 68569,
-      "system_instruction_chars": 20343,
+      "total_chars": 68827,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 40867,
       "declarations": [
         {
@@ -388,8 +388,8 @@
       "agent": "planner",
       "scenario": "stated-scope",
       "call_index": 1,
-      "total_chars": 101452,
-      "system_instruction_chars": 20343,
+      "total_chars": 101710,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 40867,
       "declarations": [
         {
@@ -439,8 +439,8 @@
       "agent": "planner",
       "scenario": "stated-scope",
       "call_index": 2,
-      "total_chars": 102629,
-      "system_instruction_chars": 20343,
+      "total_chars": 102887,
+      "system_instruction_chars": 20599,
       "declaration_total_chars": 40867,
       "declarations": [
         {
