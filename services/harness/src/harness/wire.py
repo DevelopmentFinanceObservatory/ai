@@ -93,11 +93,31 @@ class Source(_WireModel):
     retrieved: str | None = None
 
 
+class HeldPeriod(_WireModel):
+    """A run of periods a source marks partial or projected. `served` is true
+    when the card's data includes them and false when the read held them back.
+    `start` equals `end` for one period. `share` and `basis` state how much of
+    the `against` period a partial run holds so far."""
+
+    status: Literal["partial", "projected"]
+    start: str
+    end: str
+    served: bool
+    source_name: str | None = None
+    share: float | None = None
+    basis: Literal["value", "series"] | None = None
+    against: str | None = None
+
+
 class Freshness(_WireModel):
+    """`data_through` is the latest reported (non-projected) year of the
+    card's data, which a card drawing projected years only does not hold."""
+
     data_through: str
     last_refreshed: str
     partial_period: bool
     next_expected: str | None = None
+    held: list[HeldPeriod] = Field(default_factory=list)
 
 
 class WarningSeverity(StrEnum):
@@ -1958,10 +1978,12 @@ class ApplyChoiceSuggestion(_WireModel):
 
 
 class Suggestions(_WireModel):
-    """Follow-up chips. Empty unless the answer used readings with scope
-    choices or other counts, which give one `ApplyChoiceSuggestion` per
+    """Follow-up chips. First, one `SuggestionItem` asking for the projected
+    years a card the turn drew left out, where one left any out
+    (`harness.turn_records.projection_chip`). Then, for readings the answer
+    used with scope choices or other counts, one `ApplyChoiceSuggestion` per
     other option or count Search can serve
-    (`harness.turn_records.scope_chips`)."""
+    (`harness.turn_records.scope_chips`). Empty when there are neither."""
 
     event: Literal["suggestions"]
     seq: int = Field(ge=0)

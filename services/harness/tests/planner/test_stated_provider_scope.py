@@ -48,8 +48,10 @@ from harness.scope_choices import ProviderScope
 from harness.sentences import FAILURE_CLASS, TERMINAL_PROPOSE_CODES, FailureClass
 from harness.settings import Settings
 from harness.turn.store import AgentRecord
+from planner.licence import Licence
 from planner.plan import (
     ALIGNED_PINS_STATE_KEY,
+    MAX_NAMED_YEARS,
     PLAN_STATE_KEY,
     AlignedPin,
     DatasetRequirement,
@@ -74,14 +76,18 @@ from planner.plan import (
 from planner.source_reads import _NO_ONE_DATASET, _UNANSWERED
 from planner.specs import planner_tool_specs
 from planner.stated_scope import (
+    LICENCE_STATE_KEY,
     STATED_SCOPE_STATE_KEY,
     ApisStatedScopeReader,
+    LicenceRecord,
     StatedScopeReader,
     StatedScopeRecord,
     TextReading,
+    licence_record,
     read_stated_scope,
     stated_scope_record,
     stated_uncompiled,
+    turn_licence,
 )
 from planner.tool_results import Outcome, ProblemCode
 from planner.tools import load_pending_ask
@@ -166,7 +172,8 @@ class _Reader:
     and body given, which is no retry's cure when the body says `retryable: false`.
     Search's capabilities document lists `doors` as live, answers a bare 404, as a
     wrong address does, where `doors` is `None`, and 503 with `capabilities_down`; each
-    read is counted in `capability_reads`."""
+    read is counted in `capability_reads`. `readings` answers texts the recording does
+    not hold."""
 
     def __init__(
         self,
@@ -175,8 +182,10 @@ class _Reader:
         refusing: tuple[int, dict[str, Any]] | None = None,
         doors: Sequence[str] | None = ("options", "stated_scope"),
         capabilities_down: bool = False,
+        readings: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self.calls: list[list[str]] = []
+        self.readings = {**_READINGS, **(readings or {})}
         self.capabilities_down = capabilities_down
         self.failing = failing
         self.refusing = refusing
@@ -199,7 +208,7 @@ class _Reader:
             return httpx2.Response(self.refusing[0], json=self.refusing[1])
         if self.failing:
             return httpx2.Response(503, json={"code": "unavailable", "retryable": True})
-        return httpx2.Response(200, json={"readings": [_READINGS[text] for text in texts]})
+        return httpx2.Response(200, json={"readings": [self.readings[text] for text in texts]})
 
     def reader(self, *, clock: Callable[[], float] | None = None) -> StatedScopeReader:
         async def no_sleep(_: float) -> None:
@@ -452,27 +461,73 @@ async def test_a_route_that_does_not_answer_ends_the_entry_on_a_retryable_refusa
     assert load_plan(ctx.state) is None
 
 
-async def test_each_read_retries_on_its_own_so_an_earlier_failure_spends_nothing() -> None:
-    """Every read site retries within its own call, so neither the brief's hint read
-    nor an earlier proposal's failure in the turn turns a later failure into a fault
-    in the system, and a read that answers after them admits the plan."""
+_UNREADABLE = (422, {"code": "request_invalid", "retryable": False})
+
+
+@pytest.mark.parametrize(
+    ("opening", "later", "codes", "called"),
+    [
+        pytest.param(
+            {"failing": True},
+            ({"failing": True}, {}, {}),
+            ["unavailable"] * 4,
+            [True, False, False],
+            id="a-failure-that-can-pass-is-read-again-once",
+        ),
+        pytest.param(
+            {"failing": True},
+            ({},),
+            ["unavailable", "ok"],
+            [True],
+            id="a-search-recovered-by-the-planners-call-serves-it",
+        ),
+        pytest.param(
+            {"refusing": _UNREADABLE},
+            ({}, {}),
+            ["unreadable"] * 3,
+            [False, False],
+            id="a-failure-no-retry-changes-is-not-read-again",
+        ),
+    ],
+)
+async def test_a_failed_read_is_read_again_by_the_next_read_only_where_it_can_pass(
+    opening: dict[str, Any],
+    later: tuple[dict[str, Any], ...],
+    codes: list[str],
+    called: list[bool],
+) -> None:
+    """The turn's words are read as the turn opens. A read that fails after the
+    reader's own retries is recorded. Where the failure can pass, a 503, the next
+    read of the turn calls Search once more, so a proposal made after Search
+    recovers is served. Every other read answers the refusal held and calls
+    Search no more."""
     ctx = _Context()
     bilateral = _block("separate_bilateral")
     _show(ctx, bilateral)
     requirements = [_dataset("aid", bilateral["spec_id"], "bilateral aid", recipient="Africa")]
+    opening_reader = _Reader(**opening)
     token = current_user_message.set(_G7_BILATERAL)
     try:
-        hint = await read_stated_scope(ctx.state, _Reader(failing=True).reader())
+        hint = await read_stated_scope(ctx.state, opening_reader.reader())
     finally:
         current_user_message.reset(token)
+    first_calls = len(opening_reader.calls)
 
-    codes = [hint["code"] if hint is not None else None]
-    for reader in (_Reader(failing=True), _Reader(failing=True), _Reader()):
+    readers = [_Reader(**kwargs) for kwargs in later]
+    found = [hint["code"] if hint is not None else None]
+    for reader in readers:
         result = await _propose(ctx, requirements, words=_G7_BILATERAL, reader=reader)
-        codes.append(result.get("code") or result["outcome"])
+        found.append(result.get("code") or result["outcome"])
 
-    unavailable = ProblemCode.STATED_SCOPE_UNAVAILABLE.value
-    assert codes == [unavailable, unavailable, unavailable, Outcome.OK.value]
+    named = {
+        ProblemCode.STATED_SCOPE_UNAVAILABLE.value: "unavailable",
+        ProblemCode.STATED_SCOPE_UNREADABLE.value: "unreadable",
+        Outcome.OK.value: "ok",
+    }
+    assert [named.get(code, code) for code in found] == codes
+    assert first_calls >= 1
+    assert len(opening_reader.calls) == first_calls
+    assert [bool(reader.calls) for reader in readers] == called
 
 
 _NOT_FOUND = (404, {"code": "not_found", "status": 404, "retryable": False})
@@ -601,6 +656,46 @@ async def test_a_route_gone_mid_turn_keeps_the_reading_held_and_admits_the_plan(
 
     assert result["outcome"] == Outcome.OK.value, result
     assert gone.calls == []
+    assert held is not None
+    assert stated_scope_record(ctx.state) == held
+
+
+class _NoReadings(_Reader):
+    """A reader that answers no reading for the texts it is given, a fault in
+    the reader past Search's contract."""
+
+    def reader(self, *, clock: Callable[[], float] | None = None) -> StatedScopeReader:
+        async def read(texts: Sequence[str]) -> Sequence[TextReading]:
+            self.calls.append(list(texts))
+            return ()
+
+        return read
+
+
+async def test_a_reader_fault_fails_the_proposal_and_holds_no_reading() -> None:
+    """A fault in the reader is no route left unserved. `propose_plan` raises it,
+    so no plan is admitted with no stated scope, and the reading held for the
+    turn's earlier words stays."""
+    ctx = _Context()
+    _show(ctx, _block("africa_bilateral"))
+    token = current_user_message.set(_G7)
+    try:
+        assert await read_stated_scope(ctx.state, _Reader().reader()) is None
+    finally:
+        current_user_message.reset(token)
+    held = stated_scope_record(ctx.state)
+    broken = _NoReadings()
+
+    with pytest.raises(ValueError):
+        await _propose(
+            ctx,
+            [_dataset("aid", _spec("africa_bilateral"), "net ODA", recipient="Africa")],
+            words=_G7_BILATERAL,
+            reader=broken,
+        )
+
+    assert broken.calls == [[_G7_BILATERAL]]
+    assert load_plan(ctx.state) is None
     assert held is not None
     assert stated_scope_record(ctx.state) == held
 
@@ -1534,6 +1629,167 @@ def test_the_scope_words_are_those_of_the_latest_turn_naming_an_option_or_a_tota
     previous = SimpleNamespace(scope_words=held)
 
     assert _scope_words(turn, previous) == expected  # ty: ignore[invalid-argument-type]
+
+
+@pytest.mark.parametrize(
+    ("words", "turn", "held", "expected"),
+    [
+        pytest.param(
+            "bilateral aid in 2025",
+            _record("bilateral aid in 2025", named_years=(2025,)),
+            Licence(),
+            Licence(named=(2025,)),
+            id="a-turn-naming-a-year-sets-it",
+        ),
+        pytest.param(
+            "and for Uganda?",
+            _record("and for Uganda?"),
+            Licence(named=(2025,), projection=True),
+            Licence(named=(2025,), projection=True),
+            id="a-typed-turn-naming-none-carries-it",
+        ),
+        pytest.param(
+            "and 2020?",
+            _record("and 2020?", named_years=(2020, 2025)),
+            Licence(named=(2025, 2030)),
+            Licence(named=(2020, 2025)),
+            id="years-replace-the-held-ones",
+        ),
+        pytest.param(
+            "just show 2015 to 2020",
+            _record("just show 2015 to 2020", named_years=(2015, 2020)),
+            Licence(projection=True),
+            Licence(named=(2015, 2020)),
+            id="years-withdraw-a-held-projection-ask",
+        ),
+        pytest.param(
+            "show me the projections",
+            _record("show me the projections", projection=True),
+            Licence(named=(2025,)),
+            Licence(projection=True),
+            id="a-projection-ask-replaces-the-held-years",
+        ),
+        pytest.param(
+            None,
+            None,
+            Licence(named=(2025,), projection=True),
+            Licence(named=(2025,), projection=True),
+            id="a-turn-with-no-words-reads-it-unchanged",
+        ),
+        pytest.param(
+            "Kenya ODA 2015 to 2025",
+            None,
+            Licence(named=(2025,), projection=True),
+            Licence(),
+            id="a-typed-turn-holding-no-reading-licenses-nothing",
+        ),
+        pytest.param(
+            "Kenya ODA 2015 to 2025",
+            _record("an earlier turn's words", named_years=(2015,)),
+            Licence(named=(2025,), projection=True),
+            Licence(),
+            id="a-reading-of-other-words-licenses-nothing",
+        ),
+        pytest.param(
+            "every year",
+            _record("every year", named_years=tuple(range(1990, 1991 + MAX_NAMED_YEARS))),
+            Licence(),
+            Licence(named=tuple(range(1991, 1991 + MAX_NAMED_YEARS))),
+            id="past-the-limit-the-newest-are-kept",
+        ),
+    ],
+)
+def test_the_turn_licence_is_the_latest_typed_turns_naming_any(
+    words: str | None, turn: StatedScopeRecord | None, held: Licence, expected: Licence
+) -> None:
+    state: dict[str, Any] = {
+        STATED_SCOPE_STATE_KEY: turn.model_dump(mode="json") if turn is not None else None,
+        LICENCE_STATE_KEY: LicenceRecord(
+            named_years=held.named, projection=held.projection
+        ).model_dump(mode="json"),
+    }
+    token = current_user_message.set(words)
+    try:
+        assert turn_licence(state) == expected
+        assert turn_licence(state) == expected
+    finally:
+        current_user_message.reset(token)
+    if expected == Licence() and held != Licence():
+        assert licence_record(state).licence == held
+
+
+# A turn naming 2025 and asking about projections, then an amendment naming no year,
+# as Search's reader reads each once it names years.
+_NAMES_2025 = "What share of G7 ODA was bilateral in 2025, and what is projected?"
+_NAMES_NONE = "Show it as a bar chart."
+_YEAR_READINGS = {
+    _NAMES_2025: {**_READINGS[_G7_BILATERAL], "named_years": [2025], "projection": True},
+    _NAMES_NONE: {
+        "entries": [],
+        "total": False,
+        "mentions": [],
+        "sums_providers": False,
+        "named_years": [],
+        "projection": False,
+    },
+}
+
+
+async def test_a_plan_holds_the_years_its_words_name_through_an_amendment_naming_none() -> None:
+    """A proposal whose words name 2025 and ask about projections holds both. Its
+    amendment under words naming no year keeps them from the plan it amends."""
+    ctx = _Context()
+    dac1 = _block("dac1")
+    _show(ctx, dac1)
+    surface = _Search(dac1)
+    reader = _Reader(readings=_YEAR_READINGS)
+    requirements = [
+        _dataset("bilateral", DAC1, "bilateral ODA", declares=_BILATERAL),
+        _dataset("total", DAC1, "official development assistance", declares=_CONTRIBUTIONS),
+        _share("bilateral", "total"),
+    ]
+
+    first = await _propose(ctx, requirements, words=_NAMES_2025, surface=surface, reader=reader)
+    proposed = load_plan(ctx.state)
+    amended = await _propose(
+        ctx,
+        requirements,
+        words=_NAMES_NONE,
+        surface=surface,
+        reader=reader,
+        amends_version=1,
+        question=_NAMES_2025,
+    )
+
+    assert [first["outcome"], amended["outcome"]] == [Outcome.OK.value] * 2, (first, amended)
+    assert proposed is not None
+    assert (proposed.named_years, proposed.projection_asked) == ((2025,), True)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.version == 2
+    assert (plan.named_years, plan.projection_asked) == ((2025,), True)
+
+
+async def test_a_fresh_plan_under_words_naming_no_year_holds_the_conversations_licence() -> None:
+    """Turn 1 names 2025 and asks about projections. Turn 2, "Show it as a bar
+    chart.", names neither, and its fresh plan holds turn 1's licence, as the
+    orchestrator's `fetch` reads it (`planner.stated_scope.turn_licence`)."""
+    ctx = _Context()
+    dac1 = _block("dac1")
+    _show(ctx, dac1)
+    surface = _Search(dac1)
+    reader = _Reader(readings=_YEAR_READINGS)
+    requirements = [_dataset("bilateral", DAC1, "bilateral ODA", declares=_BILATERAL)]
+
+    first = await _propose(ctx, requirements, words=_NAMES_2025, surface=surface, reader=reader)
+    ctx.state[PLAN_STATE_KEY] = None
+    fresh = await _propose(ctx, requirements, words=_NAMES_NONE, surface=surface, reader=reader)
+
+    assert [first["outcome"], fresh["outcome"]] == [Outcome.OK.value] * 2, (first, fresh)
+    plan = load_plan(ctx.state)
+    assert plan is not None
+    assert plan.version == 1
+    assert (plan.named_years, plan.projection_asked) == ((2025,), True)
 
 
 async def test_inputs_declaring_different_options_keep_them_and_state_the_difference() -> None:

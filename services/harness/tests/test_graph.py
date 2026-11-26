@@ -55,7 +55,7 @@ from harness.chart_binding import (
     over_series_limit,
     select_binding_ok,
 )
-from harness.conversation import current_conversation_id
+from harness.conversation import current_conversation_id, current_user_message
 from harness.decision_pick import DecisionPick
 from harness.early_mint import EarlyMints
 from harness.graph import answer as answer_module
@@ -69,6 +69,7 @@ from harness.graph.execute import (
     record_served_scopes,
 )
 from harness.graph.plan_done import authored_report, frame_unavailable_reason, plan_done_node
+from harness.graph.seed import seed_node
 from harness.graph.state import (
     APPROVE_PAUSE,
     ORCHESTRATOR_FRAMES_KEY,
@@ -89,8 +90,10 @@ from harness.seeds import stale_reason
 from harness.sentences import FAILURE_SENTENCES, FailureClass, failure_cause
 from harness.studio_translate import failure_detail
 from harness.turn.events import NodeDone, Paused, TurnEvent, TurnFailed
+from harness.turn.node import Next
 from harness.turn_records import SearchReading, basis_line
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from planner.licence import Licence
 from planner.operations import AggregateOperation, GrowthOperation, RetrieveOperation, Translation
 from planner.plan import (
     ASKS_STATE_KEY,
@@ -123,6 +126,12 @@ from planner.records import (
     RollingWindow,
     Severity,
 )
+from planner.stated_scope import (
+    LICENCE_STATE_KEY,
+    TextReading,
+    read_stated_scope,
+    turn_licence,
+)
 from planner.workflow import (
     SelectedSource,
     ToolId,
@@ -134,6 +143,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 from translator.discovery import PartFault, PartNotResolvedError
 
+from .data_mcp_definitions import DataMcpDefinitions
 from .graph_turns import agent_read, opening_graph, visited
 from .plan_cards import (
     SPEC_A,
@@ -147,7 +157,7 @@ from .plan_cards import (
 from .plan_turns import approve_answer, plan_nodes
 from .planner_host import node_ctx
 from .scripted_genai import ScriptedGenai, reply, text_part
-from .scripted_tools import plan_call, scripted_orchestrator
+from .scripted_tools import no_executor, plan_call, scripted_orchestrator
 from .share_plan import ALL_DONORS, DAC_DONORS, US_DONOR, us_share_of_kenya_oda
 from .split_plan import FIRST_YEAR, SPEC_DEBT_HISTORY, split_draft, stored_split_plan
 from .test_turn_records import _example_part, _manifest, _served_identity
@@ -3547,3 +3557,100 @@ async def test_closing_early_mints_cancels_the_calls_still_running(
     early.offer(_planner_plan(schemas=real_schemas))
     await asyncio.sleep(0)
     assert len(sends.sent) == 1
+
+
+# --- the stated-scope read the seed node starts ---------------------------------
+
+_PROJECTION_WORDS = "Kenya debt service projections to 2030"
+
+# A bound on a wait that only a regression makes long: the turn waiting on a
+# held reader, or a read never cancelled.
+_REGRESSION_BOUND_S = 5.0
+
+
+class _HeldReader:
+    """A stated-scope reader that answers `reading` only once `release` is set,
+    recording each read and setting `cancelled` when a read is cancelled."""
+
+    def __init__(self, reading: TextReading) -> None:
+        self.reading = reading
+        self.calls: list[list[str]] = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def __call__(self, texts: Sequence[str]) -> list[TextReading]:
+        self.calls.append(list(texts))
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        return [self.reading]
+
+
+def _reading_seed(reader: _HeldReader) -> Any:
+    return seed_node(
+        executor=no_executor, definition_surface=DataMcpDefinitions(), stated_scope=reader
+    )
+
+
+async def test_seed_goes_on_while_the_read_runs_and_a_later_read_takes_its_licence() -> None:
+    """The seed node starts the read of the turn's words and returns before
+    Search answers, so a turn whose first tool needs no licence never waits on
+    it. The planner's read, in a later node's state, awaits that read and takes
+    its licence, with no second call to Search."""
+    reader = _HeldReader(TextReading(named_years=(2030,), projection=True))
+
+    async def turn() -> dict[str, Any]:
+        current_user_message.set(_PROJECTION_WORDS)
+        ctx = node_ctx(message=_PROJECTION_WORDS)
+        # In the turn's own task, as the loop runs a node, so the read it starts
+        # is the turn's.
+        async with asyncio.timeout(_REGRESSION_BOUND_S):
+            assert isinstance(await _reading_seed(reader).run(ctx, None), Next)
+        assert LICENCE_STATE_KEY not in ctx.state
+        later = dict(ctx.state)
+        planner_read = asyncio.create_task(read_stated_scope(later, reader))
+        await reader.started.wait()
+        assert not planner_read.done()
+        reader.release.set()
+        assert await planner_read is None
+        return later
+
+    state = await asyncio.create_task(turn())
+
+    assert reader.calls == [[_PROJECTION_WORDS]]
+    assert state[LICENCE_STATE_KEY] == {"named_years": [2030], "projection": True}
+    token = current_user_message.set(_PROJECTION_WORDS)
+    try:
+        assert turn_licence(state) == Licence(named=(2030,), projection=True)
+    finally:
+        current_user_message.reset(token)
+
+
+async def test_a_turn_cut_before_its_read_is_used_leaves_no_read_running() -> None:
+    """A turn cut while the read the seed started still runs, as a Stop or a
+    client that left cancels it, cancels that read with it."""
+    reader = _HeldReader(TextReading(named_years=(2030,)))
+    seeded = asyncio.Event()
+
+    async def turn() -> None:
+        current_user_message.set(_PROJECTION_WORDS)
+        await _reading_seed(reader).run(node_ctx(message=_PROJECTION_WORDS), None)
+        seeded.set()
+        await asyncio.Event().wait()
+
+    running = asyncio.create_task(turn())
+    async with asyncio.timeout(_REGRESSION_BOUND_S):
+        await seeded.wait()
+    await reader.started.wait()
+    (read,) = [task for task in asyncio.all_tasks() if task.get_name() == "stated scope read"]
+    running.cancel()
+    done, _ = await asyncio.wait({read}, timeout=_REGRESSION_BOUND_S)
+
+    assert read in done
+    assert read.cancelled()
+    assert reader.cancelled.is_set()
+    assert running.cancelled()

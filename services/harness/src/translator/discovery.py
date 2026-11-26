@@ -134,12 +134,13 @@ from compiler.surface import ToolCallResult, ToolSurface, ToolSurfaceUnavailable
 from data_mcp import node_lookup, resolution
 from data_mcp.dcid import bare_dcid
 from data_mcp.definition_store import IdentityMismatch
-from data_mcp.definition_writes import IdentityUnusable, caller_definition
+from data_mcp.definition_writes import IdentityUnusable, caller_definition, windowed_identity
 from data_mcp.errors import UpstreamError
 from data_mcp.graph_wire import CodeNode
 from data_mcp.node_lookup import described_variable_text
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.scope_choices import mark_searched_axes
+from planner.licence import Licence, closed_range, include_for, pin_block_held_back
 from planner.parties import FlowSide, across_party, flow_side, party_role
 from planner.plan import (
     AggregateRequirement,
@@ -170,7 +171,9 @@ from planner.plan import (
     frame_shapes,
     held_blocks,
     identity_on_record,
+    include_block,
     inputs_of,
+    licensed_include,
     load_plan,
     pin_sources,
     pin_verdicts,
@@ -2593,6 +2596,7 @@ def definition_on_record(
 async def _recorded_source(
     records: _PinRecords,
     *,
+    plan: Plan,
     requirement: DatasetRequirement,
     first_year: int | None,
     surface: ToolSurface,
@@ -2619,15 +2623,20 @@ async def _recorded_source(
     back as `discovery_unavailable`, since the same plan can succeed later.
     """
     spec_id = requirement.source_spec_id or ""
-    recorded = records.copies.get(spec_id) or definition_on_record(
-        spec_id, held=held_blocks(records.shown, records.compiled, records.found), log=records.log
-    )
+    on_record = held_blocks(records.shown, records.compiled, records.found)
+    copy = records.copies.get(spec_id)
+    recorded = copy or definition_on_record(spec_id, held=on_record, log=records.log)
     identity = recorded.identity if recorded is not None else None
+    # The block admission's `_window_pins` read the `include` against.
+    block = include_block(spec_id, blocks=on_record, copies=records.copies)
     if (
         recorded is None
         or identity is None
         or not retrieves_period(
-            identity.get("requested_window"), requirement, first_year=first_year
+            identity.get("requested_window"),
+            requirement,
+            first_year=first_year,
+            include=licensed_include(requirement, plan, block),
         )
     ):
         return None
@@ -2656,6 +2665,67 @@ async def _recorded_source(
         )
     except (PartNotResolvedError, ValueError):
         return None
+
+
+async def _licensed_outcome(
+    surface: ToolSurface,
+    outcome: DiscoveryOutcome,
+    *,
+    plan: Plan,
+    requirement: DatasetRequirement,
+    entities: Sequence[EntityKey],
+) -> DiscoveryOutcome:
+    """`outcome`, a `definite` answer for `requirement`, which pins no dataset,
+    with each source's window opting into the held-back classes a plan's
+    retrieval of its years would (`planner.licence.include_for`, over the runs
+    the source's block states and the plan's licence, `Plan.named_years` and
+    `Plan.projection_asked`).
+
+    Search reads the requirement's time words (`search_part`) and may opt into
+    a partly reported or projected year they name, which the planner wrote and
+    the user may not have. A source whose window's `include` differs is
+    resolved again over the licensed window (`resolve_definition`), so its
+    retrieval serves a held-back year only where the user's words license it.
+    Any other answer is returned as it is.
+
+    Raises:
+        DefinitionNotResolvedError: If data-mcp's `resolve_definition` call did
+            not complete.
+        PartNotResolvedError: If Search did not answer the licensed window with
+            one dataset.
+    """
+    if outcome.status is not DiscoveryStatus.DEFINITE or requirement.source_spec_id is not None:
+        return outcome
+    licence = Licence(named=plan.named_years, projection=plan.projection_asked)
+    sources: list[SelectedSource] = []
+    blocks: list[dict[str, Any]] = []
+    for source, block in zip(outcome.sources, outcome.blocks, strict=True):
+        identity = source.identity
+        window = identity.get("requested_window") if identity is not None else None
+        if identity is None or not isinstance(window, Mapping):
+            sources.append(source)
+            blocks.append(block)
+            continue
+        window = cast("Mapping[str, Any]", window)
+        licensed = {key: value for key, value in window.items() if key != "include"}
+        years = closed_range(window)
+        if years is not None and (
+            granted := include_for(*years, licence=licence, runs=pin_block_held_back(block))
+        ):
+            licensed["include"] = list(granted)
+        if licensed == window:
+            sources.append(source)
+            blocks.append(block)
+            continue
+        spec_id, windowed = windowed_identity(identity, licensed)
+        part = await resolve_definition(
+            surface, spec_id=spec_id, identity=windowed, groups=source.groups
+        )
+        resolved_spec(part, spec_id=spec_id)
+        again = outcome_from_envelope({"parts": [part]}, entities=entities)
+        sources.append(again.sources[0])
+        blocks.append(again.blocks[0])
+    return outcome.model_copy(update={"sources": tuple(sources), "blocks": tuple(blocks)})
 
 
 def _resolve_pin_block(
@@ -3149,6 +3219,7 @@ async def _pin_source(
         if source is None:
             source = await _recorded_source(
                 records,
+                plan=plan,
                 requirement=requirement,
                 first_year=first_year,
                 surface=surface,
@@ -3880,28 +3951,43 @@ def build_discover_source(*, surface: ToolSurface) -> Callable[..., Awaitable[di
                     "budget_remaining": DISCOVERY_CALL_BUDGET - log.calls(revision),
                 },
             )
+        entities = [
+            EntityKey(name=entity.name, role=entity.role) for entity in requirement.entities
+        ]
+        read: DiscoveryOutcome | None = None
         try:
             envelope = (answer.meta or {}).get(SEARCH_ENVELOPE_META_KEY)
             if not isinstance(envelope, dict):
                 raise ValueError(
                     f"the search result carries no envelope under _meta[{SEARCH_ENVELOPE_META_KEY!r}]"
                 )
-            outcome = outcome_from_envelope(
-                cast("Mapping[str, object]", envelope),
-                entities=[
-                    EntityKey(name=entity.name, role=entity.role) for entity in requirement.entities
-                ],
+            read = outcome_from_envelope(cast("Mapping[str, object]", envelope), entities=entities)
+            outcome = await _licensed_outcome(
+                surface, read, plan=plan, requirement=requirement, entities=entities
             )
-        except ValueError as exc:
-            log = await _finish(record.model_copy(update={"detail": str(exc)}))
-            return problem(
-                ProblemCode.SEARCH_REFUSED,
-                "data-mcp answered with an envelope that could not be read.",
-                outcome=Outcome.REFUSED,
-                detail={
-                    "parse_error": str(exc),
-                    "budget_remaining": DISCOVERY_CALL_BUDGET - log.calls(revision),
-                },
+        except (DefinitionNotResolvedError, PartNotResolvedError, ValueError) as exc:
+            # An answer read but not licensed may serve years the user's words do
+            # not license, so it is spent and never selected, as a search that
+            # timed out is.
+            log = await _finish(
+                record.model_copy(update={"detail": str(exc), "transport_failed": read is not None})
+            )
+            budget = DISCOVERY_CALL_BUDGET - log.calls(revision)
+            return (
+                problem(
+                    ProblemCode.SEARCH_REFUSED,
+                    "data-mcp answered with an envelope that could not be read.",
+                    outcome=Outcome.REFUSED,
+                    detail={"parse_error": str(exc), "budget_remaining": budget},
+                )
+                if read is None
+                else _unavailable(
+                    requirement,
+                    f"Search could not be asked for {requirement.id!r} over the years the "
+                    f"user's words license: {exc}",
+                    isinstance(exc, DefinitionNotResolvedError) and exc.not_issued,
+                    detail={"budget_remaining": budget},
+                )
             )
 
         sources = tuple(

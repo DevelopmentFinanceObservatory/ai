@@ -55,6 +55,7 @@ from itertools import chain
 from typing import Annotated, Any, Literal, NamedTuple, Protocol, cast, get_args
 
 import rfc8785
+from common.held_back import HeldBack
 from compiler.evidence import named_members, named_refs, open_axes_for
 from compiler.sources import (
     PROVIDER_ACCOUNT,
@@ -98,6 +99,7 @@ from harness.scope_choices import (
 from harness.sentences import PlanWords
 from harness.turn_events import PLANNER_ASK
 from harness.turn_records import refusals_in_force, settled_by_readings
+from planner.licence import Licence, endpoint_licensed, pin_block_held_back, unlicensed_year
 from planner.parties import (
     PARTY_ROLES,
     FlowSide,
@@ -144,6 +146,7 @@ from planner.plan import (
     FirstYear,
     FixDisagreement,
     FullHistory,
+    GrowthRequirement,
     NewQuestionSource,
     OneYearRead,
     PinSource,
@@ -191,11 +194,13 @@ from planner.plan import (
     held_sources,
     identity_on_record,
     identity_or_refusal,
+    include_block,
     inputs_of,
     is_code_written,
     is_scope_choice,
     is_search_pin,
     keep_years_admits,
+    licensed_include,
     load_ask_breakdowns,
     load_asks,
     load_asks_across_years,
@@ -256,7 +261,12 @@ from planner.records import (
     Year,
 )
 from planner.shapes import PLACE_PHRASE, pooling_remedy
-from planner.stated_scope import StatedScopeRecord, stated_scope_record, stated_uncompiled
+from planner.stated_scope import (
+    StatedScopeRecord,
+    stated_scope_record,
+    stated_uncompiled,
+    turn_licence,
+)
 from planner.tool_results import Action, Outcome, ProblemCode, ok, problem
 from planner.workflow import OpenEntityAxis, SelectedSource
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
@@ -670,7 +680,8 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
     )
     if blocked is not None:
         return blocked
-    words = _scope_words(stated_scope_record(view.state), previous)
+    record = stated_scope_record(view.state)
+    words = _scope_words(record, previous)
     realigned = _aligned_bases(
         written,
         evidence_requirements,
@@ -942,12 +953,15 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
                     "whole_sums": sums,
                 }
             )
+        licence = turn_licence(view.state)
         stated = plan.model_copy(
             update={
                 "period_licences": period_licences_held(
                     plan, named=patch.across_years, previous=previous
                 ),
                 "scope_words": words,
+                "named_years": licence.named,
+                "projection_asked": licence.projection,
             }
         )
         # `Plan` validation compares the sides of a share by name; the
@@ -978,6 +992,7 @@ def admit(  # noqa: PLR0911 -- one return per stage of the chain that can refuse
         plan, copies = _window_pins(
             materialized,
             shown=on_record,
+            copies=held_copies,
             definition_lookup=definition_lookup,
             narrowed={verdict.requirement_id for verdict in verdicts if verdict.narrowed},
         )
@@ -3143,7 +3158,9 @@ def _unrecordable(
     binds several parties or whose source leaves another axis open
     (`_rank_roles_expand`, against `stated`), and for a step reducing across years for a
     result no ask across years asks for (`_period_reduction_unstated`,
-    against `stated`).
+    against `stated`), and for a year a source holds back as partly reported
+    or projected that the user's words do not license
+    (`_held_back_years_read`, against `stated`).
     """
     if not plan.evidence_requirements:
         return (
@@ -3168,6 +3185,7 @@ def _unrecordable(
         or _result_scope_unstated(plan)
         or _rank_roles_expand(stated, sources)
         or _period_reduction_unstated(stated, view)
+        or _held_back_years_read(stated, sources)
     )
 
 
@@ -3463,6 +3481,178 @@ def _period_reduction_unstated(plan: Plan, view: SessionView) -> dict[str, objec
                     "one_year": one_year,
                 }
                 for gap, keep_years, one_year in zip(gaps, kept, offered, strict=True)
+            ]
+        },
+    )
+
+
+class _HeldYearRead(NamedTuple):
+    """A year a step reads (`year`) that a source holds back (`run`) and the
+    user's words do not license: the step's id, the first and last year it
+    reads (`start`, `end`), the year before the earliest run its pins hold
+    back (`newest_complete`), and the field the refusal's change ends there."""
+
+    requirement_id: str
+    start: int
+    end: int
+    year: int
+    run: HeldBack
+    newest_complete: int
+    field: Literal["period", "window_end"]
+
+    def change(self) -> dict[str, object]:
+        """The change ending the step's years at `newest_complete`."""
+        end = self.newest_complete
+        if self.field == "period":
+            return {"period": {"start": min(self.start, end), "end": end}}
+        return {"window_start": min(self.start, end - 1), "window_end": end}
+
+
+def _pin_held_back(spec_id: str | None, sources: SourceReadings) -> tuple[HeldBack, ...]:
+    """The runs of years Search's coverage of the pin `spec_id` holds back
+    (`resolved.coverage.held_back`), empty for no pin or no block."""
+    return () if spec_id is None else pin_block_held_back(sources.block(spec_id))
+
+
+def _held_years_read(plan: Plan, sources: SourceReadings) -> list[_HeldYearRead]:
+    """One entry per step of `plan` reading an unlicensed held-back year, at its
+    first such year: dataset requirements first, then growths, each in plan order.
+
+    Each dataset requirement of fixed years is checked over its `period` against
+    its pin's runs (`planner.licence.unlicensed_year`). Each growth is checked at
+    each fixed window end against the runs of the pins of the datasets it rests
+    on (`planner.licence.endpoint_licensed`). A requirement retrieved with
+    `period_end_open`, and a rolling window end, read no held-back year: dfo-apis
+    leaves the held-back rows out of open and rolling reads.
+    """
+    licence = Licence(named=plan.named_years, projection=plan.projection_asked)
+    by_id = {requirement.id: requirement for requirement in plan.evidence_requirements}
+    found: list[_HeldYearRead] = []
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, DatasetRequirement) or requirement.period_end_open:
+            continue
+        period = requirement.period
+        spec_id = requirement.source_spec_id
+        runs = _pin_held_back(spec_id, sources)
+        hit = unlicensed_year(period.start, period.end, licence=licence, runs=runs)
+        if hit is not None:
+            newest = min(run.start_year for run in runs) - 1
+            found.append(
+                _HeldYearRead(requirement.id, period.start, period.end, *hit, newest, "period")
+            )
+    for requirement in plan.evidence_requirements:
+        if not isinstance(requirement, GrowthRequirement):
+            continue
+        rolling = requirement.rolling
+        ends = [
+            year
+            for year, rolls in (
+                (requirement.window_start, rolling is not None and rolling.window_start),
+                (requirement.window_end, rolling is not None and rolling.window_end),
+            )
+            if not rolls
+        ]
+        runs = [
+            run
+            for root in sorted(dataset_roots(by_id, requirement.input_id))
+            for run in _pin_held_back(cast(DatasetRequirement, by_id[root]).source_spec_id, sources)
+        ]
+        window = (requirement.window_start, requirement.window_end)
+        hit = next(
+            (
+                (year, run)
+                for year in ends
+                for run in runs
+                if run.start_year <= year <= run.end_year
+                and not endpoint_licensed(year, run, window=window, licence=licence)
+            ),
+            None,
+        )
+        if hit is not None:
+            newest = min(run.start_year for run in runs) - 1
+            found.append(
+                _HeldYearRead(
+                    requirement.id,
+                    requirement.window_start,
+                    requirement.window_end,
+                    *hit,
+                    newest,
+                    "window_end",
+                )
+            )
+    return found
+
+
+def _years_phrase(start: int, end: int) -> str:
+    """`start` to `end` as a refusal names them, one year alone where they are one."""
+    return str(start) if start == end else f"{start} to {end}"
+
+
+def _held_year_sentence(read: _HeldYearRead) -> str:
+    """The sentence of a held-back-year refusal naming `read` and its change."""
+    step = repr(read.requirement_id)
+    source = read.run.source_name or read.run.source
+    held = _years_phrase(read.run.start_year, read.run.end_year)
+    end = read.newest_complete
+    field = "its `period`" if read.field == "period" else "its window"
+    if read.run.kind == "partial":
+        why = (
+            f"{source} has reported {held} only in part, and the user's words do not name "
+            f"{read.year}"
+        )
+    else:
+        why = (
+            f"{source}'s figures for {held} are projections, and the user's words neither "
+            "ask about the future nor name a projected year"
+        )
+    return (
+        f"{step} reads {_years_phrase(read.start, read.end)}, and {why}. End {field} at "
+        f"{end}, the newest complete year."
+    )
+
+
+def _held_back_years_read(plan: Plan, sources: SourceReadings) -> dict[str, object] | None:
+    """Return the refusal of every step reading a year a source holds back that
+    the user's words do not license, or `None`.
+
+    Search states on a pin's coverage the runs of years it holds back
+    (`common.held_back.HeldBack`): a source's partly reported years and the
+    projected years that continue a reported series. A step's read is refused at a
+    stated run whose class the user's words (`Plan.named_years`,
+    `Plan.projection_asked`) do not license its period to serve
+    (`planner.licence.unlicensed_year`), and a growth at an endpoint they do not
+    license (`planner.licence.endpoint_licensed`). A pin whose block states no run is
+    refused nothing.
+    The refusal is `PERIOD_PARTIAL_UNNAMED` where any step reads an unlicensed
+    partly reported year, and `PERIOD_PROJECTED_UNASKED` where every step
+    refused reads a projected one. `detail.gaps` holds one entry per step
+    (`_held_years_read`): the step (`requirement_id`), `held`, the kind of
+    the year refused, the years it reads (`period`), `newest_complete`, the
+    year before the earliest run its pins hold back, and `change`, the fields
+    that end its years there.
+    """
+    reads = _held_years_read(plan, sources)
+    if not reads:
+        return None
+    code = (
+        ProblemCode.PERIOD_PARTIAL_UNNAMED
+        if any(read.run.kind == "partial" for read in reads)
+        else ProblemCode.PERIOD_PROJECTED_UNASKED
+    )
+    return problem(
+        code,
+        " ".join(_held_year_sentence(read) for read in reads),
+        outcome=Outcome.INVALID_INPUT,
+        detail={
+            "gaps": [
+                {
+                    "requirement_id": read.requirement_id,
+                    "held": read.run.kind,
+                    "period": {"start": read.start, "end": read.end},
+                    "newest_complete": read.newest_complete,
+                    "change": read.change(),
+                }
+                for read in reads
             ]
         },
     )
@@ -4066,6 +4256,7 @@ def _window_pins(
     plan: Plan,
     *,
     shown: Mapping[str, PinSource],
+    copies: Mapping[str, WindowedPin],
     definition_lookup: Callable[[str], RecordedDefinition | None] | None,
     narrowed: Collection[str],
 ) -> tuple[Plan, list[WindowedPin]]:
@@ -4118,6 +4309,14 @@ def _window_pins(
     original's years; the translator reads those from Search's answer for
     the copy when it honours the pin (`translator.discovery`).
 
+    A window of fixed years that reaches a held-back run the plan licenses
+    opts into its class with `include` (`planner.plan.licensed_include`, over
+    the runs the pin's block states), so the retrieval asks apis for those
+    rows. No other window carries it. The block is resolved by
+    `planner.plan.include_block` over `shown` and `copies`, the windowed copies
+    the session holds, which are the blocks and copies `translator.discovery`
+    resolves it over, so the translator reads the `include` this wrote.
+
     One decision fixing the pin of requirements over different periods
     cannot name every copy with its one `source_spec_id`. That decision
     keeps the pin it fixes, and each of those requirements its own copy,
@@ -4152,10 +4351,13 @@ def _window_pins(
             )
             continue
         pinning[requirement.id] = pin
+        include = licensed_include(
+            requirement, plan, include_block(pin, blocks=shown, copies=copies)
+        )
         if requirement.period_end_open:
             window = _open_window(requirement, whole_history=whole_history)
         else:
-            window = period_window(requirement.period)
+            window = period_window(requirement.period, include=include)
         if recorded.identity.get("requested_window") == window:
             retrieved[requirement.id] = pin
             continue

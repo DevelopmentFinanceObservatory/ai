@@ -20,6 +20,7 @@ from collections.abc import (
 from functools import partial
 from typing import Any, NamedTuple
 
+from common.held_note import held_lines, period_year
 from common.materialisation import FrameRef
 from common.period_note import period_note
 from common.place_type import FLOW_ROLE_COLUMNS, enrichment_role
@@ -572,16 +573,20 @@ def answer_notes(
     (`_left_out_entity_sentences`), one per window of the user's that a
     series misses part of and one per window a series misses years inside
     (`_short_series_sentences`), one per step that left keys out
-    (`_dropped_key_sentences`), then one per one-year retrieval when a newer
+    (`_dropped_key_sentences`), one per one-year retrieval when a newer
     year holds data, the year served is not the elected year, or a fuller
-    earlier year is named (`_period_notes`)."""
+    earlier year is named (`_period_notes`), then one per partial or
+    projected run of years a retrieval holds or left out (`_held_lines`)."""
     return [
         *_stat_var_totals(tool_surface, outcome, plan=plan, terminals=terminals),
         *_group_reading_sentences(outcome, plan=plan, terminals=terminals),
         *_left_out_entity_sentences(outcome, plan=plan, terminals=terminals),
-        *_short_series_sentences(outcome, plan=plan, terminals=terminals),
+        *_short_series_sentences(
+            outcome, plan=plan, terminals=terminals, tool_surface=tool_surface
+        ),
         *_dropped_key_sentences(outcome, plan=plan, terminals=terminals),
         *_period_notes(tool_surface, outcome, plan=plan, terminals=terminals),
+        *_held_lines(tool_surface, outcome, plan=plan, terminals=terminals),
     ]
 
 
@@ -593,14 +598,52 @@ def _period_notes(
     terminals: Collection[str] | None = None,
 ) -> list[str]:
     """The period note (`common.period_note.period_note`) of each retrieval
-    under an answer frame, over every answer frame (`answer_frames`) or only
-    those of `terminals`.
+    under an answer frame (`_answer_manifests`), each stated once."""
+    sentences: list[str] = []
+    for manifest in _answer_manifests(tool_surface, outcome, plan=plan, terminals=terminals):
+        note = period_note(manifest.get("coverage") or {})
+        if note and note not in sentences:
+            sentences.append(note)
+    return sentences
+
+
+def _held_lines(
+    tool_surface: ToolSurface | None,
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[str]:
+    """One data line per partial or projected run of years the retrievals
+    under an answer frame (`_answer_manifests`) hold or left out, each run
+    once across them (`common.held_note.held_lines`), so a run one retrieval
+    drew and another left out is said as drawn. The reply's closing line
+    states the run as a sentence (`harness.turn_records.held_back_line`), so
+    the model reads a line it cannot lift whole. With no recorded
+    manifest to read, nothing is said. The closing sentence "The data holds no
+    projections." is said only on a turn whose own words asked, so the model
+    is not handed it.
+    """
+    return held_lines(_answer_manifests(tool_surface, outcome, plan=plan, terminals=terminals))
+
+
+def _answer_manifests(
+    tool_surface: ToolSurface | None,
+    outcome: RunOutcome,
+    *,
+    plan: PlannerPlan,
+    terminals: Collection[str] | None = None,
+) -> list[Mapping[str, Any]]:
+    """The recorded `get_data` manifest of each retrieval under an answer
+    frame, over every answer frame (`answer_frames`) or only those of
+    `terminals`.
 
     An answer frame an analysis step wrote has no manifest of its own, so
-    the note is read from the recorded `get_data` result
+    the manifest is read from the recorded `get_data` result
     (`_RecordingSurface.retrieval_manifest`) of every retrieval that feeds
     it (`_upstream_retrievals`). Retrievals are taken in the plan's step
-    order, and identical sentences are stated once.
+    order, and a retrieval feeding several answer frames is read once per
+    frame; callers state each sentence once.
     """
     manifest_of = getattr(tool_surface, "retrieval_manifest", None)
     workflow = plan.workflow
@@ -611,7 +654,7 @@ def _period_notes(
     step_order = {step.id: index for index, step in enumerate(workflow.steps)}
     evidence_by_step = {record.step_id: record for record in outcome.evidence}
     memo: dict[str, frozenset[str]] = {}
-    sentences: list[str] = []
+    manifests: list[Mapping[str, Any]] = []
     for terminal_id in answer_frames(outcome):
         if terminals is not None and terminal_id not in terminals:
             continue
@@ -621,10 +664,9 @@ def _period_notes(
         for retrieval_id in sorted(under, key=step_order.__getitem__):
             record = evidence_by_step.get(retrieval_id)
             manifest = manifest_of(frame_ref=record.frame_ref.model_dump()) if record else None
-            note = period_note((manifest or {}).get("coverage") or {})
-            if note and note not in sentences:
-                sentences.append(note)
-    return sentences
+            if manifest is not None:
+                manifests.append(manifest)
+    return manifests
 
 
 def _group_reading_sentences(
@@ -864,6 +906,7 @@ def _short_series_sentences(
     *,
     plan: PlannerPlan,
     terminals: Collection[str] | None = None,
+    tool_surface: ToolSurface | None = None,
 ) -> list[str]:
     """One note per window of the user's that series of retrievals under an
     answer frame (`answer_frames`), or only those of `terminals`, miss part
@@ -884,6 +927,14 @@ def _short_series_sentences(
     retrieve (`EvidenceBinding.spec_id`), so a series two retrievals of a
     requirement read, or two requirements over one source, is stated once
     (`_short_series_note` words the notes).
+
+    A series ending the year before a partly reported year its retrieval
+    holds, in a window ending at that year, is measured against the window
+    ending the year before. Its end is not stated, since the line on that
+    year (`_held_lines`) already says it is partly reported, and a late start
+    still is. The partial
+    years are read from the retrieval's recorded `get_data` manifest
+    (`incomplete_after`, `_partial_years`) through `tool_surface`.
     """
     written = {
         requirement.id: requirement
@@ -898,11 +949,15 @@ def _short_series_sentences(
     anchors: dict[str, dict[str, _Anchoring]] = {}
     reaches: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
     holes: dict[Period, dict[_SeriesKey, _ShortSeries]] = {}
+    manifest_of = getattr(tool_surface, "retrieval_manifest", None)
     for terminal_id, record in _terminal_evidence(outcome, plan=plan, terminals=terminals):
         origin = origins.get(record.requirement_id, record.requirement_id)
         requirement = written.get(origin)
         if requirement is None:
             continue
+        partial_years = _partial_years(
+            manifest_of(frame_ref=record.frame_ref.model_dump()) if manifest_of else None
+        )
         if terminal_id not in anchors:
             anchors[terminal_id] = _answer_anchors(
                 outcome, terminal_id=terminal_id, steps_by_id=steps_by_id
@@ -923,7 +978,15 @@ def _short_series_sentences(
             )
             owner = _owner_of(gap.entities)
             if gap.code is EvidenceIssueCode.WINDOW_SHORT and isinstance(gap.found, dict):
-                short = _short_reach(Period.model_validate(gap.found), window)
+                reach = Period.model_validate(gap.found)
+                measured = window
+                if (
+                    reach.end == window.end - 1
+                    and window.start < window.end
+                    and window.end in partial_years(gap.stat_var)
+                ):
+                    measured = Period(start=window.start, end=window.end - 1)
+                short = _short_reach(reach, measured)
                 if short is not None:
                     reaches.setdefault(window, {}).setdefault(
                         key, _ShortSeries(owner, requirement.measure, *short, series_rank(gap))
@@ -949,6 +1012,30 @@ def _short_series_sentences(
     return [
         _short_series_note(by_series) for notes in (reaches, holes) for by_series in notes.values()
     ]
+
+
+def _partial_years(manifest: Mapping[str, Any] | None) -> Callable[[str | None], set[int]]:
+    """The partly reported years a recorded `get_data` `manifest` serves, by
+    StatVar: the year each `partial` entry of its `incomplete_after` marks
+    from (`common.held_note.period_year`), over its `stat_vars`, or over every StatVar
+    where it lists none. `dcid:` prefixes are ignored on both sides."""
+    entries = [
+        (frozenset(_bare(one) for one in entry.get("stat_vars") or ()), year)
+        for entry in (manifest or {}).get("incomplete_after") or ()
+        if isinstance(entry, Mapping)
+        and entry.get("status") == "partial"
+        and (year := period_year(entry.get("partial_period"))) is not None
+    ]
+
+    def years(stat_var: str | None) -> set[int]:
+        bare = _bare(stat_var) if stat_var is not None else None
+        return {year for stat_vars, year in entries if not stat_vars or bare in stat_vars}
+
+    return years
+
+
+def _bare(stat_var: str) -> str:
+    return stat_var.removeprefix("dcid:")
 
 
 class _Anchoring(NamedTuple):

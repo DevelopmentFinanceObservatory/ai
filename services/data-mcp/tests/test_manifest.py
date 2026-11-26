@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 
 import pytest
 from data_mcp.manifest import (
@@ -227,6 +228,93 @@ def test_a_manifest_without_year_counts_dumps_neither_member() -> None:
     coverage = strip_manifest(_DEFINITION_MANIFEST).model_dump(mode="json")["coverage"]
 
     assert coverage.keys() == _DEFINITION_MANIFEST["coverage"].keys()
+
+
+_HELD_BACK = [
+    {
+        "kind": "partial",
+        "source": "dfo/crs",
+        "source_name": "OECD CRS",
+        "start_year": 2025,
+        "end_year": 2025,
+        "reported_share": {"basis": "value", "share": 0.001, "against": 2024},
+    },
+    {
+        "kind": "projected",
+        "source": "dfo/ids",
+        "source_name": "World Bank IDS",
+        "start_year": 2026,
+        "end_year": 2030,
+        "reported_share": None,
+        "served": True,
+    },
+]
+
+
+def test_held_back_and_incomplete_after_parse_to_typed_values() -> None:
+    entry = {
+        "provenance": "dfo/crs",
+        "stat_vars": ["sv1"],
+        "source": "dfo/crs",
+        "status": "partial",
+        "partial_period": "2025",
+        "reported_share": {"basis": "value", "share": 0.001, "against": 2024},
+    }
+    payload = copy.deepcopy(_DEFINITION_MANIFEST)
+    payload["coverage"] |= {"held_back": _HELD_BACK}
+    payload["incomplete_after"] = [entry]
+
+    manifest = strip_manifest(payload)
+
+    partial, projected = manifest.coverage.held_back
+    assert (partial.served, projected.served) == (False, True)
+    assert partial.reported_share is not None
+    assert (partial.kind, partial.start_year, partial.reported_share.share) == (
+        "partial",
+        2025,
+        0.001,
+    )
+    assert (projected.kind, projected.end_year, projected.reported_share) == (
+        "projected",
+        2030,
+        None,
+    )
+    (incomplete,) = manifest.incomplete_after
+    assert (incomplete.status, incomplete.partial_period) == ("partial", "2025")
+    assert incomplete.reported_share is not None
+    assert incomplete.reported_share.against == 2024
+
+
+def test_an_entry_outside_the_contract_is_dropped_and_the_manifest_still_reads(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A status or kind apis adds later, or a null source, drops that entry alone."""
+    payload = copy.deepcopy(_DEFINITION_MANIFEST)
+    payload["coverage"] |= {"held_back": [{**_HELD_BACK[0], "source": None}, _HELD_BACK[1]]}
+    payload["incomplete_after"] = [
+        {"provenance": "dfo/crs", "status": "provisional"},
+        {"provenance": "dfo/ids", "status": "projected", "partial_period": "2026"},
+    ]
+
+    with caplog.at_level(logging.WARNING, logger="common.held_back"):
+        manifest = strip_manifest(payload)
+
+    assert [run.kind for run in manifest.coverage.held_back] == ["projected"]
+    assert [entry.status for entry in manifest.incomplete_after] == ["projected"]
+    spec_id = payload["definition"]["spec_id"]
+    assert sorted(record.args[:3] for record in caplog.records) == [
+        ("held_back", 0, spec_id),
+        ("incomplete_after", 0, spec_id),
+    ]
+    assert payload["coverage"]["held_back"][0]["source"] is None
+
+
+def test_a_manifest_without_held_back_or_incomplete_after_dumps_neither() -> None:
+    manifest = strip_manifest(_DEFINITION_MANIFEST)
+
+    assert manifest.coverage.held_back == []
+    assert manifest.incomplete_after == []
+    assert manifest.model_dump(mode="json").keys() == _DEFINITION_MANIFEST.keys()
 
 
 def test_an_artifacts_enrichment_stamp_survives_stripping_and_stays_out_of_a_dump_without_one() -> (

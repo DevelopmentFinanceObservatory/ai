@@ -1449,6 +1449,112 @@ async def test_a_rank_states_the_period_note_of_the_retrieval_under_it(
     assert answer_notes(surface, outcome, plan=plan, terminals=[]) == []
 
 
+_CRS_PARTIAL_2024 = {
+    "kind": "partial",
+    "source": "dfo/crs",
+    "source_name": "OECD CRS",
+    "start_year": 2024,
+    "end_year": 2024,
+    "reported_share": {"basis": "value", "share": 0.001, "against": 2023},
+}
+
+
+async def test_a_served_partial_year_is_noted_once_in_place_of_the_series_ending_before_it(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    """`aid` reads 2015-2024 and its retrieval holds 2024 partly reported.
+    Uganda's series ends in 2023, the year before, which the partial note
+    explains. Kenya's ends in 2021, which it does not. Rwanda's runs 2018 to
+    2023, so its end is explained and its late start is not."""
+    plan = _aid_per_head(schemas, ranked=True)
+    surface, outcome = _run(plan, summed={}, role_keys={})
+    for manifest in surface.manifests.values():
+        manifest["coverage"]["held_back"] = [{**_CRS_PARTIAL_2024, "served": True}]
+        manifest["incomplete_after"] = [
+            {
+                "provenance": "dfo/crs",
+                "stat_vars": ["dcid:Aid"],
+                "source": "dfo/crs",
+                "status": "partial",
+                "partial_period": "2024",
+                "reported_share": {"basis": "value", "share": 0.001, "against": 2023},
+            }
+        ]
+    outcome = _with_gaps(
+        outcome,
+        "aid_op",
+        _short("Uganda", reach=(2015, 2023)),
+        _short("Kenya", reach=(2015, 2021)),
+        _short("Rwanda", reach=(2018, 2023)),
+        window=_ASKED,
+    )
+
+    assert answer_notes(surface, outcome, plan=plan) == [
+        "Kenya's series ends in 2021 and Rwanda's series starts in 2018.",
+        "held: 2024 partial, 0.1% of 2023 value reported, served",
+    ]
+
+
+async def test_a_partial_run_one_retrieval_drew_and_another_left_out_is_noted_once_as_drawn(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    """One retrieval reads 2024 and is served the partly reported year. The
+    other reads to 2023 and reaches it left out. The answer notes state the
+    run once, as drawn, as the card does."""
+    plan = _aid_per_head(schemas, ranked=True)
+    surface, outcome = _run(plan, summed={}, role_keys={})
+    drew, left_out = surface.manifests.values()
+    drew["coverage"]["held_back"] = [{**_CRS_PARTIAL_2024, "served": True}]
+    left_out["coverage"]["window"] = {"kind": "range", "start_year": 2015, "end_year": 2023}
+    left_out["coverage"]["held_back"] = [_CRS_PARTIAL_2024]
+
+    assert answer_notes(surface, outcome, plan=plan) == [
+        "held: 2024 partial, 0.1% of 2023 value reported, served"
+    ]
+
+
+async def test_an_ask_about_the_future_over_no_projections_hands_the_model_no_note(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    """A plan carrying a projection ask, which may be an earlier turn's, over
+    manifests stating no projected run hands the model no "no projections"
+    note. The reply's closing line says it, on a turn whose own words asked."""
+    plan = _aid_per_head(schemas, ranked=True)
+    surface, outcome = _run(plan, summed={}, role_keys={})
+    for manifest in surface.manifests.values():
+        manifest["definition"]["identity"]["requested_window"] = {
+            "kind": "range",
+            "start_year": 2010,
+            "end_year": 2015,
+        }
+    asked = plan.model_copy(update={"projection_asked": True})
+
+    assert answer_notes(surface, outcome, plan=asked) == []
+
+
+async def test_held_back_projections_are_noted_and_an_ask_over_them_says_no_more(
+    schemas: dict[str, ToolSchema],
+) -> None:
+    plan = _aid_per_head(schemas, ranked=True)
+    surface, outcome = _run(plan, summed={}, role_keys={})
+    asked = plan.model_copy(update={"projection_asked": True})
+    for manifest in surface.manifests.values():
+        manifest["coverage"]["held_back"] = [
+            {
+                "kind": "projected",
+                "source": "dfo/ids",
+                "source_name": "World Bank IDS",
+                "start_year": 2026,
+                "end_year": 2030,
+            }
+        ]
+
+    stated = ["held: 2026-2030 projected (World Bank IDS), left out"]
+    assert answer_notes(surface, outcome, plan=plan) == stated
+    assert answer_notes(surface, outcome, plan=asked) == stated
+    assert answer_notes(surface, outcome, plan=asked, terminals=[]) == []
+
+
 def _step(step_id: str, tool: str, *, frame_bindings: dict[str, str] | None = None) -> WorkflowStep:
     return WorkflowStep(
         id=step_id,

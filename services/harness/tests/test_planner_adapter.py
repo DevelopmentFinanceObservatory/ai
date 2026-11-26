@@ -2456,13 +2456,24 @@ def test_the_plan_section_writes_structured_values_with_non_ascii_text_as_writte
     assert "\\u" not in rendered
 
 
-def test_the_plan_section_leaves_out_the_users_scope_words() -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scope_words", {"mentions": ["provider:inclusive"]}),
+        ("named_years", [2025]),
+        ("projection_asked", True),
+    ],
+)
+def test_the_plan_section_leaves_out_what_code_reads_from_the_users_words(
+    field: str, value: object
+) -> None:
     """Code records the provider options the user's words name (`Plan.scope_words`),
-    so the planner's digest of its plan leaves them out."""
+    the years they name and whether they ask about the future, so the planner's digest
+    of its plan leaves them out."""
     plan = _distinct_plan()
-    plan["scope_words"] = {"mentions": ["provider:inclusive"]}
+    plan[field] = value
 
-    assert "scope_words" not in _plan_context(plan)
+    assert field not in _plan_context(plan)
 
 
 def test_the_plan_section_shows_the_plan_the_model_wrote(decision: Any) -> None:

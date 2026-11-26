@@ -99,6 +99,14 @@ from typing import Any
 from analysis_mcp.runner_client import DerivedUnread
 from analysis_mcp.tool_errors import ToolErrorCode as AnalysisCode
 from common.auth import bearer_token
+from common.held_back import held_back_of
+from common.held_note import (
+    drawn_window,
+    held_period,
+    held_runs,
+    period_year,
+    reaches,
+)
 from common.live_apis import LiveApisError, LiveApisNotConfigured
 from common.materialisation import (
     FrameExpired,
@@ -1497,6 +1505,7 @@ class McpExecutor:
                 manifest=manifest,
                 platform_facts=platform_facts,
                 partial_period=_envelope_partial_period(envelope),
+                drawn=platform_facts.get("window") or _drawn_window(envelope["component"]),
             ),
         }
         return _Assembled(
@@ -1853,6 +1862,64 @@ def _envelope_partial_period(envelope: Mapping[str, Any]) -> bool:
     return bool(described)
 
 
+def _held_periods(lineage: Lineage, *, drawn: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The partial and projected runs the manifests of `lineage` state that
+    the card reaches, as wire `HeldPeriod` dicts.
+
+    Each retrieval's runs are read from its own manifest
+    (`common.held_note.held_runs`), so a projected run ends where that
+    retrieval's frame ends it. A run the card does not reach
+    (`common.held_note.reaches`, against `drawn`, the window the card draws
+    as `{start, end}` period labels) is dropped, and a drawn (`served`) run
+    is cut to the years of `drawn`. A card stating no window end reads the
+    span of its manifests' windows instead (`common.held_note.drawn_window`).
+    The reply reads the runs the turn's card entry keeps, each from its own
+    first year (`harness.studio_state.card_runs`).
+    """
+    manifests = [member.manifest for member in lineage]
+    drawn = drawn_window(drawn, manifests)
+    first, last = period_year(drawn.get("start")), period_year(drawn.get("end"))
+    held: list[dict[str, Any]] = []
+    for fact in held_runs(manifests):
+        period = held_period(fact)
+        if not reaches(period, drawn=drawn):
+            continue
+        start_year, end_year = period_year(fact.start), period_year(fact.end)
+        if fact.served and first is not None and start_year is not None and start_year < first:
+            period["start"] = str(first)
+        if fact.served and last is not None and end_year is not None and end_year > last:
+            period["end"] = str(last)
+        held.append(period)
+    return held
+
+
+def _data_through(manifest: Mapping[str, Any], lineage: Lineage) -> str:
+    """The latest reported year of the frame: the year before the earliest
+    projected run a retrieval of `lineage` serves (`coverage.held_back`), at
+    most the window's end, else the window's end. A card drawing projected
+    years only, such as 2028 to 2030 of a served 2026 to 2030 run, states
+    2025, a year its rows do not hold, as its label "Reported to 2025 ·
+    projected 2026 to 2030" reads.
+
+    The manifest's `coverage.window.end_year` is the served end: dfo-apis
+    clamps a range's requested end to the last year the frame's rows hold
+    (`materialise.window.compute_applied_window`), and the rows a read holds
+    back are cut before that count, so a partial or projected run left out
+    does not extend it."""
+    window_end = str(((manifest.get("coverage") or {}).get("window") or {}).get("end_year") or "")
+    firsts = [
+        run.start_year
+        for member in lineage
+        for run in held_back_of(member.manifest.get("coverage") or {})
+        if run.served and run.kind == "projected"
+    ]
+    if not firsts:
+        return window_end
+    last_actual = min(firsts) - 1
+    window_year = period_year(window_end)
+    return str(min(last_actual, window_year) if window_year is not None else last_actual)
+
+
 def _wire_provenance(
     *,
     frame_ref: dict[str, Any],
@@ -1860,6 +1927,7 @@ def _wire_provenance(
     manifest: dict[str, Any],
     platform_facts: dict[str, Any],
     partial_period: bool = False,
+    drawn: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Wire provenance built from the manifests actually linked to `frame_ref`.
 
@@ -1880,9 +1948,13 @@ def _wire_provenance(
     `ProvenanceInput.served_ref`, the pair the datasets door serves, while the
     lineage stays keyed by its frame key.
 
-    `freshness.partial_period` is `partial_period`, which the card's own
-    resolved revision states (`_envelope_partial_period`). The manifests carry
-    only a per-frame record, which says nothing of the rows the card draws.
+    `freshness` describes the periods the card draws. `partial_period` is
+    true when the card's own resolved revision states a partial period
+    (`_envelope_partial_period`) or a partial period the card draws is held
+    in `held`. `held` lists the partial and projected runs each retrieval's
+    manifest states (`_held_periods`), the drawn ones cut to `drawn`, the
+    window the card draws; `data_through` is the latest reported year of the
+    frame (`_data_through`).
     """
     now = datetime.now(UTC)
     served = {(member.spec_id, member.content_version): member.served_ref for member in lineage}
@@ -1897,7 +1969,7 @@ def _wire_provenance(
             if member_ref["spec_id"] and member_ref["content_version"] and member_ref not in inputs:
                 inputs.append(member_ref)
     citation = manifest.get("citation") or {}
-    coverage_window = (manifest.get("coverage") or {}).get("window") or {}
+    held = _held_periods(lineage, drawn=drawn or {})
     created_at = data_artifact(manifest.get("artifacts") or []).get("created_at")
     if created_at:
         last_refreshed = str(created_at).split("T", maxsplit=1)[0]
@@ -1916,9 +1988,11 @@ def _wire_provenance(
             for source in citation.get("sources") or [{}]
         ],
         "freshness": {
-            "data_through": str(coverage_window.get("end_year") or ""),
+            "data_through": _data_through(manifest, lineage),
             "last_refreshed": last_refreshed,
-            "partial_period": partial_period,
+            "partial_period": partial_period
+            or any(entry["served"] and entry["status"] == "partial" for entry in held),
+            "held": held,
         },
         "warnings": [
             {

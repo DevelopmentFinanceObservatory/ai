@@ -11951,7 +11951,9 @@ def test_two_pins_of_one_dataset_over_one_period_keep_their_own_decisions(
     )
     shown = {pin: PinSource(settled=True) for pin in pins}
 
-    windowed, minted = _window_pins(plan, shown=shown, definition_lookup=None, narrowed=())
+    windowed, minted = _window_pins(
+        plan, shown=shown, copies={}, definition_lookup=None, narrowed=()
+    )
 
     assert minted == []
     assert [
