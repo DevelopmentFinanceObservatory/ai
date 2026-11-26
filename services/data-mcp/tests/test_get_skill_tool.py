@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx2
 import pytest
 from common.apis_auth import ApisAuthError
+from data_mcp import skill_read_log
 from data_mcp.server import mcp
 from data_mcp.skills_client import PAGE_CHARS
 from fastmcp.client.client import CallToolResult
@@ -449,3 +450,130 @@ async def test_the_healthz_route_name_refuses_skill_not_found_without_a_call() -
 
     assert refusal_of(result)["code"] == "skill_not_found"
     assert requests == []
+
+
+# The skill.read log line
+
+
+async def test_a_load_logs_one_skill_read_line_off_loopback(
+    read_lines: Callable[[], list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(skill_read_log, "is_loopback_request", lambda: False)
+    monkeypatch.setattr(skill_read_log, "current_turn", lambda: "ignored-off-loopback")
+    monkeypatch.setattr(skill_read_log, "current_mcp_client", lambda: "test-client")
+
+    await _get_skill(serving_skill())
+
+    assert read_lines() == [
+        {
+            "event": "skill.read",
+            "skill_id": SKILL_ID,
+            "path": "SKILL.md",
+            "kind": "load",
+            "outcome": "ok",
+            "surface": "external",
+            "caller": None,
+            "turn": None,
+            "client": "test-client",
+            "via": "tool",
+        }
+    ]
+
+
+async def test_a_loopback_read_logs_studio_and_its_turn(
+    read_lines: Callable[[], list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(skill_read_log, "is_loopback_request", lambda: True)
+    monkeypatch.setattr(skill_read_log, "current_turn", lambda: "turn-1")
+
+    await _read(serving_skill(), path=_CORE)
+
+    [line] = read_lines()
+    assert (line["surface"], line["turn"], line["kind"], line["path"]) == (
+        "studio",
+        "turn-1",
+        "file",
+        _CORE,
+    )
+
+
+async def test_a_paged_read_logs_once_at_offset_zero(
+    read_lines: Callable[[], list[dict[str, Any]]],
+) -> None:
+    handler = serving_skill(references={_CORE: _long_text()})
+    digest = digest_of(_long_text())
+
+    await _read(handler, path=_CORE)
+    await _read(handler, path=_CORE, offset=PAGE_CHARS, digest=digest)
+    await _read(handler, path=_CORE, offset=2 * PAGE_CHARS, digest=digest)
+
+    assert [line["outcome"] for line in read_lines()] == ["ok"]
+
+
+@pytest.mark.parametrize(
+    ("skill_id", "path"),
+    [
+        ("no-such-skill", None),
+        ("Not A Skill", None),
+        (SKILL_ID, "../etc.md"),
+        ("no-such", _CORE),
+        (SKILL_ID, "_manifest"),
+    ],
+    ids=["unknown_id", "malformed_id", "malformed_path", "unknown_id_with_path", "manifest_path"],
+)
+async def test_a_refused_unresolved_read_logs_null_skill_id_and_path(
+    read_lines: Callable[[], list[dict[str, Any]]], skill_id: str, path: str | None
+) -> None:
+    arguments = {"skill_id": skill_id, **({} if path is None else {"path": path})}
+
+    await call_tool(serving_skill(), "get_skill", arguments)
+
+    [line] = read_lines()
+    assert line["outcome"] in {"skill_not_found", "request_invalid"}
+    assert (line["skill_id"], line["path"]) == (None, None)
+
+
+async def test_a_refusal_after_the_fetch_keeps_the_resolved_skill_id_and_path(
+    read_lines: Callable[[], list[dict[str, Any]]],
+) -> None:
+    await _read(
+        serving_skill(references={_CORE: _long_text()}),
+        path=_CORE,
+        digest="sha256:" + "0" * 64,
+    )
+
+    [line] = read_lines()
+    assert line["outcome"] == "upstream_version_changed"
+    assert (line["skill_id"], line["path"]) == (SKILL_ID, _CORE)
+
+
+async def test_a_file_the_skill_lacks_logs_the_skill_id_and_a_null_path(
+    read_lines: Callable[[], list[dict[str, Any]]],
+) -> None:
+    await _read(serving_skill(), path="references/guessed.md")
+
+    [line] = read_lines()
+    assert line["outcome"] == "skill_resource_not_found"
+    assert (line["skill_id"], line["path"]) == (SKILL_ID, None)
+
+
+async def test_a_digest_without_a_path_at_offset_zero_logs_a_refused_load(
+    read_lines: Callable[[], list[dict[str, Any]]],
+) -> None:
+    result = await call_tool(
+        serving_skill(), "get_skill", {"skill_id": SKILL_ID, "digest": digest_of(SKILL_MD)}
+    )
+
+    [line] = read_lines()
+    assert refusal_of(result)["code"] == "request_invalid"
+    assert (line["kind"], line["outcome"]) == ("load", "request_invalid")
+    assert (line["skill_id"], line["path"]) == (None, None)
+
+
+async def test_a_manifest_path_through_the_tool_logs_kind_file(
+    read_lines: Callable[[], list[dict[str, Any]]],
+) -> None:
+    await _read(serving_skill(), path="_manifest")
+
+    [line] = read_lines()
+    assert line["kind"] == "file"

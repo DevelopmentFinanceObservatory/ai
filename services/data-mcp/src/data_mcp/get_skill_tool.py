@@ -16,6 +16,9 @@ continuation whose digest is not the file's current one refuses
 `upstream_version_changed` and names the call that restarts at offset 0. A
 continuation without a digest refuses `request_invalid` before any read, since
 nothing would tie its page to the revision the earlier pages came from.
+
+Each logical read writes one `skill.read` log line (`data_mcp.skill_read_log`):
+a paged read logs once, at offset 0.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from fastmcp.tools import ToolResult
 from mcp.types import ResourceLink, TextContent
 from pydantic import Field
 
+from data_mcp.skill_read_log import SkillReadKind, log_skill_read, refused_skill_id
 from data_mcp.skills_client import (
     PATH_MAX_CHARS,
     SKILL_ID_MAX_CHARS,
@@ -43,7 +47,7 @@ from data_mcp.skills_client import (
     skill_uri,
     with_closing_line,
 )
-from data_mcp.tool_errors import ToolRefusal, to_tool_result
+from data_mcp.tool_errors import ToolErrorCode, ToolRefusal, to_tool_result
 
 
 def _file_size(size: int) -> str:
@@ -133,6 +137,14 @@ async def get_skill(
     if path is not None:
         return await read_skill_file(skill_id=skill_id, path=path, offset=offset, digest=digest)
     if offset > 0 or digest is not None:
+        if offset == 0:
+            log_skill_read(
+                via="tool",
+                kind="load",
+                outcome=ToolErrorCode.REQUEST_INVALID,
+                skill_id=None,
+                path=None,
+            )
         return to_tool_result(
             ToolRefusal.request_invalid(
                 tool="get_skill",
@@ -146,7 +158,15 @@ async def get_skill(
     try:
         skill = (await fetch_skill(skill_id)).value
     except SkillReadRefused as refused:
+        log_skill_read(
+            via="tool",
+            kind="load",
+            outcome=refused.refusal.code,
+            skill_id=None,
+            path=None,
+        )
         return to_tool_result(refused.refusal)
+    log_skill_read(via="tool", kind="load", outcome="ok", skill_id=skill.id, path=SKILL_MAIN_FILE)
     return ToolResult(
         content=[
             TextContent(type="text", text=_render(skill)),
@@ -173,28 +193,47 @@ def _digest_required(*, skill_id: str, path: str) -> ToolRefusal:
 async def read_skill_file(
     *, skill_id: str, path: str, offset: int, digest: str | None
 ) -> ToolResult:
-    """One page of a skill file, or the refusal for it."""
+    """One page of a skill file, or the refusal for it.
+
+    The read is logged once, from the offset-0 call; later pages of a paged
+    read are not.
+    """
+    kind: SkillReadKind = "load" if path == SKILL_MAIN_FILE else "file"
+
+    def log(outcome: str, *, logged_id: str | None, logged_path: str | None) -> None:
+        if offset == 0:
+            log_skill_read(
+                via="tool", kind=kind, outcome=outcome, skill_id=logged_id, path=logged_path
+            )
+
     if offset > 0 and digest is None:
         return to_tool_result(_digest_required(skill_id=skill_id, path=path))
     if digest is not None and (malformed := check_digest(digest)) is not None:
+        log(malformed.code, logged_id=None, logged_path=None)
         return to_tool_result(malformed)
     try:
         file = await fetch_skill_file(skill_id, path)
     except SkillReadRefused as refused:
+        log(
+            refused.refusal.code,
+            logged_id=refused_skill_id(refused.refusal.code, skill_id),
+            logged_path=None,
+        )
         return to_tool_result(refused.refusal)
     if digest is not None and digest != file.digest:
-        return to_tool_result(
-            ToolRefusal.skill_file_changed(
-                skill_id=skill_id,
-                path=path,
-                digest=digest,
-                current_digest=file.digest,
-            )
+        refusal = ToolRefusal.skill_file_changed(
+            skill_id=skill_id,
+            path=path,
+            digest=digest,
+            current_digest=file.digest,
         )
+        log(refusal.code, logged_id=file.skill_id, logged_path=file.path)
+        return to_tool_result(refusal)
     text = file.content_text
     refusal = offset_refusal(offset, path=path, length=len(text))
     if refusal is not None:
         return to_tool_result(refusal)
+    log("ok", logged_id=file.skill_id, logged_path=file.path)
     page = page_of(text, offset)
     rendered = page.text
     if page.next_offset is not None:

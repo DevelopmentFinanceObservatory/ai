@@ -37,6 +37,7 @@ from fastmcp.utilities.components import FastMCPComponent
 from fastmcp.utilities.versions import VersionSpec
 from pydantic import AnyUrl
 
+from data_mcp.skill_read_log import SkillReadKind, log_skill_read, refused_skill_id
 from data_mcp.skills_client import (
     SKILL_MAIN_FILE,
     SkillReadRefused,
@@ -92,6 +93,22 @@ def parse_skill_uri(uri: str) -> tuple[str, str] | None:
     return skill_id, path
 
 
+def _log_refused(refused: SkillReadRefused, *, skill_id: str, path: str) -> None:
+    log_skill_read(
+        via="resource",
+        kind=_kind(path),
+        outcome=refused.refusal.code,
+        skill_id=refused_skill_id(refused.refusal.code, skill_id),
+        path=None,
+    )
+
+
+def _kind(path: str) -> SkillReadKind:
+    if path == SKILL_MAIN_FILE:
+        return "load"
+    return "manifest" if path == MANIFEST_PATH else "file"
+
+
 def _refuse(refused: SkillReadRefused, *, skill_id: str, path: str) -> NoReturn:
     prose = refusal_prose(refused, skill_id=skill_id, path=path)
     raise ResourceError(f"{refused.refusal.code}: {prose}") from None
@@ -108,7 +125,15 @@ class _SkillFile(Resource):
         try:
             file = await fetch_skill_file(self.skill_id, self.path)
         except SkillReadRefused as refused:
+            _log_refused(refused, skill_id=self.skill_id, path=self.path)
             _refuse(refused, skill_id=self.skill_id, path=self.path)
+        log_skill_read(
+            via="resource",
+            kind=_kind(self.path),
+            outcome="ok",
+            skill_id=file.skill_id,
+            path=file.path,
+        )
         return ResourceResult([ResourceContent(file.content_text, mime_type=file.media_type)])
 
 
@@ -122,7 +147,15 @@ class _SkillManifest(Resource):
         try:
             skill = (await fetch_skill(self.skill_id)).value
         except SkillReadRefused as refused:
+            _log_refused(refused, skill_id=self.skill_id, path=MANIFEST_PATH)
             _refuse(refused, skill_id=self.skill_id, path=MANIFEST_PATH)
+        log_skill_read(
+            via="resource",
+            kind="manifest",
+            outcome="ok",
+            skill_id=skill.id,
+            path=MANIFEST_PATH,
+        )
         manifest = {
             "skill": skill.id,
             "files": [

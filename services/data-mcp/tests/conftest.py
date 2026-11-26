@@ -14,9 +14,12 @@ from here rather than redefining it.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from typing import Any
 
 import pytest
+from common.logging import JSON_FIELDS
 from common.materialisation import set_store as set_frame_store
 from data_mcp import client_holder, get_data_tool
 from data_mcp.definition_store import set_store
@@ -52,3 +55,18 @@ def _no_held_statistics() -> Any:
     clear_series_statistics_cache()
     yield
     clear_series_statistics_cache()
+
+
+@pytest.fixture
+def read_lines(caplog: pytest.LogCaptureFixture) -> Callable[[], list[dict[str, Any]]]:
+    """A function returning the JSON fields of each `skill.read` line logged so far."""
+    caplog.set_level(logging.INFO, logger="data_mcp.skill_read_log")
+
+    def lines() -> list[dict[str, Any]]:
+        return [
+            getattr(record, JSON_FIELDS)
+            for record in caplog.records
+            if record.name == "data_mcp.skill_read_log" and hasattr(record, JSON_FIELDS)
+        ]
+
+    return lines
