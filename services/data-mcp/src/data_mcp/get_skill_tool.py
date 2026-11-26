@@ -227,7 +227,7 @@ async def read_skill_file(
             digest=digest,
             current_digest=file.digest,
         )
-        log(refusal.code, logged_id=file.skill_id, logged_path=file.path)
+        log(refusal.code, logged_id=file.skill_id, logged_path=None)
         return to_tool_result(refusal)
     text = file.content_text
     refusal = offset_refusal(offset, path=path, length=len(text))

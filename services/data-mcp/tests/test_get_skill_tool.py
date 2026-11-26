@@ -533,7 +533,7 @@ async def test_a_refused_unresolved_read_logs_null_skill_id_and_path(
     assert (line["skill_id"], line["path"]) == (None, None)
 
 
-async def test_a_refusal_after_the_fetch_keeps_the_resolved_skill_id_and_path(
+async def test_a_stale_digest_at_offset_zero_logs_the_skill_id_and_a_null_path(
     read_lines: Callable[[], list[dict[str, Any]]],
 ) -> None:
     await _read(
@@ -544,7 +544,7 @@ async def test_a_refusal_after_the_fetch_keeps_the_resolved_skill_id_and_path(
 
     [line] = read_lines()
     assert line["outcome"] == "upstream_version_changed"
-    assert (line["skill_id"], line["path"]) == (SKILL_ID, _CORE)
+    assert (line["skill_id"], line["path"]) == (SKILL_ID, None)
 
 
 async def test_a_file_the_skill_lacks_logs_the_skill_id_and_a_null_path(

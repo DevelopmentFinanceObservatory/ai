@@ -28,11 +28,14 @@ type SkillReadKind = Literal["load", "manifest", "file"]
 def refused_skill_id(code: str, skill_id: str) -> str | None:
     """The `skill_id` a refused read logs; its `path` is always `None`.
 
-    `skill_resource_not_found` means the Skills API found the skill but not
-    the file, so it keeps the id. Any other refusal logs none, since the id
-    is caller text the API did not confirm.
+    `skill_resource_not_found` and `upstream_version_changed` mean the Skills
+    API found the skill but the caller got no file content, so they keep the
+    id. Any other refusal logs none, since the id is caller text the API did
+    not confirm.
     """
-    return skill_id if code == ToolErrorCode.SKILL_RESOURCE_NOT_FOUND else None
+    if code in (ToolErrorCode.SKILL_RESOURCE_NOT_FOUND, ToolErrorCode.UPSTREAM_VERSION_CHANGED):
+        return skill_id
+    return None
 
 
 def _on_loopback() -> bool:

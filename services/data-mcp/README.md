@@ -114,7 +114,7 @@ Returns a `ToolResult` with the following items.
 Each logical skill read writes one INFO line from the `data_mcp.skill_read_log` logger. The JSON fields are:
 
 - `event`: `skill.read`.
-- `skill_id` and `path`: the skill and file the Skills API served, `SKILL.md` for a load and `_manifest` for a manifest read. Both are set when the API served the file; `skill_id` alone is set on `skill_resource_not_found`; both are null on every other refusal, since a refused id or path is caller text the API did not confirm.
+- `skill_id` and `path`: the skill and file the Skills API served, `SKILL.md` for a load and `_manifest` for a manifest read. Both are set when the API served the file; `skill_id` alone is set on `skill_resource_not_found` and `upstream_version_changed`, where the skill exists but the caller received no file; both are null on every other refusal, since a refused id or path is caller text the API did not confirm.
 - `kind`: `load` for `get_skill` without a path, `skills/get` and `SKILL.md`; `manifest` for a `skill://{id}/_manifest` resource read; `file` for any other path, including `_manifest` passed to the tool.
 - `outcome`: `ok`, or the refusal code.
 - `surface`: `studio` when `common.mcp_telemetry.is_loopback_request()` holds, else `external`.
