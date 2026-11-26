@@ -150,6 +150,7 @@ from compiler.shapes import (
     retrieved_with_a_fixed_end,
     rolls,
     shapes_for,
+    sum_unstated,
     unsummable_axes,
 )
 from compiler.sources import (
@@ -790,9 +791,23 @@ class _Build:
 
         `stat_var_reading` reads a family summed by the rule only when every
         open axis is summable, but the plan may ask for `sum` over any family;
-        `get_data` would refuse that retrieval `rollup_not_summable`.
+        `get_data` would refuse that retrieval `rollup_not_summable`. A family
+        with no open axis is summable only where its source states the mint
+        adds its components (`sum_unstated`), so one stating neither is refused
+        too.
         """
         if source.stat_var_reading is not StatVarReading.SUM:
+            return
+        if sum_unstated(source):
+            self._issue(
+                CompileIssueCode.FAMILY_UNSUMMABLE,
+                f"requirement {requirement.id!r} reads source {source.spec_id}'s family summed "
+                "(stat_vars='sum'), but the source states no axis its StatVars vary along and "
+                "no sum of its components, so they cannot be summed; read a measure whose "
+                "source binds one StatVar, or read this one separately (stat_vars='separate')",
+                operation_id=operation.id,
+                requirement_id=requirement.id,
+            )
             return
         axes = unsummable_axes(source)
         if not axes:
