@@ -141,8 +141,9 @@ def studio_graph(
     """The Studio turn's graph (`turn_graph`) with every node built.
 
     `orchestrate` runs `orchestrator` on the model `model` builds for each
-    run, reading a `full` turn's carried conversation from `carried`, with `tools`, the functions the agent was built on, among which
+    run, with `tools`, the functions the agent was built on, among which
     `seed` finds the `fetch` a chip's data comes through (`chip_fetch`).
+    A `full` turn's orchestrator reads its carried conversation from `carried`.
     `planner` drafts plans at `planner` and revises them at `switch`.
     `executor` is the recorder the nodes' own calls run through.
     `tool_surface` is the servers `execute` runs an approved workflow

@@ -121,8 +121,8 @@ async def test_a_plan_hand_off_leaves_on_the_plan_edge_with_the_action(
         brief="rank donors", asks=["the top 5"]
     )
     assert ORCHESTRATOR_PENDING_KEY not in run.cursor.state
-    # This graph has no `plan_start`, so the plan edge ends the turn, and a
-    # closed turn has no run to resume: its closing write drops the
+    # This graph has no `plan_start`, so the plan edge ends the turn. A
+    # closed turn has no run to resume, and its closing write drops the
     # conversation the hand-off kept (`harness.turn.store.WAITING_HISTORY_KEY`).
     # The next test reads it across a pause.
     assert ORCHESTRATOR_HISTORY_KEY not in run.cursor.state

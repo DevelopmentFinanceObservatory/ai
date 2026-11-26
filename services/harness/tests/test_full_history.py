@@ -1,5 +1,5 @@
-"""The `full` history arm: a follow-up turn's orchestrator opens on the previous
-turn's conversation whole. And `STUDIO_HISTORY=split`, which gives each
+"""The `full` history arm, where a follow-up turn's orchestrator opens on the
+previous turn's conversation whole, and `STUDIO_HISTORY=split`, which gives each
 conversation the arm a hash of its id assigns and stores.
 
 Turn N's first request must extend turn N-1's last request byte for byte, the
@@ -11,10 +11,10 @@ through the conversation store first.
 
 `_FULL_ID` and `_DIGEST_ID` are conversation ids `split` assigns the `full`
 and the `digest` arm at the default share; `test_the_chosen_ids_hash_into_their_arms`
-holds them to it. Under `split` a test that reads the process setting at any
-site but the turn's begin would run both on `digest`, so the split tests drive
-whole turns over the routes and read the requests, the spans and the
-`studio.turn` lines.
+holds them to it. The split tests drive whole turns over the routes and read
+the requests, the spans and the `studio.turn` lines, since a code path that
+took the arm from the process setting, which reads `split`, would run both
+conversations on `digest` and only whole turns show it.
 """
 
 from __future__ import annotations
@@ -292,7 +292,7 @@ async def test_no_closed_cursor_holds_a_carried_conversation_and_none_is_rewritt
 async def test_a_follow_up_whose_carried_conversation_changed_since_its_claim_opens_from_the_digest(
     pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The claim names the stored conversation by its hash; one the
+    """The claim names the stored conversation by its hash. One the
     orchestrator reads under another hash, as one stored after the claim,
     resets the chain `unloadable` and the turn opens from the digest."""
     app, model = orchestrator_app(
@@ -544,7 +544,7 @@ def test_split_assigns_the_full_arm_to_about_the_share_and_by_the_salted_hash(
     share: float,
 ) -> None:
     """The arm is `full` where the first 8 bytes of sha256("studio_history:" +
-    id), over 2**64, fall below the share; over 2,000 ids the `full` count is
+    id), over 2**64, fall below the share. Over 2,000 ids the `full` count is
     within four standard deviations of the share, and the same id always
     gets the same arm."""
     ids = [f"conversation-{index}" for index in range(2_000)]
@@ -621,7 +621,7 @@ def test_begin_turn_reads_no_environment_and_runs_digest_when_named_no_setting(
 async def test_a_turn_begins_under_the_setting_the_app_read_at_startup(
     pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The app reads `STUDIO_HISTORY` once, as it is built; a later change
+    """The app reads `STUDIO_HISTORY` once, as it is built. A later change
     of the environment reaches no turn."""
     monkeypatch.setenv("STUDIO_HISTORY", " Split ")
     monkeypatch.setenv("STUDIO_HISTORY_FULL_SHARE", "1")
@@ -653,7 +653,7 @@ async def test_a_split_conversation_on_the_full_arm_extends_its_previous_turn(
     """Under `split`, a conversation assigned `full` carries its conversation
     into the follow-up, which extends turn 1's last request. With the process
     setting changed between the turns, turn 2 runs on a second app over the
-    same database: the arm stored on turn 1 still decides (a share of 0
+    same database. The arm stored on turn 1 decides (a share of 0
     would assign `digest` afresh), and a forced `full` keeps the chain."""
     monkeypatch.setenv("STUDIO_HISTORY", "split")
     app, model = orchestrator_app(
@@ -683,7 +683,7 @@ async def test_a_split_conversation_on_the_full_arm_extends_its_previous_turn(
 async def test_a_forced_digest_opens_a_full_arm_conversation_from_the_digest_and_keeps_its_arm(
     pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Rollback: under `STUDIO_HISTORY=digest` a conversation assigned `full`
+    """Under a rollback to `STUDIO_HISTORY=digest`, a conversation assigned `full`
     opens from the digest, and its stored arm stays. Back under `split` it
     is `full` again, on a fresh chain, since the digest turn carried none.
     Each setting runs on an app of its own, as a restart reads it."""
@@ -897,7 +897,7 @@ def _response(input_tokens: int, output_tokens: int) -> ModelResponse:
     ("responses", "tokens"),
     [
         # A final response the harness wrote, a bound's closing sentence,
-        # reports nothing; the call before it sizes the conversation.
+        # reports nothing. The call before it sizes the conversation.
         pytest.param([(9_000, 40), (12_000, 60), (0, 0)], 12_060, id="harness-final"),
         pytest.param([(0, 0)], None, id="none-reported"),
     ],
@@ -1097,7 +1097,7 @@ def test_only_a_turn_that_answered_with_a_carry_is_recorded_as_close_failed(
 ) -> None:
     """`record_closed_turn` records a turn whose closing write failed. Only a
     turn whose orchestrator answered with a conversation to carry
-    (`ORCHESTRATOR_CARRIES_KEY`) leaves the `close_failed` marker; a `done`
+    (`ORCHESTRATOR_CARRIES_KEY`) leaves the `close_failed` marker. A `done`
     turn that carried nothing, such as one whose plan card was set aside,
     leaves none, so the next turn reads `previous_turn_carried_none`."""
     conversation = ConversationState(conversation_id="conv-close")

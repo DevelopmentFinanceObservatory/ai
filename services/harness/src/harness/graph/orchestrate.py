@@ -240,7 +240,7 @@ def _carried_opening(
 ) -> StoredHistory | None:
     """The conversation `ref` names, read from `carried`, or None when this
     instance holds no state for the conversation (`not_in_process`) or the
-    stored one is another or no longer loads as a `StoredHistory`
+    stored one is another conversation or does not load as a `StoredHistory`
     (`unloadable`). Then the turn opens from the whole digest, and its state
     records the reset (`ORCHESTRATOR_CHAIN_RESET_KEY`)."""
     stored = carried(ctx.key)
@@ -267,12 +267,12 @@ def carried_record(history: StoredHistory, *, model_name: str) -> dict[str, Any]
     """`history`, written by `model_name`, as the conversation keeps it for
     the next turn (`harness.studio_state.ConversationState.turn_carried`):
     the `StoredHistory` JSON text, so a JSONB column cannot reorder its keys,
-    the model's name, and as `tokens` the
-    largest input plus output tokens any of its responses reported, which the
-    next turn holds to `harness.studio_state.CARRIED_HISTORY_TOKEN_CAP`. A
-    request holds every message before it, so the largest call is the size of
-    the conversation as last sent. A final response the harness wrote, a
-    bound's closing sentence say, reports none, so it does not count. `tokens`
+    the model's name, and as `tokens` the largest input plus output tokens any
+    of its responses reported, which the next turn holds to
+    `harness.studio_state.CARRIED_HISTORY_TOKEN_CAP`. A request holds every
+    message before it, so the largest call is the size of the conversation as
+    last sent. A final response the harness wrote, such as a bound's closing
+    sentence, reports none, so it does not count. `tokens`
     is None when no response reported any, which the next turn reads as a
     conversation it cannot size (`ConversationState.carried_opening`)."""
     reported = [

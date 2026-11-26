@@ -51,7 +51,7 @@ DEFAULT_EDIT_THINKING_LEVEL: ThinkingLevelName = "LOW"
 # so the follow-up's first request extends the previous turn's last one
 # (`harness.studio_state.ConversationState.carried_opening`).
 type StudioHistory = Literal["digest", "full"]
-# `STUDIO_HISTORY`: one arm for every turn, or `split`, which gives each
+# `STUDIO_HISTORY` names one arm for every turn, or `split`, which gives each
 # conversation the arm stored with it, assigned on its first turn under `split`
 # (`harness.studio_state.history_arm`).
 type StudioHistorySetting = Literal["digest", "full", "split"]
@@ -87,8 +87,8 @@ class HistorySettings(BaseServiceSettings):
         return value
 
 
-# `STUDIO_HISTORY=digest`, built without reading the environment: the history a
-# turn begins under when its caller names none
+# `STUDIO_HISTORY=digest`, built without reading the environment. It is the
+# history a turn begins under when its caller names none
 # (`harness.studio_state.ConversationState.begin_turn`).
 DIGEST_HISTORY = HistorySettings.model_construct(
     studio_history="digest", studio_history_full_share=DEFAULT_STUDIO_HISTORY_FULL_SHARE

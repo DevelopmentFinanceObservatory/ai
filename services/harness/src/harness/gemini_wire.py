@@ -263,7 +263,7 @@ class GeminiStream:
                     span.set_attribute(_ERROR, type(exc).__name__)
                 # The model billed what its chunks reported before the cut, a
                 # Stop, a lost lease, the caller closing the stream at a chunk
-                # or a failure mid-stream; an attempt cut before any chunk
+                # or a failure mid-stream. An attempt cut before any chunk
                 # reported none.
                 note_model_usage(relay.usage, model=model, role=self.role)
                 record_usage(span, _added(spent, relay.usage))

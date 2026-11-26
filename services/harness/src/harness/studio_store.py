@@ -303,7 +303,7 @@ def _assign_changed(
     other value when it is not the same object. A field `live` changed
     meanwhile and `work` did not keeps `live`'s value. A `TurnUsage`, which
     `_shallow_copy` copies, counts as changed when it compares unequal too.
-    Its spec uses add: `live` keeps the specs it noted since the copy was
+    Spec uses add. `live` keeps the specs it noted since the copy was
     taken beside `work`'s, since a spec use is noted on the live state while
     a canvas write works on its copy."""
     for f in dataclasses.fields(ConversationState):

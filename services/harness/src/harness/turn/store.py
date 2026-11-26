@@ -1405,7 +1405,7 @@ async def _close_on(
 ) -> Cursor:
     """`finish_on`'s close after its fence, recording `segment_id` as the
     writer (`None` for `close_unleased_on`). The state written, `state` or
-    else the stored state `cursor` holds, drops `_OPEN_TURN_KEYS`; a stored
+    else the stored state `cursor` holds, drops `_OPEN_TURN_KEYS`. A stored
     state that holds none of them is left as it is."""
     held = state if state is not None else cursor.state
     if any(key in held for key in _OPEN_TURN_KEYS):

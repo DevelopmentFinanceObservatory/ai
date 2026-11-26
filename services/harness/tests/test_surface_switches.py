@@ -527,9 +527,8 @@ async def test_each_model_call_s_span_names_the_surface_it_was_sent(
     exported_spans: InMemorySpanExporter,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The span names the history arm of the turn that sent the call, and the
-    process setting none: outside a turn it names `digest` whatever
-    `STUDIO_HISTORY` says."""
+    """The span takes the history arm from the turn that sent the call.
+    Outside a turn it names `digest` whatever `STUDIO_HISTORY` says."""
     monkeypatch.setenv("STUDIO_HISTORY", "full")
     current_history.set(history)
     set_studio_surface(surface)

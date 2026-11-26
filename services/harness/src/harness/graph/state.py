@@ -246,7 +246,7 @@ class TurnInput(BaseModel):
     conversation's one stored copy (`harness.studio_state.ConversationState.
     carried_history`) by reference, and holds the conversation digest's tail
     without its `turns` as `conversation_tail`, which the orchestrator reads
-    in place of `conversation_digest`; the planner still reads the digest.
+    in place of `conversation_digest`; the planner reads the digest.
     `history` is absent from the dumped inputs when `digest`, and the other
     two when unset."""
 

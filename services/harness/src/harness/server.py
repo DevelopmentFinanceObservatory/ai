@@ -517,7 +517,7 @@ def create_app(
     # planner reads as it is built (`harness.planner_adapter.PlannerAdapter`).
     init_telemetry(service_name=SERVICE_NAME)
     resolved_settings = settings or Settings()
-    # Read once: an unknown value or a share outside [0, 1] refuses startup,
+    # Read once. An unknown value or a share outside [0, 1] refuses startup,
     # and every turn begins under this one reading (`StudioRunner.history`).
     history = HistorySettings()
     model_name = resolved_model_name(resolved_settings.model_name)

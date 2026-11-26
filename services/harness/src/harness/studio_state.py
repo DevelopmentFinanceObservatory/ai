@@ -791,7 +791,7 @@ class ConversationState:
     # (`harness.graph.orchestrate.carried_record`), set by the Studio
     # translator from the `answered` edge's output once the write that closed
     # the turn committed, and taken by `close_turn`. Not durable, and no
-    # cursor holds it: each segment starts with none, so a turn carries only
+    # cursor holds it. Each segment starts with none, so a turn carries only
     # what its own orchestrator closed on in this process.
     turn_carried: dict[str, Any] | None = None
     turn_recorded: bool = False
@@ -1022,11 +1022,11 @@ class ConversationState:
         `StoredHistory` JSON text and the conversation digest's tail, its
         `total_turns` without the `turns` list. None opens a fresh chain from
         the whole digest: on a first turn, or, logged with its reason, when
-        the previous turn closed with no conversation to carry (an error, a
-        Stop, a pause left unanswered, an Edit Card turn, a reply the harness
-        wrote, a `digest` turn: `previous_turn_carried_none`), when the turn
-        closed `done` and its closing write failed (`close_failed`,
-        `mark_carry_lost`), when another
+        the previous turn closed with no conversation to carry
+        (`previous_turn_carried_none`), as after an error, a Stop, a pause
+        left unanswered, an Edit Card turn, a reply the harness wrote or a
+        `digest` turn, when the turn closed `done` and its closing write
+        failed (`close_failed`, `mark_carry_lost`), when another
         model wrote it (`model_changed`), since its thought signatures are
         that model's, when no call in it reported usage (`no_usage`), when
         its largest call reported more than `CARRIED_HISTORY_TOKEN_CAP`
@@ -1676,9 +1676,9 @@ def make_carried_history(store: StudioStore) -> Any:
     """The callable the `orchestrate` node reads a `full` turn's carried
     conversation through (`harness.graph.orchestrate.CarriedSource`): the
     stored `ConversationState.carried_history` of the conversation the turn's
-    key names, as this instance holds it, with no database access: an empty
-    mapping when it stores none, and None when this instance holds no state
-    for the conversation."""
+    key names, as this instance holds it, with no database access. It returns
+    an empty mapping when the conversation stores none, and None when this
+    instance holds no state for it."""
 
     def carried_history(key: TurnKey) -> dict[str, Any] | None:
         conversation = store.current(key.principal, key.conversation_id)

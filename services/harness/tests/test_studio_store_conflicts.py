@@ -216,7 +216,7 @@ async def test_a_claim_racing_a_live_owners_renewal_is_refused(
 
 
 def test_a_canvas_write_keeps_the_spec_uses_its_turn_noted_meanwhile() -> None:
-    """A canvas write commits its copy's turn usage; a spec use the live state
+    """A canvas write commits its copy's turn usage. A spec use the live state
     noted while the copy was out is kept beside the copy's own."""
     live = ConversationState(conversation_id="conv-usage")
     live.turn_usage = TurnUsage(trace_id="tr_1", fetched_specs=["spec_a"])

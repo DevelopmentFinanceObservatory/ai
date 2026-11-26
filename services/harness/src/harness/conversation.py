@@ -92,7 +92,7 @@ class TurnHistory(NamedTuple):
     mode: Literal["split", "forced"] | None
 
 
-# The current Studio turn's history arm; `None` outside a Studio turn.
+# The current Studio turn's history arm, `None` outside a Studio turn.
 current_history: ContextVar[TurnHistory | None] = ContextVar("studio_history", default=None)
 
 
@@ -111,8 +111,8 @@ class ModelCall(NamedTuple):
 
 
 # Where the current Studio turn hears each model call it makes, set by
-# `harness.studio` for each request that runs a turn; `None` outside one, where
-# nothing is heard.
+# `harness.studio` for each request that runs a turn. It is `None` outside one,
+# where nothing is heard.
 current_model_usage: ContextVar[Callable[[ModelCall], None] | None] = ContextVar(
     "studio_model_usage", default=None
 )
