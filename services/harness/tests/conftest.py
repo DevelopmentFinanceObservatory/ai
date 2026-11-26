@@ -14,10 +14,10 @@ literal in every test would repeat those pairings.
 
 The autouse fixtures run every test with the studio shared secret unset, and
 reset `common.auth`'s process-wide bearer-token policy after every test.
-`Settings` reads the repository's `.env`, so a developer who has set
-`STUDIO_API_TOKEN` there would otherwise have every test request's bearer
-token refused. The environment variable takes precedence over the env file,
-and a blank value is the setting unset.
+A developer who has set `STUDIO_API_TOKEN` in the shell would otherwise have
+every test request's bearer token refused. A blank value is the setting unset.
+No `.env` file reaches `Settings`, since the root conftest's `_isolate_dotenv`
+chdirs every test into an empty `tmp_path`.
 
 The workspace-root `conftest.py` carries the same `common.auth` reset, but
 `services/harness/pyproject.toml` sets `[tool.pytest.ini_options]`, which
@@ -97,6 +97,8 @@ from harness.conversation import (
     current_turn_id,
 )
 from harness.db.migrate import apply_pending
+from harness.settings import Settings
+from harness.surface import FLASH_SURFACE, HYDROGEN_SURFACE, set_studio_surface
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from planner.plan import (
     AggregateRequirement,
@@ -112,6 +114,7 @@ from planner.plan import (
     SpecId,
     Unit,
 )
+from planner.settings import AgentSettings
 from planner.workflow import ResolvedEntity, SelectedSource
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -238,6 +241,48 @@ def _no_owed_work_left() -> Iterator[None]:
         with contextlib.suppress(RuntimeError):
             task.cancel()
     turn_loop._OWED_WORK.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_studio_surface(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """`harness.surface` holds one surface per process, so a surface a test
+    sets, directly or through `create_app` or an eval's studio, must not reach a
+    later test. The next `studio_surface()` resolves it again from settings.
+
+    Every test also starts with `MODEL_NAME` and `PLANNER_MODEL_NAME` set to the
+    code defaults, so a shell that sets either cannot change the surface a test
+    that pins none gets. The root conftest's `_isolate_dotenv` chdirs every test
+    into an empty `tmp_path`, so no `.env` file reaches `Settings`.
+    Autouse fixtures run before the others, so `flash_studio`,
+    `hydrogen_studio` and a test's own `setenv` still win.
+    """
+    monkeypatch.setenv("MODEL_NAME", Settings.model_fields["model_name"].default)
+    monkeypatch.setenv(
+        "PLANNER_MODEL_NAME", AgentSettings.model_fields["planner_model_name"].default
+    )
+    yield
+    set_studio_surface(None)
+
+
+@pytest.fixture
+def flash_studio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the test as a Studio on `gemini-3.8-flash`: both model settings name
+    it and the process surface is Flash's. The recorded orchestrator and planner
+    requests pin Flash's bytes, which a change to the default model must leave
+    alone."""
+    monkeypatch.setenv("MODEL_NAME", "gemini-3.8-flash")
+    monkeypatch.setenv("PLANNER_MODEL_NAME", "gemini-3.8-flash")
+    set_studio_surface(FLASH_SURFACE)
+
+
+@pytest.fixture
+def hydrogen_studio(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the test as a Studio on `gemini-4-hydrogen`, the default model, named
+    explicitly so a shell that sets either model setting cannot move what the
+    test measures."""
+    monkeypatch.setenv("MODEL_NAME", "gemini-4-hydrogen")
+    monkeypatch.setenv("PLANNER_MODEL_NAME", "gemini-4-hydrogen")
+    set_studio_surface(HYDROGEN_SURFACE)
 
 
 @pytest.fixture(autouse=True)

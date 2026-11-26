@@ -61,7 +61,6 @@ _USAGE = usage_metadata(prompt=120, cached=40, candidates=9, thoughts=4)
 _ACCEPTED = {"outcome": "ok", "status": "ready", "summary": "Aid to Ghana."}
 _REFUSED = {"outcome": "refused", "code": "plan_invalid", "message": "Pin a source."}
 _ROUNDS_KEY = "planner:plan_rounds"
-_PLAN_JSON = scripted_plan(_QUESTION, spec_id=None).model_dump_json()
 
 
 # --- The tools the planner serves ----------------------------------------------------
@@ -96,7 +95,7 @@ def _propose(*answers: dict[str, Any]) -> ToolSpec:
         call.state[_ROUNDS_KEY] = call.state.get(_ROUNDS_KEY, 0) + 1
         answer = left.pop(0)
         if answer["outcome"] == "ok":
-            call.state[PLAN_STATE_KEY] = _PLAN_JSON
+            call.state[PLAN_STATE_KEY] = scripted_plan(_QUESTION, spec_id=None).model_dump_json()
             end_run()
         return answer
 

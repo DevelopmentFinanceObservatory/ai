@@ -30,6 +30,7 @@ from harness.prefix_cache import PrefixCache, prefix_key
 from harness.scripted import _compiled_proposal, instruction_text
 from harness.sentences import StopCode
 from harness.settings import Settings
+from harness.surface import ModelNameRefusedError
 from harness.turn_budget import TurnBudget
 from harness.turn_events import PLANNER_ASK
 from planner.call import PlannerCall
@@ -161,7 +162,9 @@ async def test_a_planned_turns_config_is_sent_in_wire_order(
     the stored config, field for field and list for list in the order sent, and
     keys the prefix cache with the stored key. Equal keys alone would not show
     the order, since the key sorts. The stored config is compared as the text it
-    dumps to, which keeps its order."""
+    dumps to, which keeps its order. Only a model that takes an explicit cache
+    sends a create, so the create is recorded on Flash."""
+    request.getfixturevalue("flash_studio" if cached else "hydrogen_studio")
     surface = FixtureSurface(schemas=[])
     specs = _proposals()(adapter_specs(surface=surface, translate=build_translate(surface=surface)))
     caches = _Caches()
@@ -201,7 +204,7 @@ async def test_a_planned_turns_config_is_sent_in_wire_order(
 
 
 def test_the_planner_refuses_a_model_that_is_not_gemini() -> None:
-    with pytest.raises(ValueError, match="Gemini model only"):
+    with pytest.raises(ModelNameRefusedError, match="PLANNER_MODEL_NAME"):
         PlannerAdapter(
             settings=Settings(),
             agent_settings=AgentSettings(planner_model_name="claude-3-5-sonnet"),
@@ -275,7 +278,7 @@ def test_the_planner_refuses_a_model_that_would_call_vertex_ai(
 
 @pytest.mark.parametrize(
     ("model_name", "refused"),
-    [("claude-3-5-sonnet", ValueError), (_VERTEX_MODEL, RuntimeError)],
+    [("claude-3-5-sonnet", ModelNameRefusedError), (_VERTEX_MODEL, RuntimeError)],
     ids=["not-gemini", "vertex-resource-path"],
 )
 def test_the_planners_model_is_refused_before_the_adapter_builds_anything(

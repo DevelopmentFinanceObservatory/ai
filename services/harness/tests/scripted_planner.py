@@ -13,7 +13,6 @@ from typing import Any
 from compiler.surface import FixtureSurface, ToolSurface
 from harness.planner_adapter import PlannerAdapter
 from harness.settings import Settings
-from planner.settings import AgentSettings
 from planner.tool_spec import ToolSpec
 from translator.tool import Translate, build_translate
 
@@ -23,7 +22,6 @@ from .scripted_genai import ScriptedGenai
 # Maps the planner's tool specs to the specs it serves.
 type Tools = Callable[[Sequence[ToolSpec]], Sequence[ToolSpec]]
 
-MODEL = AgentSettings().planner_model_name
 # Gemini signs the first function call of a response it thought before.
 SIGNED = b"scripted-signature"
 

@@ -173,6 +173,9 @@ from .test_keep_question import _Turn as _KeepTurn
 from .test_keep_question import paused_on_keep
 from .test_planner_adapter import _NO_DATA_SEARCH_RESPONSE, _gdp_plan
 
+# The budget guards the prompts that ship, which are Hydrogen's (`hydrogen_studio`).
+pytestmark = pytest.mark.usefixtures("hydrogen_studio")
+
 # The root conftest.py chdirs every test into a tmp_path, so this must be absolute.
 _BASELINE_PATH = Path(__file__).resolve().parent / "context_baseline.json"
 
@@ -185,11 +188,11 @@ _REGENERATE = "just context-baseline"
 
 # The planner's system instruction: the role, the tool protocol, the closing
 # rules, the skills paragraph and the translating paragraph, assembled by
-# `planner.instruction.planner_instruction`. Measured 20,575 with the skill tools and
-# translation attached. The margin is 1.6% and covers a hand edit of
+# `planner.instruction.planner_instruction`. Measured 17,559 with the skill tools and
+# translation attached. The margin is 1.7% and covers a hand edit of
 # model-facing wording, since these paragraphs are rewritten for model
 # behaviour a sentence at a time.
-PLANNER_SYSTEM_INSTRUCTION_CEILING = 20_900
+PLANNER_SYSTEM_INSTRUCTION_CEILING = 17_850
 
 # Every planner tool declaration together measures 41,507 (`propose_plan` 38,513 and
 # 2,994 across the smaller ones). The margin is 1.2%.

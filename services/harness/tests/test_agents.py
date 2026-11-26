@@ -134,7 +134,7 @@ async def test_defaults_to_the_pinned_model() -> None:
     """Covers the branch that reads `AgentSettings` when no settings are passed."""
     scripted = ScriptedGenai([])
 
-    assert (await _first_request(_adapter(scripted), scripted)).model == "gemini-3.8-flash"
+    assert (await _first_request(_adapter(scripted), scripted)).model == "gemini-4-hydrogen"
 
 
 def test_build_tool_surface_covers_data_and_analysis_mcp_by_name() -> None:

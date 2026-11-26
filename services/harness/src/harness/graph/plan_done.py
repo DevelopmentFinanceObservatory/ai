@@ -64,6 +64,7 @@ from harness.graph.state import (
     stored_sequence,
 )
 from harness.sentences import DECLINE_REASONS, failure_cause, failure_sentence
+from harness.surface import studio_surface
 from harness.turn.node import Next, Node, NodeCtx
 from harness.turn_records import AlignedBasis, PlanAsk, PlanRecord, aligned_basis
 
@@ -900,6 +901,21 @@ def _aligned_bases(state: SessionState) -> dict[str, AlignedBasis]:
     return bases
 
 
+def _refusal_step() -> str:
+    """What the orchestrator does after the planner refused, worded for
+    the process's surface (`harness.surface`)."""
+    if studio_surface().variant == "flash":
+        return (
+            "Answer with search and fetch where you can, and say plainly what could not be "
+            "calculated."
+        )
+    return (
+        "Fetch the series the question rests on, by the spec_ids search returned, and "
+        "chart them labelled as what they are; then say which calculation could not be "
+        "made."
+    )
+
+
 def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEvent]:
     """The `plan_done` node, describing each final frame through `executor`
     and deciding the delivery of a run completed in `run_ledger`."""
@@ -1056,8 +1072,7 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                 # The refusal's code, which words the failed step the user sees.
                 failure={"code": node_input.get("code")},
                 text="The planner could not make a plan: "
-                f"{str(node_input['text'])[:_HAND_BACK_CAP]}\n{computed}Answer with search "
-                "and fetch where you can, and say plainly what could not be calculated." + after,
+                f"{str(node_input['text'])[:_HAND_BACK_CAP]}\n{computed}{_refusal_step()}" + after,
                 body={**listing, **amendments},
             )
             return Next("next", refused.model_dump(mode="json"))

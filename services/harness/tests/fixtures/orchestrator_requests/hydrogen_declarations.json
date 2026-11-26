@@ -1,0 +1,943 @@
+{
+  "search": {
+    "description": "Search DFO's data per measure asked; returns spec_ids or candidates. With share_of, variable names the numerator alone.",
+    "name": "search",
+    "parameters_json_schema": {
+      "$defs": {
+        "SearchEntity": {
+          "additionalProperties": false,
+          "description": "Places or parties, each with its role as spoken.",
+          "properties": {
+            "text": {
+              "description": "The entity as spoken, e.g. 'France'.",
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "Text",
+              "type": "string"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Flow side: 'from' donor, 'to' recipient; 'creditor', 'debtor' for debt.",
+              "title": "Role"
+            },
+            "members": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "True to ask for each member of a set of places.",
+              "title": "Members"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Full name when text is ambiguous; not with dcid.",
+              "title": "Name"
+            },
+            "dcid": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Candidate dcid from a refusal; not with name.",
+              "title": "Dcid"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "title": "SearchEntity",
+          "type": "object"
+        },
+        "SearchOperation": {
+          "additionalProperties": false,
+          "description": "What the question computes over this part.",
+          "properties": {
+            "verb": {
+              "description": "What the question asks to compute.",
+              "enum": [
+                "rank",
+                "aggregate",
+                "growth",
+                "share_of",
+                "explain",
+                "forecast",
+                "report"
+              ],
+              "title": "Verb",
+              "type": "string"
+            },
+            "phrase": {
+              "description": "User's wording, e.g. 'top 5'. With share_of, variable names the numerator alone.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Phrase",
+              "type": "string"
+            },
+            "over": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "place",
+                    "origin",
+                    "destination",
+                    "category",
+                    "year"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "origin: donors, creditors; destination: recipients, debtors; else no flow side.",
+              "title": "Over"
+            },
+            "target_year": {
+              "anyOf": [
+                {
+                  "maximum": 2200,
+                  "minimum": 1000,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The year a forecast projects to.",
+              "title": "Target Year"
+            }
+          },
+          "required": [
+            "verb",
+            "phrase"
+          ],
+          "title": "SearchOperation",
+          "type": "object"
+        },
+        "SearchPart": {
+          "additionalProperties": false,
+          "description": "One measured variable the question asks for.",
+          "properties": {
+            "variable": {
+              "description": "What is measured, in the user's words.",
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Variable",
+              "type": "string"
+            },
+            "entities": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/SearchEntity"
+                  },
+                  "maxItems": 16,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Places or parties, each with its role as spoken.",
+              "title": "Entities"
+            },
+            "time": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "'YYYY', 'YYYY to YYYY', 'since YYYY', 'between YYYY and the latest' or 'latest'.",
+              "title": "Time"
+            },
+            "unit": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Unit or price basis the user stated, if any.",
+              "title": "Unit"
+            },
+            "open_roles": {
+              "anyOf": [
+                {
+                  "items": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 2,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Side to list by member, e.g. ['creditor']; none for a total or a named side.",
+              "title": "Open Roles"
+            },
+            "operations": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/SearchOperation"
+                  },
+                  "maxItems": 8,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "What the question computes over this part.",
+              "title": "Operations"
+            },
+            "sources": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/SearchSource"
+                  },
+                  "maxItems": 8,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Publishers or datasets the user named.",
+              "title": "Sources"
+            },
+            "source_code": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Indicator code, e.g. 'DT.TDS.DEGG.CD'.",
+              "title": "Source Code"
+            },
+            "separate": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "True on each part of a comparison.",
+              "title": "Separate"
+            }
+          },
+          "required": [
+            "variable"
+          ],
+          "title": "SearchPart",
+          "type": "object"
+        },
+        "SearchSource": {
+          "additionalProperties": false,
+          "description": "Publishers or datasets the user named.",
+          "properties": {
+            "text": {
+              "description": "The source as the user said it, e.g. 'IDS'.",
+              "maxLength": 120,
+              "minLength": 1,
+              "title": "Text",
+              "type": "string"
+            },
+            "ref": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Chosen candidate's ref from source_ambiguous.",
+              "title": "Ref"
+            },
+            "exclude": {
+              "default": false,
+              "description": "True when the user asks to leave it out.",
+              "title": "Exclude",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "title": "SearchSource",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "parts": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/SearchPart"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parts"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        }
+      },
+      "title": "searchParams",
+      "type": "object"
+    }
+  },
+  "fetch": {
+    "description": "Retrieve the data behind a spec_id a search returned, as frames to chart.",
+    "name": "fetch",
+    "parameters_json_schema": {
+      "$defs": {
+        "Breakdown": {
+          "additionalProperties": false,
+          "description": "One code axis to total by, at one level.",
+          "properties": {
+            "code_system": {
+              "description": "Code system, e.g. \"crsPurpose\".",
+              "minLength": 1,
+              "title": "Code System",
+              "type": "string"
+            },
+            "level": {
+              "description": "Hierarchy depth; 0 is the top level.",
+              "minimum": 0,
+              "title": "Level",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "code_system",
+            "level"
+          ],
+          "title": "Breakdown",
+          "type": "object"
+        },
+        "FetchScope": {
+          "additionalProperties": false,
+          "description": "Replaces searched entities, window or facets.",
+          "properties": {
+            "entities": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Role -> names, e.g. {\"recipient\": [\"Togo\"]}.",
+              "title": "Entities"
+            },
+            "window": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "e.g. {\"kind\": \"range\", \"start_year\": 2015}.",
+              "title": "Window"
+            },
+            "facets": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Axis -> {\"ref\": \"...\"}, e.g. provenance.",
+              "title": "Facets"
+            }
+          },
+          "title": "FetchScope",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "spec_id": {
+          "title": "Spec Id",
+          "type": "string"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FetchScope"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "stat_vars": {
+          "anyOf": [
+            {
+              "enum": [
+                "sum",
+                "separate"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stat Vars"
+        },
+        "breakdown": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Breakdown"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "spec_id"
+      ],
+      "title": "fetchParams",
+      "type": "object"
+    }
+  },
+  "make_charts": {
+    "description": "Draw charts on the user's canvas from frames a fetch or plan returned, with the figures to state.",
+    "name": "make_charts",
+    "parameters_json_schema": {
+      "$defs": {
+        "Chart": {
+          "description": "One chart from a fetched or planned frame.",
+          "properties": {
+            "frame": {
+              "description": "Id of a frame returned this turn.",
+              "title": "Frame",
+              "type": "string"
+            },
+            "type": {
+              "description": "line_chart: a series over time, or up to 8 places over time as one chart with the place dimension listing them; bar_chart: places or categories compared at one period; stat_card: one headline value; table: the detail. A chart shows every period its frame covers. A frame whose rows all cover one period (a collapsed window such as 2020/2024) has no run of periods to draw as a line: show it as a bar_chart, a table or a stat_card. A facet dimension (provenance, unit, measurementMethod) holding several values in the frame's view is bound to one of them in select_json, whatever the type.",
+              "enum": [
+                "line_chart",
+                "bar_chart",
+                "stat_card",
+                "table"
+              ],
+              "title": "Type",
+              "type": "string"
+            },
+            "title": {
+              "description": "what the chart shows, with no period or year: 'Aid to Kenya by donor'. make_charts adds the period the card shows, and refuses a title naming a year the frame covers",
+              "title": "Title",
+              "type": "string"
+            },
+            "latest_periods": {
+              "anyOf": [
+                {
+                  "maximum": 200,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Show the N latest periods, e.g. 5.",
+              "title": "Latest Periods"
+            },
+            "select_json": {
+              "description": "a JSON object binding the frame's view to the series to draw. Each key is a dimension the view lists, and its value one value the view lists for it, or on one dimension a list of them: {\"observationAbout\": [\"country/GHA\", \"country/TGO\"]}, {\"financingRecipient\": \"country/MWI\"}. Bind every dimension the view lists with more than one value to one value, except the one dimension the chart compares, which you leave unbound (one series per value) or list. {} is accepted only when the view lists a single dimension with more than one value. A refusal names the dimensions still to bind: send the select again with each bound to a value the view lists. A line_chart draws at most 8 series, and a bar_chart or a table at most 24, a table fewer when its rows over the periods it covers would pass 2,000. When the compared dimension holds more than that, leave it unbound: the chart is cut for display to the largest at one period, and its title says how many and when. A cut chart shows; it does not answer which are largest, which needs a ranking calculated. Do not list a subset you chose to stand in for the largest. A chart with latest_periods, or over a frame whose view says rolling, is not cut: list its members from a ranking you asked for, at most as many as the chart draws.",
+              "title": "Select Json",
+              "type": "string"
+            },
+            "order_by_value": {
+              "default": false,
+              "description": "True to draw largest first.",
+              "title": "Order By Value",
+              "type": "boolean"
+            },
+            "state_values_for": {
+              "description": "Series the user asked to be told a value of.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 24,
+              "title": "State Values For",
+              "type": "array"
+            },
+            "state_span": {
+              "default": false,
+              "description": "True to return first and last values.",
+              "title": "State Span",
+              "type": "boolean"
+            },
+            "state_period": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "One earlier period to return values at.",
+              "title": "State Period"
+            }
+          },
+          "required": [
+            "frame",
+            "type",
+            "title",
+            "select_json"
+          ],
+          "title": "Chart",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "charts": {
+          "items": {
+            "$ref": "#/$defs/Chart"
+          },
+          "title": "Charts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "charts"
+      ],
+      "title": "make_chartsParams",
+      "type": "object"
+    }
+  },
+  "ask_user": {
+    "description": "Ask the user one to three questions with likely answers, and end your turn after calling it.",
+    "name": "ask_user",
+    "parameters_json_schema": {
+      "$defs": {
+        "AskOption": {
+          "description": "Likely answers; empty for a unit question.",
+          "properties": {
+            "label": {
+              "description": "The answer as the user reads it.",
+              "title": "Label",
+              "type": "string"
+            },
+            "spec_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The candidate's spec_id, for a candidate answer.",
+              "title": "Spec Id"
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "title": "AskOption",
+          "type": "object"
+        },
+        "AskQuestion": {
+          "description": "One question with the answers it offers.",
+          "properties": {
+            "question": {
+              "description": "The question as the user reads it.",
+              "title": "Question",
+              "type": "string"
+            },
+            "options": {
+              "description": "Likely answers; empty for a unit question.",
+              "items": {
+                "$ref": "#/$defs/AskOption"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "unit_of": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Spec_id of the part whose unit is asked.",
+              "title": "Unit Of"
+            },
+            "prices": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "current",
+                    "constant"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Prices a skill prefers, on a unit question.",
+              "title": "Prices"
+            },
+            "multi_select": {
+              "default": false,
+              "description": "True when several answers can hold together.",
+              "title": "Multi Select",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "title": "AskQuestion",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "questions": {
+          "items": {
+            "$ref": "#/$defs/AskQuestion"
+          },
+          "title": "Questions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "title": "ask_userParams",
+      "type": "object"
+    }
+  },
+  "plan": {
+    "description": "Hand a question whose answer needs a calculation to the planner; the user approves the plan before it runs.",
+    "name": "plan",
+    "parameters_json_schema": {
+      "$defs": {
+        "AskedOutput": {
+          "description": "One output the user asked for; every open side search goes in its by or over.",
+          "properties": {
+            "text": {
+              "description": "The output in the user's terms, one line.",
+              "title": "Text",
+              "type": "string"
+            },
+            "by": {
+              "default": [],
+              "description": "Parties listed one by one, e.g. ['creditor']; [] for a total; not also in over.",
+              "items": {
+                "enum": [
+                  "donor",
+                  "recipient",
+                  "creditor",
+                  "debtor",
+                  "exporter",
+                  "importer"
+                ],
+                "type": "string"
+              },
+              "title": "By",
+              "type": "array"
+            },
+            "over": {
+              "default": [],
+              "description": "Parties totalled across, e.g. ['donor']; a share's whole totals its open side.",
+              "items": {
+                "enum": [
+                  "donor",
+                  "recipient",
+                  "creditor",
+                  "debtor",
+                  "exporter",
+                  "importer"
+                ],
+                "type": "string"
+              },
+              "title": "Over",
+              "type": "array"
+            },
+            "across_years": {
+              "default": false,
+              "description": "True for one figure across years the user named; false per year.",
+              "title": "Across Years",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "title": "AskedOutput",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "brief": {
+          "title": "Brief",
+          "type": "string"
+        },
+        "asks": {
+          "items": {
+            "$ref": "#/$defs/AskedOutput"
+          },
+          "title": "Asks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "brief",
+        "asks"
+      ],
+      "title": "planParams",
+      "type": "object"
+    }
+  },
+  "get_skill": {
+    "description": "Load a skill a search result named, or one of its files, a page at a time.",
+    "name": "get_skill",
+    "parameters_json_schema": {
+      "properties": {
+        "skill_id": {
+          "description": "Id of a skill a search result named.",
+          "title": "Skill Id",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A file path as the skill lists it.",
+          "title": "Path"
+        },
+        "offset": {
+          "default": 0,
+          "description": "Page start: 0 or a closing line's offset.",
+          "title": "Offset",
+          "type": "integer"
+        },
+        "digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The digest a closing line names.",
+          "title": "Digest"
+        }
+      },
+      "required": [
+        "skill_id"
+      ],
+      "title": "get_skillParams",
+      "type": "object"
+    }
+  },
+  "explain_dfo": {
+    "description": "Describe what DFO is and what this assistant can do, with DFO's catalogue counts.",
+    "name": "explain_dfo"
+  },
+  "recall": {
+    "description": "Read back in full an earlier turn's plan records or search readings, or the conversation's canvas cards.",
+    "name": "recall",
+    "parameters_json_schema": {
+      "$defs": {
+        "RecallPart": {
+          "enum": [
+            "plan",
+            "readings",
+            "canvas"
+          ],
+          "type": "string"
+        }
+      },
+      "properties": {
+        "part": {
+          "$ref": "#/$defs/RecallPart"
+        },
+        "turn": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn"
+        },
+        "component_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Component Id"
+        }
+      },
+      "required": [
+        "part"
+      ],
+      "title": "recallParams",
+      "type": "object"
+    }
+  },
+  "remove_cards": {
+    "description": "Take cards off the user's canvas; pinned cards stay and come back as kept_pinned.",
+    "name": "remove_cards",
+    "parameters_json_schema": {
+      "properties": {
+        "component_ids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Component Ids"
+        },
+        "all_cards": {
+          "default": false,
+          "title": "All Cards",
+          "type": "boolean"
+        }
+      },
+      "title": "remove_cardsParams",
+      "type": "object"
+    }
+  }
+}

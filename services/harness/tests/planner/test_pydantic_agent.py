@@ -307,7 +307,9 @@ async def _first_request(surface: ToolSurface) -> Request:
     return request
 
 
-# One row, kept so the stored expectation keeps the name `skill-tool`.
+# One row, kept so the stored expectation keeps the name `skill-tool`. Its config
+# is the one `planner/test_recorded_requests.py` stores, Flash's (`flash_studio`).
+@pytest.mark.usefixtures("flash_studio")
 @pytest.mark.parametrize("surface", [_surface()], ids=["skill-tool"])
 async def test_the_first_request_holds_the_question_the_brief_and_the_tool_declarations(
     surface: ToolSurface, request: pytest.FixtureRequest

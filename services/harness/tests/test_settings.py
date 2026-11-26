@@ -95,11 +95,11 @@ def test_reads_from_env(monkeypatch) -> None:
     assert settings.database_url == "postgresql://db/harness"
 
 
-def test_inherits_base_service_settings_fields() -> None:
+def test_defaults_the_inherited_port_and_its_own_model() -> None:
     settings = Settings()
 
     assert settings.port == 8080
-    assert settings.model_name == "gemini-3.8-flash"
+    assert settings.model_name == "gemini-4-hydrogen"
 
 
 def test_a_blank_studio_api_token_is_unset(monkeypatch) -> None:

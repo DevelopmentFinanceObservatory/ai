@@ -46,7 +46,7 @@ refuses, since it would bypass all of the above.
 
 Each call's span, Pydantic AI's `chat <model>`, is current while the call runs
 and carries the usage Langfuse reads from a GenAI span, which Pydantic AI
-leaves out (`_record_usage`). That is the reasoning tokens and the usage
+leaves out (`record_usage`). That is the reasoning tokens and the usage
 Langfuse derives from such a span, set outright so that the usage details
 Pydantic AI adds are not summed into the call's total. A turn put in
 place of a request no attempt was sent for is no model call, so its span is
@@ -55,7 +55,10 @@ it ended, whether or not Gemini reported usage for it: the finish reason
 Gemini gave (`_FINISH_REASON`, `none` when the stream carried none), or the
 class of the exception the call raised (`_ERROR`). Pydantic AI's own
 `gen_ai.response.finish_reasons` maps several of Gemini's reasons onto one
-and leaves out a response that carried none.
+and leaves out a response that carried none. Each span also names the model
+surface the call was sent (`harness.surface.surface_fingerprint`). Those are
+the process's instruction set and tool descriptions, and short hashes of the
+system instruction and the declarations as sent.
 """
 
 from __future__ import annotations
@@ -75,6 +78,7 @@ from pydantic_ai.exceptions import ModelAPIError
 
 from harness.prefix_cache import CACHE_GONE_CODES, PrefixCache, against_cache
 from harness.sentences import StopCode
+from harness.surface import studio_surface, surface_fingerprint
 from harness.turn_budget import Chunk, Closing, TurnBudget, bounded_by
 
 logger = logging.getLogger(__name__)
@@ -222,6 +226,8 @@ class GeminiStream:
         self, *, model: str, contents: Any, config: types.GenerateContentConfig
     ) -> AsyncGenerator[Chunk]:
         span = trace.get_current_span()
+        if span.is_recording():
+            span.set_attributes(surface_attributes(config))
         spent: Usage | None = None
         sent_any = False
         for attempt in range(_ATTEMPTS):
@@ -258,7 +264,7 @@ class GeminiStream:
             sent_any = sent_any or (relay.closing is None or relay.closing.sent)
             usage = relay.usage
             spent = _added(spent, usage)
-            _record_usage(span, spent)
+            record_usage(span, spent)
             replaced = (
                 self.after_response(relay.closed_by, usage)
                 if self.after_response is not None
@@ -403,7 +409,7 @@ def _id_less_calls(chunk: Chunk) -> list[types.FunctionCall]:
 
 
 def _added(spent: Usage | None, usage: Usage | None) -> Usage | None:
-    """The token counts `_record_usage` reads, summed over `spent` and `usage`."""
+    """The token counts `record_usage` reads, summed over `spent` and `usage`."""
     if spent is None or usage is None:
         return spent or usage
     counts = (
@@ -422,7 +428,25 @@ def _added(spent: Usage | None, usage: Usage | None) -> Usage | None:
     return total
 
 
-def _record_usage(span: trace.Span, usage: Usage | None) -> None:
+def surface_attributes(config: types.GenerateContentConfig) -> dict[str, str]:
+    """The surface attributes of a call sent `config`, in canonical form. They
+    hold the hash of its system instruction and of its declarations, each as the
+    SDK's JSON less unset fields, in the order sent."""
+    declarations = [
+        json.loads(declaration.model_dump_json(exclude_none=True))
+        for tool in config.tools or []
+        if isinstance(tool, types.Tool)
+        for declaration in tool.function_declarations or []
+    ]
+    instruction = config.system_instruction
+    return surface_fingerprint(
+        studio_surface(),
+        instruction=instruction if isinstance(instruction, str) else None,
+        declarations=json.dumps(declarations, ensure_ascii=False),
+    )
+
+
+def record_usage(span: trace.Span, usage: Usage | None) -> None:
     """Put `usage`, summed over a call's attempts (`_added`), on `span` as
     Langfuse reads it from a GenAI span.
 
@@ -701,6 +725,8 @@ __all__ = [
     "client_call_id",
     "in_canonical_form",
     "model_retry_options",
+    "record_usage",
     "resumed_over_output",
+    "surface_attributes",
     "wrapped_client",
 ]

@@ -24,7 +24,6 @@ from harness.prefix_cache import (
     CREATE_COOLDOWN_S,
     REFRESH_MARGIN_S,
     PrefixCache,
-    gemini_model_name,
 )
 
 MODEL = "gemini-3.8-flash"
@@ -406,30 +405,3 @@ async def test_a_request_with_no_instruction_or_tools_goes_uncached() -> None:
 
     assert found is None
     assert client.cache_calls.attempts == 0
-
-
-@pytest.mark.parametrize(
-    ("model_name", "sent"),
-    [
-        pytest.param("gemini-3.8-flash", "gemini-3.8-flash", id="gemini"),
-        pytest.param("gemma-4-31b-it", "gemma-4-31b-it", id="gemma-4"),
-        pytest.param("gemma-3-27b-it", None, id="gemma-3"),
-        pytest.param("openai/gpt-4o", None, id="litellm-path"),
-        pytest.param("claude-3-5-sonnet", None, id="claude"),
-        pytest.param("Gemini:gemini-3.8-flash", "gemini-3.8-flash", id="gemini-prefix"),
-        pytest.param("gemini:gemma-3-27b-it", "gemma-3-27b-it", id="gemini-prefix-any-name"),
-        pytest.param("openai:gemini-3.8-flash", None, id="other-prefix"),
-        pytest.param(
-            "projects/p/locations/l/endpoints/e",
-            "projects/p/locations/l/endpoints/e",
-            id="endpoint",
-        ),
-        pytest.param(
-            "projects/p/locations/l/publishers/google/models/gemini-3.8-flash",
-            "projects/p/locations/l/publishers/google/models/gemini-3.8-flash",
-            id="vertex-path",
-        ),
-    ],
-)
-def test_a_name_gemini_serves_is_sent_as_gemini_names_it(model_name: str, sent: str | None) -> None:
-    assert gemini_model_name(model_name) == sent
