@@ -306,6 +306,8 @@ async def test_a_follow_up_whose_carried_conversation_changed_since_its_claim_op
             return CarriedRef(turn=turn, sha256=hashlib.sha256(b"another").hexdigest())
 
     monkeypatch.setattr("harness.studio.CarriedRef", _Changed)
+    # Only this turn's lines: an earlier test can leave the logger at INFO.
+    caplog.clear()
     with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         await _turns(app, "And Uganda?")
 
@@ -337,6 +339,8 @@ async def test_a_follow_up_that_pauses_as_it_opens_logs_the_chain_reset_its_orch
             return CarriedRef(turn=turn, sha256=hashlib.sha256(b"another").hexdigest())
 
     monkeypatch.setattr("harness.studio.CarriedRef", _Changed)
+    # Only this turn's lines: an earlier test can leave the logger at INFO.
+    caplog.clear()
     with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         async with studio_client(app) as client:
             paused = await stream(client, "/api/studio/turn", turn_body("And Uganda?"))
@@ -957,6 +961,8 @@ async def test_a_carried_conversation_the_turn_cannot_extend_opens_from_the_dige
     await _edit_carried(pg_engine, CONVERSATION, edit)
     reloaded, model = orchestrator_app(_UGANDA, engine=pg_engine, history=full)
 
+    # Only this turn's lines: an earlier test can leave the logger at INFO.
+    caplog.clear()
     with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         async with studio_client(reloaded) as client:
             frames = await stream(client, "/api/studio/turn", turn_body("And Uganda?"))
