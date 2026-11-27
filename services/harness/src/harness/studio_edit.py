@@ -1376,7 +1376,15 @@ def _swapped(
     # The facets a later fetch of the card binds, which the next turn's model
     # reads with the rest of its `get_data` arguments.
     fetched_facets = bound_facets(card, blocks.get(card.spec_id)) if card is not None else None
-    changes = created.unit_change is not None or created.card_changes is not None
+    # The card is kept by what it can offer, whether or not Search's places
+    # door is on now: the door's state applies when an offer is read.
+    changes = card is not None and (
+        created.unit_change is not None
+        or card_changes(
+            card, blocks.get(card.spec_id), fact_summary=component.get("fact_summary"), places=True
+        )
+        is not None
+    )
     kept = card.as_json() if card is not None and changes else None
     runs = card_runs(component, lineage)
     if closed.shown:

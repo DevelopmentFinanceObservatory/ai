@@ -31,7 +31,7 @@ from harness.card_unit import UNIT_GONE_NOTE, ChangeMove, UnitCard
 from harness.chart_binding import LINE_CHART_MAX_VALUES
 from harness.conversation import current_conversation_id
 from harness.graph.state import frame_id_for
-from harness.place_options import ApisPlaceOptions
+from harness.place_options import PLACE_OPTIONS_TTL_S, ApisPlaceOptions, PlacesNotServedError
 from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceInput, ProvenanceStore
 from harness.studio_edit import _changed_title, _composed_title, _redrawn_intent
 from harness.studio_state import PLAN_LINK_KEY, DatabaseUnavailable
@@ -1170,12 +1170,13 @@ def test_a_changed_cards_title_is_built_from_its_parts(
 
 
 class _Places:
-    """Search's options door: the places of the kind each role binds, or a
-    refusal when `down`."""
+    """Search's options door: the places of the kind each role binds, a
+    failure when `down`, or a refusal of the posted places when `refuses`."""
 
-    def __init__(self, *, down: bool = False) -> None:
+    def __init__(self, *, down: bool = False, refuses: bool = False) -> None:
         self.asked: list[str] = []
         self.down = down
+        self.refuses = refuses
 
     async def __call__(
         self, *, identity: Mapping[str, Any], role: str
@@ -1184,6 +1185,8 @@ class _Places:
         self.asked.append(role)
         if self.down:
             raise LiveApisError(status=503, code=None, retryable=True)
+        if self.refuses:
+            raise LiveApisError(status=400, code="unsupported_peers_anchor_type", retryable=False)
         listed = {
             "destination": (("country/KEN", "Kenya"), ("country/UGA", "Uganda")),
             "origin": (("country/FRA", "France"), ("country/DEU", "Germany")),
@@ -1679,9 +1682,21 @@ async def test_the_places_a_role_can_change_to_are_read_when_asked(pg_engine: As
             _Places(down=True),
             (503, "transient_unavailable", "place_options_unavailable", "/role"),
         ),
+        (
+            {},
+            _Places(refuses=True),
+            (422, "constraint_violation", "change_not_offered", "/role"),
+        ),
         ({}, None, (503, "capability_unavailable", None, None)),
     ],
-    ids=["unknown-conversation", "card-gone", "role-not-offered", "door-down", "door-off"],
+    ids=[
+        "unknown-conversation",
+        "card-gone",
+        "role-not-offered",
+        "door-down",
+        "door-refuses",
+        "door-off",
+    ],
 )
 async def test_a_places_read_that_cannot_answer_is_refused(
     pg_engine: AsyncEngine,
@@ -1750,27 +1765,36 @@ async def test_an_apis_serving_no_options_door_stops_the_cards_offering_places(
     assert "window" in card["card_changes"]
 
 
+@pytest.mark.parametrize(
+    ("door", "answer"),
+    [
+        (_Places(down=True), (503, "transient_unavailable", "place_options_unavailable")),
+        (_Places(refuses=True), (422, "constraint_violation", "change_not_offered")),
+    ],
+    ids=["door-down", "door-refuses"],
+)
 async def test_a_change_of_places_whose_door_cannot_be_read_is_refused(
-    pg_engine: AsyncEngine,
+    pg_engine: AsyncEngine, door: _Places, answer: tuple[int, str, str]
 ) -> None:
     """The places a change names are checked against Search's list before
-    the stream, and a door that cannot be read refuses the change, to retry."""
+    the stream. A door that cannot be read refuses the change, to retry, and
+    one that refuses the card's places refuses it for good."""
     app = _changes_app(pg_engine)
     app.state.studio.place_options = _Places()
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
-        app.state.studio.place_options = _Places(down=True)
+        app.state.studio.place_options = door
         response = await client.post(
             "/api/studio/turn", json=_change_body("cmp_01unit0001", _SPEC, _UGANDA), headers=AUTH
         )
 
     body = response.json()
-    assert (response.status_code, body["error"], body["constraint_id"], body["pointer"]) == (
-        503,
-        "transient_unavailable",
-        "place_options_unavailable",
-        "/apply_change",
-    )
+    assert (
+        response.status_code,
+        body["error"],
+        body["constraint_id"],
+        body["pointer"],
+    ) == (*answer, "/apply_change")
     assert len(app.state.studio.store.current(PRINCIPAL, CONVERSATION).turns) == 1
 
 
@@ -1901,18 +1925,22 @@ async def test_a_change_that_cannot_apply_is_refused_before_the_stream_and_the_c
     assert [b.component_id for b in conversation.composition.blocks] == ["cmp_01unit0001"]
 
 
+@pytest.mark.parametrize("change", [_YEARS, _UGANDA], ids=["years", "places"])
 async def test_a_change_whose_data_comes_back_empty_leaves_the_card_and_its_offers(
-    pg_engine: AsyncEngine,
+    pg_engine: AsyncEngine, change: dict[str, Any]
 ) -> None:
-    """A retrieval that holds no rows for the new years is refused: no card is
-    written, and the card on the canvas keeps its offers."""
+    """A retrieval that holds no rows for the new years or places is refused:
+    no card is written, and the card on the canvas keeps its offers. Search
+    lists a place it cannot count coverage for, so a listed place can come
+    back empty."""
     app = _changes_app(pg_engine)
+    app.state.studio.place_options = _Places()
     changer = _Changer(rows=0)
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
         app.state.studio.recorder._executor = changer
         frames = await _stream(
-            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, change)
         )
         read = await client.get(
             "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 0}, headers=AUTH
@@ -2461,13 +2489,14 @@ def _togo_app(
     identity: Mapping[str, Any],
     labels: Mapping[str, str] | None = None,
     title: str = "Aid to Togo",
+    envelope: Mapping[str, Any] = _ENVELOPE,
 ) -> Any:
     return _app(
         search_call("aid from France to Togo"),
         fetch_call(_SPEC, stat_vars="sum", scope={"entities": {"recipient": ["Togo"]}}),
         make_charts_call(chart(frame_id_for(_TOGO_REF), type_=_TYPE, title="Aid to Togo")),
         text_part("Here is the card."),
-        resolver=CannedSearch(_ENVELOPE),
+        resolver=CannedSearch(dict(envelope)),
         executor=ScriptedExecutor(
             [
                 {"outcome": "ok", "frame_refs": [_TOGO_REF], "summary": "fetched"},
@@ -2649,6 +2678,96 @@ async def test_a_places_change_while_the_offers_are_stopped_is_capability_unavai
         (503, "capability_unavailable"),
         (503, "capability_unavailable"),
     ]
+
+
+def _places_only_app(pg_engine: AsyncEngine) -> Any:
+    """France's aid to Togo on a spec Search converts into no other unit, a
+    card whose one possible change is of its places."""
+    unconverted = copy.deepcopy(_ENVELOPE)
+    for key in ("price_bases", "unit_conversion"):
+        unconverted["parts"][0]["spec"]["resolved"].pop(key)
+    return _togo_app(pg_engine, _TOGO_IDENTITY, envelope=unconverted)
+
+
+async def _stop_offers(app: Any) -> list[float]:
+    """Stop `app`'s places offers, as a read meeting an apis with no options
+    door does, and return the clock that resumes them."""
+    now = [0.0]
+    reader = ApisPlaceOptions(
+        base_url="http://apis.test",
+        client=_NoDoorApis(),  # ty: ignore[invalid-argument-type] -- the two reads the reader makes
+        clock=lambda: now[0],
+    )
+    app.state.studio.place_options = reader
+    with pytest.raises(PlacesNotServedError):
+        await reader(identity=_BASE_IDENTITY, role="destination")
+    return now
+
+
+async def _offered_places(client: Any, since: int) -> dict[str, Any]:
+    """The `card_changes` of the one card the turn after `since` closed on."""
+    state = await client.get(
+        "/api/studio/state", params={"conversation_id": CONVERSATION, "since": since}, headers=AUTH
+    )
+    (card,) = state.json()["closed_since"][0]["cards"]
+    return card["card_changes"]
+
+
+async def test_a_card_drawn_while_the_offers_are_stopped_offers_places_once_they_resume(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A card whose one possible change is of its places, drawn while a
+    places read has stopped the offers, offers none then and its places once
+    the offers resume: what it can offer is stored from the card alone."""
+    app = _places_only_app(pg_engine)
+    now = await _stop_offers(app)
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Togo"))
+        now[0] = PLACE_OPTIONS_TTL_S + 1
+        app.state.studio.place_options = _Places()
+        offered = await _offered_places(client, 0)
+
+    assert "card_changes" not in _frame(first, "component.created")
+    assert [p["role"] for p in offered["places"]] == ["destination", "origin"]
+    assert "window" not in offered
+
+
+async def test_a_card_rebuilt_while_the_offers_are_stopped_offers_places_once_they_resume(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The same holds for a card Edit Card rebuilds in place of one."""
+    app = _places_only_app(pg_engine)
+    app.state.studio.edit_model = _Recreate()
+    app.state.studio.place_options = _Places()
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Togo"))
+        assert "places" in _frame(first, "component.created")["card_changes"]
+        now = await _stop_offers(app)
+
+        async def edit(*, tool: str, args: dict[str, Any], **_: Any) -> dict[str, Any]:
+            if tool == "describe_component":
+                return _described("cmp_01unit0001", _TOGO_REF, "Aid to Togo")
+            if tool == "write_component":
+                return _written(
+                    "cmp_01unit0009",
+                    _TOGO_REF,
+                    args["intent"]["title"],
+                    identity=_TOGO_IDENTITY,
+                    entity_labels={"country/TGO": "Togo"},
+                )
+            return {"outcome": "ok", "frame_refs": []}
+
+        app.state.studio.recorder._executor = edit
+        body = _turn_body("make it a table")
+        body["component_ref"] = {"component_id": "cmp_01unit0001", "revision": 1, "intent": "edit"}
+        rebuilt = await _stream(client, "/api/studio/turn", body)
+        now[0] = PLACE_OPTIONS_TTL_S + 1
+        app.state.studio.place_options = _Places()
+        offered = await _offered_places(client, 1)
+
+    assert _frame(rebuilt, "component.created")["replaces"] == "cmp_01unit0001"
+    assert "card_changes" not in _frame(rebuilt, "component.created")
+    assert [p["role"] for p in offered["places"]] == ["destination", "origin"]
 
 
 @pytest.mark.parametrize(

@@ -7,14 +7,26 @@ role's picker, and once more when a change of places is applied, to check
 every place it names is listed and to take their labels. Nothing is read
 when a card is drawn, and nothing is stored.
 
-Search's options door lists the places of the type the role binds
-(`POST /api/search/options`, `for: {role, scope: "peers"}`, read through
-`common.live_apis.LiveApisClient.read_entity_options`). It reads no model and
-answers from the posted identity, in about 0.3 to 0.6 s on the dev
-deployment. `read_role_places` waits at most `PLACE_OPTIONS_DEADLINE_S` and
-keeps at most `PLACE_OPTIONS_CAP` places, sorted by label. `ApisPlaceOptions` keeps a role's
-places for `PLACE_OPTIONS_TTL_S`, so a picker's read and the change applied
-from it make one call.
+Search's options door lists the places of the type the role binds that hold
+data in the years the card reads (`POST /api/search/options`,
+`for: {role, scope: "peers"}`, read through
+`common.live_apis.LiveApisClient.read_entity_options`, which asks for each
+place's coverage when the identity's `requested_window` is a range; under
+`all` or `latest` every listed place holds data in it). It reads no model and
+answers from the posted identity: on a local Search over the dev catalogue a
+first read of an identity took 0.25 to 1.3 s with coverage and 0.01 to 1.1 s
+without, and a repeat, which Search answers from its cache, about 10 ms. `read_role_places` waits
+at most `PLACE_OPTIONS_DEADLINE_S` and keeps at most `PLACE_OPTIONS_CAP`
+places, sorted by label. `ApisPlaceOptions` keeps a role's places for
+`PLACE_OPTIONS_TTL_S`, so a picker's read and the change applied from it
+make one call.
+
+Search lists the peers of a card's `observationAbout` places only when they
+share one place type, a country or a continent, so a card offers a change of
+that role only for such places (`peers_listable`). Search refuses any other
+request it cannot answer for the posted identity with a 400 or a 422, which
+`read_role_places` raises as `PlacesRefusedError`: asking again gets the same
+answer.
 
 Places are offered only where dfo-apis serves the door, learnt when it is
 read, as the stated-scope reader learns its own door
@@ -33,12 +45,13 @@ import json
 import logging
 import time
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from common.apis_auth import apis_auth_provider
 from common.live_apis import RESPONSE_INVALID, LiveApisClient, LiveApisError
+from common.place_type import PLACE_ROLE
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +65,12 @@ PLACE_OPTIONS_TTL_S = 60.0
 OPTIONS_DOOR = "options"
 # The status apis answers a route it does not serve with.
 _NOT_SERVED_STATUS = 404
+# The statuses Search refuses a request with that asking again cannot change:
+# its deterministic input refusals, such as `unsupported_peers_anchor_type`.
+_REFUSED_STATUSES = frozenset({400, 422})
+# The place types whose peers Search lists for `observationAbout`: the places
+# of that type under Earth.
+PEER_PLACE_TYPES = frozenset({"Country", "Continent"})
 
 
 class PlaceOptionsReader(Protocol):
@@ -70,6 +89,11 @@ class PlacesUnavailableError(Exception):
 class PlacesNotServedError(PlacesUnavailableError):
     """apis answered the options route 404 or outside its contract and its
     capabilities document lists no live `options` door."""
+
+
+class PlacesRefusedError(Exception):
+    """Search's options door refused the identity and role it was asked for
+    with a 400 or a 422, which it answers again for the same request."""
 
 
 @dataclass(frozen=True)
@@ -223,13 +247,24 @@ async def read_role_places(
 
     Raises:
         PlacesNotServedError: apis serves no options door (`ApisPlaceOptions`).
-        PlacesUnavailableError: the door refused, failed or missed the deadline.
+        PlacesRefusedError: the door refused the identity and role for good.
+        PlacesUnavailableError: the door failed or missed the deadline.
     """
     started = time.monotonic()
     try:
         async with asyncio.timeout(PLACE_OPTIONS_DEADLINE_S):
             listed, truncated = await reader(identity=identity, role=role)
     except (LiveApisError, OSError, TimeoutError) as exc:
+        if isinstance(exc, LiveApisError) and exc.status in _REFUSED_STATUSES:
+            logger.warning(
+                "places refused: conversation=%s component=%s role=%s status=%s code=%s",
+                conversation_id,
+                component_id,
+                role,
+                exc.status,
+                exc.code,
+            )
+            raise PlacesRefusedError(role) from exc
         logger.warning(
             "places not read: conversation=%s component=%s role=%s: %r",
             conversation_id,
@@ -249,6 +284,26 @@ async def read_role_places(
         places=tuple(ordered[:PLACE_OPTIONS_CAP]),
         truncated=truncated or len(listed) > PLACE_OPTIONS_CAP,
     )
+
+
+def peers_listable(role: str, refs: Iterable[str], block: Mapping[str, Any]) -> bool:
+    """Whether Search can list the places role `role` can change to from
+    `refs`, the places the card reads for it, typed by the `entity_type` its
+    Search block `block` states for each. Search lists the peers of
+    `observationAbout` places only when they share one type in
+    `PEER_PLACE_TYPES`. A place the block states no type for, one a scope or
+    an earlier change named, counts as any type, so the offer stays and
+    Search's refusal of a place it cannot list ends the change
+    (`PlacesRefusedError`). Every other role is listed whatever its places."""
+    if role != PLACE_ROLE:
+        return True
+    types = {
+        str(entity["ref"]): str(entity["entity_type"])
+        for entity in (block.get("resolved") or {}).get("entities") or ()
+        if isinstance(entity, Mapping) and entity.get("ref") and entity.get("entity_type")
+    }
+    known = {types[ref] for ref in refs if ref in types}
+    return len(known) <= 1 and known <= PEER_PLACE_TYPES
 
 
 def _label_key(label: str) -> str:

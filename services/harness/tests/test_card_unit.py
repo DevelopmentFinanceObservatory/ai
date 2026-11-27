@@ -371,6 +371,45 @@ def test_a_card_offers_the_places_it_draws_of_its_frame() -> None:
     assert card_unit._places_refusal(offer, both) is None
 
 
+@pytest.mark.parametrize(
+    ("types", "offered"),
+    [
+        (["Country", "Country"], True),
+        (["Continent"], True),
+        (["Country", None], True),
+        (["UNGeoRegion", "UNGeoRegion"], False),
+        (["Country", "Continent"], False),
+    ],
+    ids=["countries", "a-continent", "a-place-of-unknown-type", "regions", "mixed-types"],
+)
+def test_a_card_offers_its_subjects_places_only_where_search_lists_their_peers(
+    types: list[str | None], offered: bool
+) -> None:
+    """Search lists the peers of a card's `observationAbout` places only when
+    they share one type, a country or a continent, read from the types the
+    block states; a place of a type the block does not state is left to
+    Search."""
+    refs = [f"place/P{n}" for n in range(len(types))]
+    block = {
+        "spec_id": _SPEC,
+        "definition": {"spec_id": _SPEC, "identity": {"entities": {"observationAbout": refs}}},
+        "resolved": {
+            "entities": [
+                {"ref": ref, "label": f"Place {n}", "role": "observationAbout"}
+                | ({"entity_type": kind} if kind is not None else {})
+                for n, (ref, kind) in enumerate(zip(refs, types, strict=True))
+            ]
+        },
+    }
+    card = card_unit.UnitCard(spec_id=_SPEC, args={})
+
+    offer = card_unit.card_changes(card, block, fact_summary=None, places=True)
+
+    assert (offer is not None and [p.role for p in offer.places or ()]) == (
+        ["observationAbout"] if offered else False
+    )
+
+
 class _Door:
     """Search's places door: lists `listed` places, fails with `fail`, and
     with `stall` waits past the deadline."""

@@ -781,7 +781,14 @@ class LiveApisClient:
         """The places of the same kind Search lists for role `role` of
         `identity` (`POST /api/search/options`, `for: {role, scope: peers}`),
         each as `(ref, label)`, in the order Search lists them, and whether
-        Search capped the list (`truncated`). A listed entry whose value names
+        Search capped the list (`truncated`). Search lists every place with
+        data at any date, so when `identity`'s `requested_window` is a range
+        the call asks for each place's coverage (`include_coverage`), which
+        Search counts over that range, and a place whose coverage says it
+        holds no data there is left out; one listed with no coverage, which
+        Search answers when its coverage read fails, is kept. Under any other
+        window every listed place holds data in it, and the call asks for no
+        coverage, which costs a first read up to about 1 s more. A listed entry whose value names
         no ref is left out, and so is one outside the contract (an item or
         `value` that is no object, or a `ref` that is no object naming a ref
         with a text label), which is logged, so one bad entry leaves the rest
@@ -791,6 +798,8 @@ class LiveApisClient:
             LiveApisError: apis refused the call, or answered a body with no
                 `options.items` list (`response_invalid`).
         """
+        window = identity.get("requested_window")
+        ranged = isinstance(window, Mapping) and window.get("kind") == "range"
         response = await self._send(
             "POST",
             _SEARCH_OPTIONS_PATH,
@@ -798,6 +807,7 @@ class LiveApisClient:
                 "schema_version": 1,
                 "identity": dict(identity),
                 "for": {"role": role, "scope": "peers"},
+                "include_coverage": ranged,
             },
         )
         options = _json_object(response, "options answer").get("options")
@@ -808,6 +818,9 @@ class LiveApisClient:
         for index, item in enumerate(items):
             value = item.get("value") if isinstance(item, dict) else None
             if isinstance(value, dict) and value.get("ref") is None:
+                continue
+            coverage = item.get("coverage") if isinstance(item, dict) else None
+            if isinstance(coverage, dict) and coverage.get("has_data") is False:
                 continue
             ref: object = value.get("ref") if isinstance(value, dict) else None
             named = ref.get("ref") if isinstance(ref, dict) else None

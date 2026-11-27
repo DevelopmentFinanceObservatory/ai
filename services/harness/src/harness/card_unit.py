@@ -70,8 +70,10 @@ from harness.derived_frames import derived_recipe
 from harness.place_options import (
     PlaceOptionsReader,
     PlacesNotServedError,
+    PlacesRefusedError,
     PlacesUnavailableError,
     RolePlaces,
+    peers_listable,
     read_role_places,
 )
 from harness.provenance import CardLineage, ProvenanceInput, data_artifact
@@ -1368,6 +1370,7 @@ def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer
         if shown.get(role)
         and all(labels.get(ref) for ref in shown[role])
         and (most.get(role) is None or len(shown[role]) <= most[role])
+        and peers_listable(role, chosen_places(card, block).get(role) or (), block)
     ]
 
 
@@ -1628,7 +1631,8 @@ async def change_move(  # noqa: PLR0911 -- one refusal per way a change cannot a
     of places reads the places its role can change to from Search through
     `reader` (the places door, `None` when off), or takes them from `listed`
     when the route read them already, and is refused
-    `place_options_unavailable` when they cannot be read."""
+    `place_options_unavailable` when they cannot be read, and
+    `change_not_offered` when Search refuses to list them (a 400 or 422)."""
     held = changeable(
         conversation,
         pick.component_id,
@@ -1667,6 +1671,8 @@ async def change_move(  # noqa: PLR0911 -- one refusal per way a change cannot a
             )
         except PlacesNotServedError:
             return PLACES_NOT_SERVED, PLACES_UNREAD_NOTE
+        except PlacesRefusedError:
+            return "change_not_offered", "The places of this card cannot change."
         except PlacesUnavailableError:
             return "place_options_unavailable", PLACES_UNREAD_NOTE
     moved = _places_move(pick.component_id, title, card, block, offer, change, listed)

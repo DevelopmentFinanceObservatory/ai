@@ -2476,10 +2476,15 @@ class _Translator:
             component=component,
         )
         created.unit_change = card_unit_change(card, block)
+        fact_summary = component.get("fact_summary")
         created.card_changes = card_changes(
-            card, block, fact_summary=component.get("fact_summary"), places=self._places
+            card, block, fact_summary=fact_summary, places=self._places
         )
-        if created.unit_change is None and created.card_changes is None:
+        # The card is kept by what it can offer, whether or not Search's places
+        # door is on now: the door's state applies when an offer is read.
+        if created.unit_change is None and (
+            card_changes(card, block, fact_summary=fact_summary, places=True) is None
+        ):
             return None
         return card
 

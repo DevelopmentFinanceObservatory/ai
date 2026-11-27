@@ -750,14 +750,40 @@ async def test_read_stated_scopes_raises_a_refusal() -> None:
 # read_entity_options
 
 
-async def test_read_entity_options_posts_the_identity_and_role_and_reads_each_place() -> None:
-    identity = {"stat_var": "dcid:Aid", "entities": {"destination": ["country/KEN"]}}
+@pytest.mark.parametrize(
+    ("window", "coverage"),
+    [
+        ({"kind": "range", "start_year": 2015, "end_year": 2023}, True),
+        ({"kind": "all"}, False),
+        ({"kind": "latest"}, False),
+    ],
+    ids=["range", "all", "latest"],
+)
+async def test_read_entity_options_posts_the_identity_and_role_and_reads_each_place(
+    window: dict[str, Any], coverage: bool
+) -> None:
+    """Coverage is asked for under a range alone. A place whose coverage
+    holds no data in the window is left out, and one listed with no coverage
+    is kept."""
+    identity = {
+        "stat_var": "dcid:Aid",
+        "entities": {"destination": ["country/KEN"]},
+        "requested_window": window,
+    }
     answer = {
         "options": {
             "items": [
                 {"value": {"ref": {"ref": "country/KEN", "label": "Kenya"}}},
-                {"value": {"ref": {"ref": "country/UGA"}}},
+                {"value": {"ref": {"ref": "country/UGA"}}, "coverage": None},
                 {"value": {"text": "no ref"}},
+                {
+                    "value": {"ref": {"ref": "country/TZA", "label": "Tanzania"}},
+                    "coverage": {"kind": "exact", "has_data": False, "observation_count": 0},
+                },
+                {
+                    "value": {"ref": {"ref": "country/RWA", "label": "Rwanda"}},
+                    "coverage": {"kind": "exact", "has_data": True, "observation_count": 9},
+                },
             ],
             "truncated": True,
         }
@@ -773,8 +799,12 @@ async def test_read_entity_options_posts_the_identity_and_role_and_reads_each_pl
         "schema_version": 1,
         "identity": identity,
         "for": {"role": "destination", "scope": "peers"},
+        "include_coverage": coverage,
     }
-    assert listed == ((("country/KEN", "Kenya"), ("country/UGA", "country/UGA")), True)
+    assert listed == (
+        (("country/KEN", "Kenya"), ("country/UGA", "country/UGA"), ("country/RWA", "Rwanda")),
+        True,
+    )
 
 
 @pytest.mark.parametrize(

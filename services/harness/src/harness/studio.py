@@ -113,6 +113,7 @@ from harness.graph.state import (
 from harness.place_options import (
     PlaceOptionsReader,
     PlacesNotServedError,
+    PlacesRefusedError,
     PlacesUnavailableError,
     RolePlaces,
     places_offered,
@@ -4141,7 +4142,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         An unknown conversation answers 404 `not_found`; a card off the
         canvas or offering no change 422 `scope_choice_stale`, pointer
         `/component_id`; a role the card does not offer 422
-        `change_not_offered`, pointer `/role`; a door that fails or misses
+        `change_not_offered`, pointer `/role`, and so does a role whose
+        places Search refuses to list (a 400 or 422); a door that fails or misses
         its deadline 503 `transient_unavailable`
         (`place_options_unavailable`), to retry; and a deployment with the
         door off (`STUDIO_PLACE_OPTIONS=false`), or an apis learnt to serve
@@ -4175,6 +4177,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
         except PlacesNotServedError:
             return _places_not_served_response()
+        except PlacesRefusedError:
+            return _places_refusal(
+                "change_not_offered", "The places of this card cannot change.", pointer="/role"
+            )
         except PlacesUnavailableError:
             return _places_unavailable_response(PLACES_UNREAD_NOTE, pointer="/role")
         answer = PlacesOptions(
