@@ -785,14 +785,14 @@ class LiveApisClient:
         data at any date, so when `identity`'s `requested_window` is a range
         the call asks for each place's coverage (`include_coverage`), which
         Search counts over that range, and a place whose coverage says it
-        holds no data there is left out; one listed with no coverage, which
+        holds no data there is left out. One listed with no coverage, which
         Search answers when its coverage read fails, is kept. Under any other
-        window every listed place holds data in it, and the call asks for no
-        coverage, which costs a first read up to about 1 s more. A listed entry whose value names
-        no ref is left out, and so is one outside the contract (an item or
-        `value` that is no object, or a `ref` that is no object naming a ref
-        with a text label), which is logged, so one bad entry leaves the rest
-        of the list readable.
+        window every listed place holds data in it, so the call asks for no
+        coverage. Asking for it adds up to about 1 s to a first read. A listed
+        entry whose value names no ref is left out, and so is one outside the
+        contract (an item or `value` that is no object, or a `ref` that is no
+        object naming a ref with a text label), which is logged, so one bad
+        entry leaves the rest of the list readable.
 
         Raises:
             LiveApisError: apis refused the call, or answered a body with no

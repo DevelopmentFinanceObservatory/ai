@@ -1561,8 +1561,8 @@ async def test_a_change_keeps_the_facets_the_card_was_drawn_with(
     and the card stays. A retrieval whose series the data API continued with
     its source's estimates (`trace.continuations`) counts each such series
     under the method it continues, and a bound method stops the continuation,
-    so its fetch leaves the method to the data API, and the redraw is still
-    held to the method the card drew."""
+    so its fetch leaves the method to the data API, and the redraw is held to
+    the method the card drew all the same."""
     first_results = _first_results()
     first_results[-1] = _faceted(first_results[-1], _ELECTED)
     if continued:
@@ -1929,8 +1929,8 @@ async def test_a_change_that_cannot_apply_is_refused_before_the_stream_and_the_c
 async def test_a_change_whose_data_comes_back_empty_leaves_the_card_and_its_offers(
     pg_engine: AsyncEngine, change: dict[str, Any]
 ) -> None:
-    """A retrieval that holds no rows for the new years or places is refused:
-    no card is written, and the card on the canvas keeps its offers. Search
+    """A retrieval that holds no rows for the new years or places is refused.
+    No card is written, and the card on the canvas keeps its offers. Search
     lists a place it cannot count coverage for, so a listed place can come
     back empty."""
     app = _changes_app(pg_engine)
@@ -2725,7 +2725,7 @@ async def test_a_card_drawn_while_the_offers_are_stopped_offers_places_once_they
 ) -> None:
     """A card whose one possible change is of its places, drawn while a
     places read has stopped the offers, offers none then and its places once
-    the offers resume: what it can offer is stored from the card alone."""
+    the offers resume. What it can offer is stored from the card alone."""
     app = _places_only_app(pg_engine)
     now = await _stop_offers(app)
     async with _client(app) as client:
@@ -3692,7 +3692,7 @@ async def test_a_card_change_mark_reads_only_on_the_turn_it_was_written_for(
     pg_engine: AsyncEngine,
 ) -> None:
     """A card change marks its turn. A release that does not know the mark
-    then runs an ordinary turn: it merges only the keys it knows into the
+    then runs an ordinary turn. It merges only the keys it knows into the
     stored state, so the turn index moves on and the mark stays as written.
     The state read reports no card change on that later turn, and the
     change's own turn keeps it."""

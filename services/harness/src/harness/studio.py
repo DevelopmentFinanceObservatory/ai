@@ -4145,8 +4145,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         canvas or offering no change 422 `scope_choice_stale`, pointer
         `/component_id`; a role the card does not offer 422
         `change_not_offered`, pointer `/role`, and so does a role whose
-        places Search refuses to list (a 400 or 422); a door that fails or misses
-        its deadline 503 `transient_unavailable`
+        places Search refuses to list (a 400 or 422); a door that fails or
+        misses its deadline 503 `transient_unavailable`
         (`place_options_unavailable`), to retry; and a deployment with the
         door off (`STUDIO_PLACE_OPTIONS=false`), or an apis learnt to serve
         no options door (`harness.place_options.places_offered`), 503

@@ -1050,10 +1050,10 @@ class PlacesOptions(_WireModel):
 
 class CardChanges(_WireModel):
     """Set on a `component.created` or `component.revised` frame, and on a
-    stored card, whose card
-    draws one retrieval's own frame: the spec the card reads (`spec_id`, the
-    one `apply_change` names) and each change it offers besides its unit:
-    other years (`window`) and other places, one entry per role (`places`).
+    stored card, whose card draws one retrieval's own frame: the spec the
+    card reads (`spec_id`, the one `apply_change` names) and each change it
+    offers besides its unit: other years (`window`) and other places, one
+    entry per role (`places`).
     A member is absent when the card cannot change that axis."""
 
     spec_id: str = Field(min_length=1)

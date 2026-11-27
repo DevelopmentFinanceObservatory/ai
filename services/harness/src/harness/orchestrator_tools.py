@@ -2588,7 +2588,7 @@ def build_orchestrator_tools(
         key = _fetch_key(args, block)
         earlier = (call.state.get(_FETCHES_KEY) or {}).get(key)
         if earlier is not None:
-            # A plan may have returned these frames since; handed out by
+            # A plan may have returned these frames since. Handed out by
             # this fetch, they come from no plan step.
             forget_plan_steps(call.state, earlier.get("frames") or ())
             frames = stored_mapping(call.state, ORCHESTRATOR_FRAMES_KEY)

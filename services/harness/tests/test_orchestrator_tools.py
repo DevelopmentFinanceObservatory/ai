@@ -2359,7 +2359,7 @@ async def test_a_card_names_the_plan_step_its_frame_was_last_registered_from(
     )
 
     assert executor.landed_steps == [named, None]
-    # The second fetch read nothing again: it gave back the frames of the first.
+    # The second fetch read nothing again and gave back the frames of the first.
     assert [tool for tool, _ in executor.calls].count("get_data") == 1
 
 

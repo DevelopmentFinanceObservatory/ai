@@ -13,19 +13,19 @@ data in the years the card reads (`POST /api/search/options`,
 `common.live_apis.LiveApisClient.read_entity_options`, which asks for each
 place's coverage when the identity's `requested_window` is a range; under
 `all` or `latest` every listed place holds data in it). It reads no model and
-answers from the posted identity: on a local Search over the dev catalogue a
+answers from the posted identity. On a local Search over the dev catalogue a
 first read of an identity took 0.25 to 1.3 s with coverage and 0.01 to 1.1 s
-without, and a repeat, which Search answers from its cache, about 10 ms. `read_role_places` waits
-at most `PLACE_OPTIONS_DEADLINE_S` and keeps at most `PLACE_OPTIONS_CAP`
-places, sorted by label. `ApisPlaceOptions` keeps a role's places for
-`PLACE_OPTIONS_TTL_S`, so a picker's read and the change applied from it
-make one call.
+without, and a repeat, which Search answers from its cache, about 10 ms.
+`read_role_places` waits at most `PLACE_OPTIONS_DEADLINE_S` and keeps at most
+`PLACE_OPTIONS_CAP` places, sorted by label. `ApisPlaceOptions` keeps a
+role's places for `PLACE_OPTIONS_TTL_S`, so a picker's read and the change
+applied from it make one call.
 
 Search lists the peers of a card's `observationAbout` places only when they
 share one place type, a country or a continent, so a card offers a change of
 that role only for such places (`peers_listable`). Search refuses any other
 request it cannot answer for the posted identity with a 400 or a 422, which
-`read_role_places` raises as `PlacesRefusedError`: asking again gets the same
+`read_role_places` raises as `PlacesRefusedError`. Asking again gets the same
 answer.
 
 Places are offered only where dfo-apis serves the door, learnt when it is
@@ -65,11 +65,11 @@ PLACE_OPTIONS_TTL_S = 60.0
 OPTIONS_DOOR = "options"
 # The status apis answers a route it does not serve with.
 _NOT_SERVED_STATUS = 404
-# The statuses Search refuses a request with that asking again cannot change:
-# its deterministic input refusals, such as `unsupported_peers_anchor_type`.
+# The statuses of Search's deterministic input refusals, such as
+# `unsupported_peers_anchor_type`, which asking again cannot change.
 _REFUSED_STATUSES = frozenset({400, 422})
-# The place types whose peers Search lists for `observationAbout`: the places
-# of that type under Earth.
+# The place types whose peers Search lists for `observationAbout`, meaning the
+# places of that type under Earth.
 PEER_PLACE_TYPES = frozenset({"Country", "Continent"})
 
 

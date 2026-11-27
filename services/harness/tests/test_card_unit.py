@@ -387,7 +387,7 @@ def test_a_card_offers_its_subjects_places_only_where_search_lists_their_peers(
 ) -> None:
     """Search lists the peers of a card's `observationAbout` places only when
     they share one type, a country or a continent, read from the types the
-    block states; a place of a type the block does not state is left to
+    block states. A place of a type the block does not state is left to
     Search."""
     refs = [f"place/P{n}" for n in range(len(types))]
     block = {

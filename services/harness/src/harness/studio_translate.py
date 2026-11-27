@@ -195,8 +195,8 @@ logger = logging.getLogger(__name__)
 # cards rest on (`read_summed_frame`), read together. A recorded read of a
 # derived frame's manifest took 0.14 to 0.95 s. A card whose read misses it
 # is stored and sent as resting on no sum, with no `UnitCard`, so it offers
-# no years, places or unit change for as long as it stays on the canvas: no
-# later read builds one.
+# no years, places or unit change for as long as it stays on the canvas, since
+# no later read builds one.
 SUMMED_READ_DEADLINE_S = 4.0
 
 # The bound on a recorded refusal's `message` and on a running line's detail.
@@ -617,9 +617,9 @@ class _RecordingExecutor:
         `write_component` returns, with no `await` in between. Stamps `land`
         onto this call's own recorded write (matched by identity: the record
         whose result carries this exact `component` object) so
-        `_component_frames` can perform the landing later, at drain time,
-        and `plan_step`, the plan step the card's frame was registered from
-        (`harness.graph.state.frame_plan_step`), beside it.
+        `_component_frames` can perform the landing later, at drain time.
+        `plan_step`, the plan step the card's frame was registered from
+        (`harness.graph.state.frame_plan_step`), is stamped beside it.
         Never touches the conversation itself; a component with no matching
         record (this capability called directly, not through `__call__`
         first) leaves nothing to stamp and is silently a no-op."""
@@ -856,7 +856,7 @@ class _RecordingSurface:
         # feed names a plan step's line with it.
         self._step_labels: dict[str, dict[str, str]] = {}
         # The plan card's step each workflow step runs for, by conversation
-        # (`plan_display.card_steps`): an Activity line names it as its plan step.
+        # (`plan_display.card_steps`). An Activity line names it as its plan step.
         self._card_steps: dict[str, dict[str, str]] = {}
         # When each plan step's call in flight started, by (conversation,
         # step id). A call that returns or fails takes its entry with it
@@ -2552,7 +2552,7 @@ class _Translator:
             card, block, fact_summary=fact_summary, places=self._places
         )
         # The card is kept by what it can offer, whether or not Search's places
-        # door is on now: the door's state applies when an offer is read.
+        # door is on. The door's state applies when an offer is read.
         if created.unit_change is None and (
             card_changes(card, block, fact_summary=fact_summary, places=True) is None
         ):

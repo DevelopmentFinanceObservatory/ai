@@ -874,8 +874,8 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
             f"{_KEY_TURN_APPROVED}_{layer}": approved_added.get(layer, {})
             for layer in _ADDED_MEMBERS
         },
-        # Stamped with the turn it belongs to: a release that writes no map
-        # leaves the previous turn's in place (`_plan_frames_of`). An empty
+        # Stamped with the turn it belongs to, since a release that writes no
+        # map leaves the previous turn's in place (`_plan_frames_of`). An empty
         # map needs no stamp, so a new turn's index alone changes no key here.
         _KEY_TURN_PLAN_FRAMES: {
             _PLAN_FRAMES_TURN: state.turn_index,

@@ -4931,7 +4931,7 @@ async def test_a_chart_batch_reads_its_cards_sums_together_under_one_deadline(
 ) -> None:
     """A drain lands three cards, each of which may rest on a sum whose
     recipe is read before the batch goes out (`read_summed_frame`). The
-    reads run together: the first two finish only once both have started.
+    reads run together, and the first two finish only once both have started.
     The third never answers, and at the shared deadline its card goes out
     read as resting on no sum, so it offers no change."""
     current_conversation_id.set("c1")

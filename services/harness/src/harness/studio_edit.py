@@ -1377,7 +1377,7 @@ def _swapped(
     # reads with the rest of its `get_data` arguments.
     fetched_facets = bound_facets(card, blocks.get(card.spec_id)) if card is not None else None
     # The card is kept by what it can offer, whether or not Search's places
-    # door is on now: the door's state applies when an offer is read.
+    # door is on. The door's state applies when an offer is read.
     changes = card is not None and (
         created.unit_change is not None
         or card_changes(

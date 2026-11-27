@@ -1753,7 +1753,7 @@ def _places_move(
     if window is not None and window.single:
         # A card showing one value per series draws the latest year its
         # frame holds, so the new places are fetched at the year it shows
-        # and its title keeps: a place with none there holds no figures.
+        # and its title keeps it. A place with none there holds no figures.
         held = scope.get("window") or {}
         include = (
             {"include": held["include"]} if isinstance(held, Mapping) and "include" in held else {}
