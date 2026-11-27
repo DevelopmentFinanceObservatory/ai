@@ -2116,16 +2116,21 @@ async def test_a_card_showing_one_year_changes_place_at_that_year(
 ) -> None:
     """A key number for 2023 moved to Uganda fetches Uganda at 2023 alone, so
     the value drawn is the year its title keeps, whatever Uganda's latest
-    year is. Where Uganda holds no figures for 2023, the change ends as a
+    year is. The picker and the change read the places door over 2023 alone
+    too. Where Uganda holds no figures for 2023, the change ends as a
     retrieval with no figures, and the card keeps its slot and offers."""
     app = _one_year_app(pg_engine, 2023)
-    app.state.studio.place_options = _Places()
+    door = _Asked()
+    app.state.studio.place_options = door
     changer = _Changer(rows=rows)
     changer.title = "Aid to Kenya, 2023"
     changer.type = "stat_card"
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
         app.state.studio.recorder._executor = changer
+        picker = await client.get(
+            "/api/studio/places", params=_places_query(component_id="cmp_01unit0001"), headers=AUTH
+        )
         frames = await _stream(
             client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)
         )
@@ -2137,6 +2142,8 @@ async def test_a_card_showing_one_year_changes_place_at_that_year(
     (fetched,) = changer.fetched()
     window = {"kind": "range", "start_year": shown, "end_year": shown}
     assert fetched["scope"]["window"] == window
+    assert picker.status_code == 200
+    assert [i.get("requested_window") for i in door.identities] == [window] * 2
     if rows:
         created = _frame(frames, "component.created")
         assert created["card_changes"]["window"]["start_year"] == shown

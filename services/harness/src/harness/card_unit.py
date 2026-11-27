@@ -1289,7 +1289,9 @@ def _years_of(card: UnitCard, block: Mapping[str, Any]) -> tuple[int, int, list[
 def effective_identity(card: UnitCard, block: Mapping[str, Any]) -> dict[str, Any]:
     """The identity `card` reads: its block's, with the places and window its
     scope names in place of the block's own (`_SCOPE_REPLACES`' members), as
-    the data API reads `get_data`'s scope over it."""
+    the data API reads `get_data`'s scope over it. A card showing one value
+    per series whose scope names no window reads the year it draws
+    (`drawn_year`), the year a change of its places fetches."""
     identity = dict((block.get("definition") or {}).get("identity") or {})
     scoped = _scoped_entities(card)
     if scoped is not None:
@@ -1297,6 +1299,9 @@ def effective_identity(card: UnitCard, block: Mapping[str, Any]) -> dict[str, An
     window = (card.scope or {}).get("window")
     if isinstance(window, Mapping):
         identity["requested_window"] = dict(window)
+    elif card.single and card.drawn_year is not None:
+        year = card.drawn_year
+        identity["requested_window"] = {"kind": "range", "start_year": year, "end_year": year}
     return identity
 
 
