@@ -1301,9 +1301,9 @@ class _SegmentWork:
         return outcome, []
 
     def owed(self) -> list[BaseModel]:
-        """On a stream with `hold_removals`, the canvas update of a removal
-        no frame reported, held by the translator or marked on the
-        conversation; none otherwise (`_Translator.release_removal`)."""
+        """The canvas update of a removal no frame reported, held by the
+        translator or marked on the conversation, on a stream with
+        `hold_removals`, and nothing on any other (`_Translator.release_removal`)."""
         return [*self._translator.release_removal()]
 
     def fatal(self, error: BaseException) -> ErrorFrame:

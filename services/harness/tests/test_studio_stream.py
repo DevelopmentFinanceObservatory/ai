@@ -1140,7 +1140,7 @@ async def test_a_removal_goes_out_before_the_stream_ends_however_it_ends(
     events = [f["event"] for f in frames if f["event"] != "activity.step"]
     assert events == (["composition.updated", "error"] if remove else ["error"])
     if remove and answered:
-        # Held through the removal's answer, which the default sends ahead of.
+        # Held until after the removal's line closes, which the default precedes.
         assert _order(frames).index("composition.updated") > _order(frames).index(
             "remove_cards:complete"
         )
@@ -1215,11 +1215,11 @@ async def test_a_removal_then_a_drawing_streams_in_the_order_the_request_asks(
 ) -> None:
     """A turn removes a card, then draws one. Without `hold_removals` the
     canvas update goes out as the removal's answer is drained, ahead of the
-    removal's closing line, as the base branch sends it. With it, the update
-    waits for the drawing line and follows it. The abandoned turn fails the
-    drawing line. Without the member, a drive that raises before the
-    removal's answer sends no update and leaves the removal marked on the
-    conversation for the turn's next stream, as the base branch does."""
+    removal's closing line. With it, the update waits for the drawing line
+    and follows it. The abandoned turn fails the drawing line. Without the
+    member, a drive that raises before the removal's answer sends no update
+    and leaves the removal marked on the conversation for the turn's next
+    stream."""
     current_conversation_id.set(CONVERSATION)
     conversation = _two_cards()
     work = _RemovingSegment(
@@ -1266,8 +1266,8 @@ async def test_a_client_that_leaves_has_its_removal_reported_once_whatever_the_n
     removal's answer was translated, and a later stream picks the turn up
     and draws. A segment with `hold_removals` reports the removal as it
     ends, on the stream the client left. One without it reports it when its
-    answer is drained, and otherwise leaves it marked on the conversation,
-    as the base branch does. The later stream, whose first response draws,
+    answer is drained, and otherwise leaves it marked on the conversation.
+    The later stream, whose first response draws,
     then reports it at its first drain, ahead of the drawing line, without
     the member, and holds it to right after that line with it. Across both
     streams it goes out once."""

@@ -3097,8 +3097,8 @@ class _Translator:
                 # The held removal goes out beside the first line that draws
                 # the cards replacing the removed ones.
                 frames.extend(self._release_removal())
-        # A response that draws nothing releases nothing: the held removal
-        # waits for a later drawing line or the segment's end (`release_removal`).
+        # A response that draws nothing releases nothing. The held removal waits
+        # for a later drawing line or the segment's end (`release_removal`).
         return frames
 
     def _announce(
