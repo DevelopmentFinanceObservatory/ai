@@ -33,7 +33,7 @@ from harness.graph.approve import approve_node
 from harness.graph.events import GraphEvent
 from harness.graph.execute import execute_node
 from harness.graph.interfaces import Executor, PlannerModel
-from harness.graph.orchestrate import ask_node, orchestrate_node
+from harness.graph.orchestrate import CarriedSource, ask_node, orchestrate_node
 from harness.graph.plan_done import plan_done_node
 from harness.graph.resume import run_resumer
 from harness.graph.seed import chip_fetch, seed_node
@@ -125,6 +125,7 @@ def studio_graph(
     planner: PlannerModel,
     orchestrator: Orchestrator,
     model: Callable[[], Model],
+    carried: CarriedSource,
     tools: Sequence[FunctionType],
     executor: Executor,
     tool_surface: ToolSurface | None,
@@ -142,6 +143,7 @@ def studio_graph(
     `orchestrate` runs `orchestrator` on the model `model` builds for each
     run, with `tools`, the functions the agent was built on, among which
     `seed` finds the `fetch` a chip's data comes through (`chip_fetch`).
+    A `full` turn's orchestrator reads its carried conversation from `carried`.
     `planner` drafts plans at `planner` and revises them at `switch`.
     `executor` is the recorder the nodes' own calls run through.
     `tool_surface` is the servers `execute` runs an approved workflow
@@ -177,7 +179,7 @@ def studio_graph(
                 label_refs=label_refs,
             ),
         ),
-        "orchestrate": orchestrate_node(orchestrator=orchestrator, model=model),
+        "orchestrate": orchestrate_node(orchestrator=orchestrator, model=model, carried=carried),
         "ask": ask_node(definition_surface=definition_surface),
         "plan_start": planning.plan_start,
         "planner": planning.planner_node(planner=planner),

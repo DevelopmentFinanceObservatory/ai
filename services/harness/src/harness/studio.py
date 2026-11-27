@@ -81,9 +81,13 @@ from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
 from harness.card_unit import UnitMove, stored_unit_change, unit_move
 from harness.conversation import (
+    ModelCall,
+    TurnHistory,
     current_conversation_caller,
     current_conversation_id,
     current_conversation_key,
+    current_history,
+    current_model_usage,
     current_turn_id,
     current_user_message,
     ledger_conversation_id,
@@ -95,12 +99,13 @@ from harness.graph.interfaces import Executor
 from harness.graph.state import (
     APPLY_CHOICE_STATE_KEY,
     ORCHESTRATOR_PRIOR_LEDGER_KEY,
+    CarriedRef,
     TurnInput,
 )
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import ApprovedRun, StudioRunLedger
 from harness.seeds import seeds_slot
-from harness.settings import Settings
+from harness.settings import HistorySettings, Settings
 from harness.studio_edit import (
     CardSwap,
     EditClosed,
@@ -146,6 +151,7 @@ from harness.studio_store import (
     set_aside_question,
     stop_names_turn,
     turn_standing,
+    write_model_call_line,
     write_pause_line,
 )
 from harness.studio_stream import Emit, LiveOwners, LockHold, open_stream
@@ -265,6 +271,34 @@ def studio_identity(
         account if _ACCOUNT_DIGEST.fullmatch(account) else None,
         caller if ADDRESS_CALLER.fullmatch(caller) else None,
     )
+
+
+def _set_turn_sinks(
+    store: StudioStore, principal: str, conversation_id: str, conversation: ConversationState
+) -> None:
+    """Point the sinks a turn's work reports to at the current turn of
+    `conversation`, `(principal, conversation_id)`'s: the specs it used
+    (`compiler.surface.current_spec_uses`) and its model calls
+    (`harness.conversation.current_model_usage`). Every request that runs
+    part of a turn sets them before anything runs. Each model call writes its
+    own line (`harness.studio_store.write_model_call_line`) with the turn's
+    trace id, number and history arm as the turn began, and reads no store."""
+    trace_id = conversation.trace_id
+    current_spec_uses.set(_spec_use_sink(store, principal, conversation_id, trace_id))
+    usage = conversation.turn_usage
+    turn, history, history_mode = usage.turn, usage.history, usage.history_mode
+
+    def note(call: ModelCall) -> None:
+        write_model_call_line(
+            call,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            turn=turn,
+            history=history,
+            history_mode=history_mode,
+        )
+
+    current_model_usage.set(note)
 
 
 def _spec_use_sink(
@@ -686,11 +720,17 @@ def _turn_refusal_or_chip(
 
 
 def _turn_opening(
-    conversation: ConversationState, body: TurnRequest, chip_label: str | None
+    conversation: ConversationState,
+    body: TurnRequest,
+    chip_label: str | None,
+    *,
+    model_name: str,
 ) -> tuple[dict[str, Any], dict[str, Any], str]:
     """What the turn `body` begins on `conversation`, the working copy the
     begin-turn save stores, opens its cursor with: its inputs, its state and
-    the user's text its transcript starts on."""
+    the user's text its transcript starts on. `model_name` is the
+    orchestrator's model, which a carried conversation must have been
+    written by (`ConversationState.carried_opening`)."""
     focus = (
         body.component_ref.component_id
         if body.component_ref is not None
@@ -710,11 +750,24 @@ def _turn_opening(
         # One reference, the reserved shape: `graph.seed` reports it unused.
         seeds = body.seed_spec.model_dump(mode="json")
     text = body.message if chip_label is None else f"Count {chip_label}."
+    # On the `full` history arm the orchestrator opens on the previous turn's
+    # conversation where it carried one, with the digest's tail; the planner
+    # reads the whole digest either way. The arm is the one `begin_turn`
+    # fixed for the turn.
+    arm = conversation.turn_usage.history or "digest"
+    carried = conversation.carried_opening(model_name=model_name) if arm == "full" else None
     inputs = TurnInput(
         message=text,
+        history=arm,
         canvas_digest=json.dumps(digest) if digest else None,
         conversation_digest=json.dumps(history) if history else None,
         seeds=seeds,
+        carried_from=(
+            CarriedRef.of(turn=len(conversation.turns), history=carried[0])
+            if carried is not None
+            else None
+        ),
+        conversation_tail=json.dumps(carried[1]) if carried is not None else None,
     )
     state: dict[str, Any] = {"surface": body.surface.value}
     # The orchestrator's planner renders the earlier turns' readings;
@@ -947,7 +1000,11 @@ class StudioRunner:
     graph's ledger, through which `/interrupt` admits an approved plan's run
     in the save that records the approval
     (`harness.run_ledger.StudioRunLedger.admit_with_approval`); with none, `execute`
-    admits every run.
+    admits every run. `history` is the process's `STUDIO_HISTORY` setting, read
+    once at startup, from which each turn's begin fixes its history arm
+    (`ConversationState.begin_turn`). `model_name` names the orchestrator's
+    model, as the graph's model factory builds it, which a `full` turn's
+    carried conversation must have been written by.
     """
 
     def __init__(
@@ -963,7 +1020,11 @@ class StudioRunner:
         early_mints: EarlyMints | None = None,
         heartbeat_seconds: float = HEARTBEAT_INTERVAL_S,
         run_ledger: StudioRunLedger | None = None,
+        history: HistorySettings,
+        model_name: str,
     ) -> None:
+        self.history = history
+        self.model_name = model_name
         self.edit_model = edit_model
         # The bare surface a card's unit change re-reads its spec through
         # (`harness.studio_edit.unit_events`), off the Activity feed.
@@ -1118,8 +1179,11 @@ class _SegmentWork:
     def begin(self) -> None:
         """Make the segment's `renew_now` the conversation's, and keep the
         turn's records so far, for a segment that resumes a turn another
-        instance began."""
+        instance began. The turn carries only a conversation this segment's
+        orchestrator closes on (`_Translator`), so one an earlier turn left
+        in process is dropped."""
         self._conversation.renew_now = self._renew_now
+        self._conversation.turn_carried = None
         keep_turn_records(self._conversation, self._cursor.state)
         for approved in self._restored:
             self._conversation.record_approved(approved)
@@ -1167,7 +1231,10 @@ class _SegmentWork:
         """Write the `studio.turn` line and `turn.pause` outcome of the pause
         `cursor` holds, once its write committed (`run_segment`'s `paused`):
         a line exists exactly when the cursor stores the pause, whatever cut
-        or failed closing write follows it."""
+        or failed closing write follows it. The turn's records are kept from
+        the paused state first, so the line names a chain reset the
+        orchestrator met as it opened (`keep_turn_records`)."""
+        keep_turn_records(self._conversation, cursor.state)
         write_pause_line(self._conversation.conversation_id, self._conversation)
 
     async def frames(self, event: _MarkedEvent) -> list[BaseModel]:
@@ -2179,12 +2246,19 @@ def _set_turn_context(
     by PRINCIPAL as well as conversation, since two principals minting the
     same conversation_id must not share a canvas. The user's words are what
     a search sends. The budget bounds every model call the segment makes
-    (`harness.turn_budget`)."""
+    (`harness.turn_budget`). The turn's history arm, fixed as it began, names
+    every model span of the segment (`harness.conversation.current_history`)."""
     current_conversation_id.set(ledger_conversation_id(principal, conversation_id))
     current_conversation_key.set((principal, conversation_id))
     current_user_message.set(conversation.turn_user_words)
     current_earlier_block.set(conversation.earlier_block)
     current_recorded_identity.set(conversation.recorded_identity)
+    current_history.set(
+        TurnHistory(
+            arm=conversation.turn_usage.history or "digest",
+            mode=conversation.turn_usage.history_mode,
+        )
+    )
     start_turn_budget(settings)
 
 
@@ -2705,15 +2779,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # An unrecorded previous turn this closes as `abandoned` rides the
             # claim save, which writes its line once it commits
             # (`StudioStore.save`).
-            work.begin_turn(usage, trace_id=begun.trace_id)
+            work.begin_turn(usage, trace_id=begun.trace_id, history=studio.history)
             begun = work
             # The turn's MCP clients name its id (`current_caller_turn`), and
             # so do the in-process dfo-apis calls.
             current_turn_id.set(work.trace_id)
             set_supplied_turn(work.trace_id)
-            current_spec_uses.set(
-                _spec_use_sink(studio.store, principal, body.conversation_id, work.trace_id)
-            )
+            _set_turn_sinks(studio.store, principal, body.conversation_id, work)
             work.auto_add = body.auto_add
             if body.client_features is not None:
                 work.client_features = declared_features(body.client_features)
@@ -2760,7 +2832,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     else:
                         await abandon_on(conn, left_open, segment_id=segment_id)
                 if not editing:
-                    inputs, state, text = _turn_opening(work, body, chip_label)
+                    inputs, state, text = _turn_opening(
+                        work, body, chip_label, model_name=studio.model_name
+                    )
                     opened.append(
                         await open_turn_on(
                             conn,
@@ -3423,9 +3497,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             # undo (`_PendingInterrupt.step_order`'s docstring). It and the
             # spec-use sink are set before anything below can run the graph
             # or close the turn.
-            current_spec_uses.set(
-                _spec_use_sink(studio.store, principal, body.conversation_id, conversation.trace_id)
-            )
+            _set_turn_sinks(studio.store, principal, body.conversation_id, conversation)
             if studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
                     ledger_conversation_id(principal, body.conversation_id),
@@ -3795,9 +3867,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 (p for p in conversation.pending.values() if p.resuming_segment == segment_id),
                 None,
             )
-            current_spec_uses.set(
-                _spec_use_sink(studio.store, principal, conversation_id, conversation.trace_id)
-            )
+            _set_turn_sinks(studio.store, principal, conversation_id, conversation)
             if answered is not None and studio.surface_recorder is not None:
                 studio.surface_recorder.set_step_order(
                     ledger_conversation_id(principal, conversation_id),

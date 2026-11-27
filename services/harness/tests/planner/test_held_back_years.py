@@ -699,7 +699,7 @@ async def test_an_amendment_in_a_later_turn_keeps_the_licence_an_earlier_turn_se
     async def asks_projections(texts: Sequence[str]) -> list[TextReading]:
         return [TextReading(projection=True) for _ in texts]
 
-    _, first, _ = _turn_opening(conversation, _turn_request(), None)
+    _, first, _ = _turn_opening(conversation, _turn_request(), None, model_name="gemini-4-hydrogen")
     assert await read_stated_scope(first, asks_projections) is None
     proposed = _propose(
         [_aid(Period(start=2026, end=2028))],
@@ -711,7 +711,9 @@ async def test_an_amendment_in_a_later_turn_keeps_the_licence_an_earlier_turn_se
     assert proposed["outcome"] == Outcome.OK.value, proposed
     keep_turn_records(conversation, first)
 
-    _, opened, _ = _turn_opening(conversation, _turn_request(), None)
+    _, opened, _ = _turn_opening(
+        conversation, _turn_request(), None, model_name="gemini-4-hydrogen"
+    )
     later = {
         **{k: v for k, v in first.items() if k not in {LICENCE_STATE_KEY, STATED_SCOPE_STATE_KEY}},
         **opened,

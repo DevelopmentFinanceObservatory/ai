@@ -56,7 +56,7 @@ from planner.plan import (
 from sqlalchemy.ext.asyncio import AsyncEngine
 from submission.prices_choice import prices_slot, unit_slot
 
-from .graph_turns import agent_read, given, opening_graph, opening_nodes, visited
+from .graph_turns import agent_read, given, no_carried, opening_graph, opening_nodes, visited
 from .scripted_genai import call_part, reply, text_part
 from .scripted_tools import scripted_orchestrator
 from .turn_driver import ScriptedModels, SegmentRun, TurnDriver, scripted_models
@@ -1089,7 +1089,9 @@ async def test_an_answer_no_call_waits_on_is_refused_and_not_read_as_a_seed(answ
     """A hand-back that answers a call finds no conversation of the agent's
     waiting on it: `orchestrate` raises, and records no seed hand-back."""
     models = scripted_models()
-    node = orchestrate_node(orchestrator=scripted_orchestrator(), model=models.orchestrator_model)
+    node = orchestrate_node(
+        orchestrator=scripted_orchestrator(), model=models.orchestrator_model, carried=no_carried
+    )
     state: dict[str, Any] = {}
     ctx = NodeCtx(
         key=TurnKey("user-1", "conv", 1),
