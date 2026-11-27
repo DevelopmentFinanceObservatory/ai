@@ -3002,12 +3002,11 @@ class _Translator:
         return frames
 
     def _agent_text(self, text: str) -> list[Any]:
-        """Answer text as the model streams it. While a removal's update is
-        held, the text waits for the response's end (`_agent_response`
-        sends it whole): only then is it known whether the response draws,
-        and so whether the update goes ahead of the text or after the
-        response's drawing line."""
-        if not text or self._removal_held:
+        """Answer text as the model streams it, a held removal's update
+        included: that goes out as the response ends (`_agent_response`),
+        after the text, since only then is it known whether the response
+        draws."""
+        if not text:
             return []
         frames: list[Any] = [*self._close_status(), *self._narration_break()]
         self._streamed_text = True

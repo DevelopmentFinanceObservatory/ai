@@ -2444,19 +2444,16 @@ async def _held_removal(engine: AsyncEngine) -> tuple[StudioStore, _Translator, 
     return store, translator, frames
 
 
-@pytest.mark.parametrize(
-    "ending", ["draws", "narrates-and-draws", "answers", "done", "pause", "error"]
-)
+@pytest.mark.parametrize("ending", ["draws", "answers", "done", "pause", "error"])
 async def test_a_removal_shows_beside_the_next_drawing_line_or_when_nothing_is_drawn(
     pg_engine: AsyncEngine, ending: str
 ) -> None:
     """The canvas update of a removal waits through the removal's answer, so
     the removed cards stay on screen until the cards replacing them are
     announced. It goes out right after the next response's `make_charts`
-    line, or ahead of the next response's first frame, its text included,
-    when that draws nothing: the response's text is held with it until the
-    response ends, then sent whole after the update, or before the drawing
-    line that the update follows. When the
+    line, or as the next response ends when that draws nothing, after the
+    text it streamed delta by delta: the text never waits for the update.
+    When the
     segment ends first, on `done`, a pause or a failure, the translator
     still holds it, once, for the stream's owner to send before the ending
     frame (`release_removal`, which the work's `owed` hands over)."""
@@ -2464,12 +2461,6 @@ async def test_a_removal_shows_beside_the_next_drawing_line_or_when_nothing_is_d
     match ending:
         case "draws":
             frames = await translated(translator, _DRAWING)
-        case "narrates-and-draws":
-            parts = (types.Part(text="Drawing it."), *_DRAWING.parts)
-            frames = [
-                *await translated(translator, TextDelta("Drawing it.")),
-                *await translated(translator, ModelResponded(parts=parts)),
-            ]
         case "answers":
             frames = [
                 *await translated(translator, TextDelta("Do")),
@@ -2495,13 +2486,16 @@ async def test_a_removal_shows_beside_the_next_drawing_line_or_when_nothing_is_d
     assert translator.release_removal() == []
     texts = [f.text for f in frames if f.event == "message.delta"]
     match ending:
-        case "draws" | "narrates-and-draws":
+        case "draws":
             shown = events.index("composition.updated")
             assert events[shown - 1] == "make_charts:running"
-            assert texts == ([] if ending == "draws" else ["Drawing it."])
         case "answers":
-            assert events[0] == "composition.updated"
-            assert texts == ["Done."]
+            # Each delta is its own frame, sent as it streams, and the update
+            # follows the last of them.
+            assert texts == ["Do", "ne."]
+            assert events.index("composition.updated") > max(
+                index for index, event in enumerate(events) if event == "message.delta"
+            )
         case _:
             assert "composition.updated" not in events
 

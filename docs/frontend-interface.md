@@ -860,10 +860,9 @@ components stay readable. A model turn's manifest can therefore shrink or
 be empty. When the agent removes cards to draw others in their place, the
 `composition.updated` without them comes right after the line that draws
 the new cards, so the page can swap the old cards for placeholders in one
-step. If nothing is drawn, it comes ahead of the next response's first
-frame, or before the stream's last frame, an `error` included. The text of
-the response after a removal arrives whole when that response ends, since
-only then does the server know whether it draws. A stream cut off because
+step. If nothing is drawn, it comes when the next response ends, after
+any text that response streamed, or before the stream's last frame, an
+`error` included. A stream cut off because
 another server took the turn over also sends it first; drop any manifest
 no newer than one you rendered.
 
