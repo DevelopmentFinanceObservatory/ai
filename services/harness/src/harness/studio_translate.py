@@ -2508,7 +2508,7 @@ class _Translator:
             read.cancel()
         if late:
             await asyncio.gather(*late, return_exceptions=True)
-            logger.info(
+            logger.warning(
                 "studio stream: %d of %d sum reads missed the %.1f s deadline, so "
                 "their cards offer no change",
                 len(late),
