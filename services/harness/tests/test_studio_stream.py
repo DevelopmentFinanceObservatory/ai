@@ -1151,25 +1151,44 @@ async def test_a_removal_goes_out_before_the_stream_ends_however_it_ends(
     assert not conversation.take_unreported_removal()
 
 
+@pytest.mark.parametrize("fault", ["fatal-frame", "first-settle"])
 async def test_an_owner_that_fails_still_sends_the_removal_before_its_transient_frame(
-    spans: Spans, monkeypatch: pytest.MonkeyPatch
+    spans: Spans, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    """The drive raises and the work's fatal frame raises too, a fault in the
-    owner. The stream sends the removal before the transient frame."""
+    """A fault in the owner: the drive raises and the work's fatal frame
+    raises too (`fatal-frame`), or the turn is abandoned with the removal
+    held and building its update raises the first time the owner takes
+    what the work owes (`first-settle`). The stream sends the removal once,
+    before the transient frame."""
     current_conversation_id.set(CONVERSATION)
     conversation = _two_cards()
-    work = _RemovingSegment(conversation, answered=False, raises=_RAISED, hold=True)
+    if fault == "fatal-frame":
+        work = _RemovingSegment(conversation, answered=False, raises=_RAISED, hold=True)
 
-    def broken(conversation: ConversationState, error: Exception) -> ErrorFrame:
-        raise RuntimeError("the fatal frame could not be built")
+        def broken(conversation: ConversationState, error: Exception) -> ErrorFrame:
+            raise RuntimeError("the fatal frame could not be built")
 
-    monkeypatch.setattr(studio_module, "_stream_fatal", broken)
+        monkeypatch.setattr(studio_module, "_stream_fatal", broken)
+    else:
+        work = _RemovingSegment(conversation, ends=Outcome.ABANDONED, hold=True)
+        translator = work._translator
+        build = translator._composition_update
+        attempts: list[int] = []
+
+        def once_broken() -> list[Any]:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("the update could not be built")
+            return build()
+
+        monkeypatch.setattr(translator, "_composition_update", once_broken)
 
     frames = await _owned(cast(Any, work), conversation, _LandingStore())
 
     events = [f["event"] for f in frames if f["event"] != "activity.step"]
     assert events == ["composition.updated", "error"]
     assert frames[-1]["error"]["error"] == "transient_unavailable"
+    assert not conversation.take_unreported_removal()
 
 
 def _order(frames: list[dict[str, Any]]) -> list[str]:

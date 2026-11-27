@@ -1278,6 +1278,45 @@ def test_a_place_role_beside_a_list_of_one_value_takes_one_place() -> None:
     assert takes is False
 
 
+@pytest.mark.parametrize(
+    ("select", "several"),
+    [
+        ({"stat_var": ["dcid:X"]}, True),
+        ({"stat_var": "dcid:X"}, True),
+        ({"stat_var": ["dcid:X", "dcid:Y"]}, False),
+    ],
+    ids=["one-value-list", "one-value", "two-value-list"],
+)
+def test_a_role_its_select_leaves_unbound_offers_the_places_it_draws(
+    select: dict[str, Any], several: bool
+) -> None:
+    """A line chart drawing Kenya and Uganda through a recipient column its
+    select leaves unbound. A change of the role writes no entry for it (as
+    the recorded debt card's redraw wrote none), so a list of one value
+    beside it stays the redraw's one listed dimension, and the role takes
+    several places. Beside a list of two values the role takes one, and a
+    card that draws two places for it offers none for it, so no offer
+    shows more places than its `max`."""
+    block = _france_kenya_block()
+    card = card_unit.UnitCard(
+        spec_id=block["spec_id"],
+        args={},
+        scope={"entities": {"destination": ["dcid:country/KEN", "dcid:country/UGA"]}},
+        labels={"country/KEN": "Kenya", "country/UGA": "Uganda", "country/FRA": "France"},
+    )
+    intent = {"type": "line_chart", "select": select}
+
+    drawn = card_unit.encoded(card, block, intent=intent, component={"fact_summary": {}})
+    offer = card_unit.card_changes(drawn, block, fact_summary=_FETCHED_2016_2024, places=True)
+
+    places = {entry.role: entry for entry in (offer.places or () if offer else ())}
+    assert all(entry.max is None or len(entry.chosen) <= entry.max for entry in places.values())
+    assert ("destination" in places) is several
+    if several:
+        assert places["destination"].multiple
+        assert [p.id for p in places["destination"].chosen] == ["country/KEN", "country/UGA"]
+
+
 def test_a_truncated_fact_summary_binds_no_facet_and_its_card_offers_no_change() -> None:
     """The recorded health aid to Kenya by provider lists every series it
     draws. Marked truncated, the facets its listed series share may not be

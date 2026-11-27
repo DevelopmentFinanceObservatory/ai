@@ -2873,6 +2873,26 @@ _SUMMED_CARD = card_unit.SummedFrame(
 
 
 _RECORDED_SUM_TITLE = "Total gross ODA disbursements to Kenya for health, 2010 to 2020"
+# A title in the unit Search recorded for UK ODA (`prices_decision_uk_oda.json`:
+# "constant 2024 US dollars"), whose base year falls after the years it holds.
+_CONSTANT_TITLE = "ODA from the United Kingdom in constant 2024 US dollars, 2010 to 2020"
+
+
+def _in_constant_2024_dollars_through_2020(move: ChangeMove) -> ChangeMove:
+    """`move` on a spec served in constant 2024 US dollars, holding data up to
+    2020, so its unit's base year lies outside the years it offers."""
+    block = copy.deepcopy(move.block)
+    facets = block["definition"]["identity"].setdefault("facets", {})
+    facets["unit"] = {
+        "state": "request",
+        "request": {"currency": "USD", "prices": "constant", "base_year": 2024},
+    }
+    window = move.offer.window
+    assert window is not None
+    offer = move.offer.model_copy(
+        update={"window": window.model_copy(update={"last_year": 2020, "end_year": 2020})}
+    )
+    return replace(move, block=block, offer=offer)
 
 
 @pytest.mark.parametrize(
@@ -2893,8 +2913,13 @@ _RECORDED_SUM_TITLE = "Total gross ODA disbursements to Kenya for health, 2010 t
             PlacesChange(kind="places", role="destination", entities=["country/UGA"]),
             "Total gross ODA disbursements to Uganda for health, 2014 to 2020",
         ),
+        (
+            _CONSTANT_TITLE,
+            WindowChange(kind="window", start_year=2012, end_year=2018),
+            "ODA from the United Kingdom in constant 2024 US dollars, 2012 to 2018",
+        ),
     ],
-    ids=["years", "years-again", "places"],
+    ids=["years", "years-again", "places", "constant-prices"],
 )
 def test_a_changed_sums_title_keeps_its_measure_as_a_plain_cards_does(
     title: str, change: Any, redrawn: str
@@ -2907,6 +2932,8 @@ def test_a_changed_sums_title_keeps_its_measure_as_a_plain_cards_does(
     assert _REDRAWS["titles"][0] == _RECORDED_SUM_TITLE
     move = _move(title, change)
     move = replace(move, card=replace(move.card, total=_SUMMED_CARD))
+    if title == _CONSTANT_TITLE:
+        move = _in_constant_2024_dollars_through_2020(move)
     stored = {"title": title, "type": "line_chart", "frame_ref": dict(_SUM_OPS)}
 
     intent, _ = _redrawn_intent(stored, dict(_SUM_OPS), move)

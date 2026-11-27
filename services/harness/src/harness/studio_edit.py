@@ -659,10 +659,13 @@ def _changed_title(title: Any, move: ChangeMove) -> str:
 
 
 def _counts_members(title: str, move: ChangeMove) -> bool:
-    """Whether `title`, before the period it ends on, holds a number other
-    than a year the card's offer spans: a count ("32 donors", "8 largest of
-    36") that another sum may not share."""
+    """Whether `title`, before the period it ends on and outside the unit's
+    words (`_unit_said`, so "constant 2023 US dollars" counts nothing), holds
+    a number other than a year the card's offer spans: a count ("32 donors",
+    "8 largest of 36") that another sum may not share."""
     subject = _PERIOD_TAIL.sub("", title)
+    if (unit := _unit_said(move)) is not None:
+        subject = re.sub(unit, " ", subject, flags=re.IGNORECASE)
     window = move.offer.window
     years = range(window.first_year, window.last_year + 1) if window is not None else range(0)
     return any(int(number) not in years for number in re.findall(r"\b\d+\b", subject))

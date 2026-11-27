@@ -647,7 +647,8 @@ def takes_several(
     `pipeline/candidate.py`). A select entry naming a role's places as a list
     draws one series per place, and so does a place column the select leaves
     unbound. A stat card draws one value, and a table draws any select. A line
-    chart takes several unless its select lists another dimension, since the
+    chart takes several unless its select lists another dimension (beside a
+    role it leaves unbound, a list of two or more values), since the
     platform refuses a line or bar chart listing two, or another place role
     (`others`, the places each shows) already draws several series, being
     unbound or listed over several places. A bar chart takes several only
@@ -665,8 +666,16 @@ def takes_several(
     select = select if isinstance(select, Mapping) else {}
     naming = _role_entries(select, role, refs)
     # The platform binds a list of one value as a listed dimension
-    # (`harness.chart_binding.select_binding_ok`).
-    listed = {name for name, value in select.items() if isinstance(value, list)}
+    # (`harness.chart_binding.select_binding_ok`), which refuses a second
+    # list beside a role's own entry, written as a list once it names several
+    # places. A role the select leaves unbound is written no entry
+    # (`harness.studio_edit._redrawn_intent`), so beside it a list of one
+    # value draws one series per place.
+    listed = {
+        name
+        for name, value in select.items()
+        if isinstance(value, list) and (naming or len(value) > 1)
+    }
     for index, other in enumerate(others):
         named = _role_entries(
             select, other_roles[index] if index < len(other_roles) else None, other
@@ -1302,7 +1311,7 @@ def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer
     if card.total is not None:
         roles, most = _summed_roles(card.total, roles, shown, most)
     # A place with no name is not shown by its ref, so its role offers no
-    # change.
+    # change, and nor does a role drawing more places than it can take.
     return [
         PlacesOffer(
             role=role,
@@ -1312,7 +1321,9 @@ def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer
             label=RoleLabel(**forms) if (forms := (card.nouns or {}).get(role)) else None,
         )
         for role, several in roles.items()
-        if shown.get(role) and all(labels.get(ref) for ref in shown[role])
+        if shown.get(role)
+        and all(labels.get(ref) for ref in shown[role])
+        and (most.get(role) is None or len(shown[role]) <= most[role])
     ]
 
 

@@ -337,7 +337,7 @@
             "end_year": 2020,
             "origin": "query"
           },
-          "graph_revision": "dfo-dev-dc-datacommons-service-00300-kv7",
+          "graph_revision": "recorded",
           "code_index_stamp": {
             "content_hash": "67ac7cd46934db547fd7f333667503a7cec1dd0423a6085eb532c7ef57deb4c9",
             "exported_at": "2026-11-25T16:56:12Z",

@@ -2576,11 +2576,14 @@ class _Translator:
         may have written a newer revision on top of the removal since
         (`StudioStore.mutate_composition`), and the client renders every
         update, so an older one would undo that edit on screen. One frame
-        stands for every removal held."""
+        stands for every removal held. It stays held until its frame is
+        built, so an owner whose first take of what the work owes raises
+        (`harness.studio_stream._Owner.run`) still finds it on the retry."""
         if not self._removal_held:
             return []
+        frames = self._composition_update()
         self._removal_held = False
-        return self._composition_update()
+        return frames
 
     def release_removal(self) -> list[CompositionUpdated]:
         """What a stream with `hold_removals` still owes as the segment ends:
