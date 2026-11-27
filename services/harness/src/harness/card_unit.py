@@ -23,24 +23,50 @@ Those arguments are read off the retrieval's manifest, whose data artifact
 names the rendering apis minted (`frame_arguments`). A rendering this module
 cannot map back to `get_data`'s arguments leaves the card without a change.
 
+A card on a derived frame can change its years and places when the frame is
+one sum of one retrieval by year: its lineage is that one retrieval, and the
+recipe dfo-apis' analysis runner stored with the frame is one `aggregate` node
+with `aggregation` `sum` over that retrieval's frame, no rolling anchor, the
+period among its `group_by` columns, and no parameter outside the four the
+verb takes (`summed_frame`, read when the card is drawn by
+`read_summed_frame`). Recognition reads only that lineage and recipe. A change
+fetches the retrieval over the new scope, calls `aggregate` again with the
+parameters the recipe recorded and the new frame, and redraws the card on the
+sum (`harness.studio_edit.change_events`). Its unit cannot change. A role whose
+frame column the sum keeps (`group_by`) changes as a plain card's does. A
+role whose column the sum adds up changes only while the card shows one place
+for it, one place at a time, so the sum still runs over that one place; with
+several places shown it offers no change, since other places would give
+another sum under the same title. Every other derived frame offers no change.
+
 `UnitCard` is what the conversation keeps with such a card, under
 `CARD_UNIT_KEY` on its stored entry: the spec_id it reads, those arguments and
 its scope. Each change carries the scope on, so a change of one axis keeps
-what an earlier change set on another. No model reads it.
+what an earlier change set on another. No model reads it. A card on a sum is
+stored with its `get_data` arguments under `summed`, beside the sum it
+replays, so a release that reads no sum finds no arguments and offers the card
+no change.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from analysis_mcp.identity import OP_SPEC_HASH_PREFIX
+from analysis_mcp.runner_client import DerivedUnread
+from common.materialisation import FrameRef
 from common.materialisation.frame_name import KIND_COLUMNS, WITHOUT_PARTY_TOTALS
 from common.materialisation.rendering import DEFAULT_MINT_OPTIONS
+from common.place_type import FLOW_ROLE_COLUMNS, IDENTITY_KEY_AXES, PLACE_ROLE
 from data_mcp.frame_materialisation import complete_rendering
+from dfo_frame_grammar.grammar import TIME_PERIOD_COLUMN
 
 from harness.chart_binding import chart_draws
+from harness.derived_frames import derived_recipe
 from harness.place_options import (
     PlaceOptionsReader,
     PlacesNotServedError,
@@ -48,7 +74,7 @@ from harness.place_options import (
     RolePlaces,
     read_role_places,
 )
-from harness.provenance import CardLineage, data_artifact
+from harness.provenance import CardLineage, ProvenanceInput, data_artifact
 from harness.turn_records import SearchReading
 from harness.unit_offer import offered_unit_refusal, served_unit, unit_offer, unit_words
 from harness.wire import (
@@ -74,9 +100,145 @@ if TYPE_CHECKING:
 # digest, listing or recall states it (`harness.studio_state._model_entry`).
 CARD_UNIT_KEY = "unit_card"
 
+logger = logging.getLogger(__name__)
+
 # The `options.groupby` `get_data` sends for `stat_vars: "sum"`
 # (`data_mcp.get_data_tool._SUM_STAT_VARS_GROUPBY`).
 _SUM_GROUPBY = {"by": ["time_period"], "op": "sum"}
+
+
+# The parameters `aggregate` takes besides its frame
+# (`analysis_mcp.op_spec.AggregateOpSpec`). A recorded step naming another is
+# one this module cannot call again as recorded.
+_AGGREGATE_PARAMETERS = frozenset({"aggregation", "group_by", "unit", "allow_sparse_breakdowns"})
+
+# The members of a root's recorded mint scope a change's `get_data` scope
+# states again (`data_mcp.get_data_tool.GetDataScope`).
+_ROOT_SCOPE_MEMBERS = frozenset({"entities", "window", "facets"})
+
+
+@dataclass(frozen=True)
+class SummedFrame:
+    """The one `aggregate` call a card's derived frame was computed by, as
+    dfo-apis' analysis runner recorded it in the frame's recipe: the frame it
+    gave (`frame`), the retrieval frame it read (`root`), both as
+    `(spec_id, content_version)`, and the parameters it was called with
+    besides the frame, as recorded (`summed_frame`)."""
+
+    frame: tuple[str, str]
+    root: tuple[str, str]
+    parameters: dict[str, Any]
+
+    @property
+    def group_by(self) -> tuple[str, ...]:
+        """The frame columns the sum keeps apart."""
+        return tuple(self.parameters.get("group_by") or ())
+
+    def as_json(self) -> dict[str, Any]:
+        return {
+            "frame": list(self.frame),
+            "root": list(self.root),
+            "parameters": dict(self.parameters),
+        }
+
+    @classmethod
+    def from_json(cls, stored: Any) -> SummedFrame | None:
+        """The `SummedFrame` `as_json` wrote, or `None` for anything else."""
+        if not isinstance(stored, Mapping):
+            return None
+        frame, root = _pair(stored.get("frame")), _pair(stored.get("root"))
+        parameters = stored.get("parameters")
+        if frame is None or root is None or not isinstance(parameters, Mapping):
+            return None
+        return cls(frame=frame, root=root, parameters=dict(parameters))
+
+
+def _pair(value: Any) -> tuple[str, str] | None:
+    """`value` as a `(spec_id, content_version)` pair: a two-item list or a
+    `{spec_id, content_version}` mapping of non-empty strings."""
+    if isinstance(value, Mapping):
+        value = [value.get("spec_id"), value.get("content_version")]
+    if isinstance(value, list | tuple) and len(value) == 2:
+        spec_id, content_version = value
+        if isinstance(spec_id, str) and isinstance(content_version, str):
+            return (spec_id, content_version) if spec_id and content_version else None
+    return None
+
+
+def summed_frame(  # noqa: PLR0911 -- one `None` per way a recipe is not one sum by year
+    recipe: Mapping[str, Any], frame: tuple[str, str]
+) -> SummedFrame | None:
+    """The sum `recipe`, the recipe dfo-apis' analysis runner stored for the
+    derived frame `frame` (`harness.derived_frames.derived_recipe`), records:
+    `None` unless its tree is one `aggregate` node with `aggregation` `sum`
+    whose one input is its one root, its `group_by` keeps the period, it
+    names no parameter `aggregate` does not take, it has no rolling anchor,
+    and its root was minted with no scope member a `get_data` scope does not
+    state."""
+    tree, roots = recipe.get("tree"), recipe.get("roots")
+    if recipe.get("anchor") is not None or not isinstance(tree, Mapping):
+        return None
+    if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], Mapping):
+        return None
+    op_spec, inputs = tree.get("op_spec"), tree.get("inputs")
+    if not isinstance(op_spec, Mapping) or op_spec.get("verb") != "aggregate":
+        return None
+    if not isinstance(inputs, Mapping) or set(inputs) != {"frame_ref"}:
+        return None
+    read = inputs["frame_ref"]
+    if not isinstance(read, Mapping) or set(read) != {"root"} or read["root"] != 0:
+        return None
+    parameters = op_spec.get("parameters")
+    if not isinstance(parameters, Mapping) or set(parameters) - _AGGREGATE_PARAMETERS:
+        return None
+    group_by = parameters.get("group_by")
+    if (
+        parameters.get("aggregation") != "sum"
+        or not isinstance(group_by, list)
+        or not all(isinstance(column, str) for column in group_by)
+        or TIME_PERIOD_COLUMN not in group_by
+    ):
+        return None
+    (root,) = roots
+    scope = root.get("scope") or {}
+    pair = _pair(root.get("frame"))
+    if pair is None or not isinstance(scope, Mapping) or set(scope) - _ROOT_SCOPE_MEMBERS:
+        return None
+    return SummedFrame(frame=frame, root=pair, parameters=dict(parameters))
+
+
+async def read_summed_frame(lineage: CardLineage | None) -> SummedFrame | None:
+    """The sum a card drawn from `lineage` shows (`summed_frame`), read from
+    the recipe dfo-apis' analysis runner stored with its frame: one read, made
+    only for a derived (`ops_`) frame resting on one retrieval, whose frame
+    must be the sum's root. `None` for any other card, and when the recipe
+    cannot be read, so such a card offers no change."""
+    if lineage is None or len(lineage.lineage) != 1:
+        return None
+    frame = _pair(list(lineage.frame))
+    if frame is None or not frame[0].startswith(OP_SPEC_HASH_PREFIX):
+        return None
+    try:
+        recipe = await derived_recipe(FrameRef(spec_id=frame[0], content_version=frame[1]))
+    except DerivedUnread as exc:
+        logger.info("the recipe of %s was not read, so its card offers no change: %s", frame, exc)
+        return None
+    if recipe is None:
+        return None
+    summed = summed_frame(recipe, frame)
+    (member,) = lineage.lineage
+    if summed is None or summed.root != (member.spec_id, member.content_version):
+        return None
+    return summed
+
+
+def role_column(role: str) -> str:
+    """The frame column the places of an identity's `role` are served in: a
+    flow axis's party column, the place column, or the role's own name."""
+    axis = IDENTITY_KEY_AXES.get(role)
+    if axis == "place":
+        return PLACE_ROLE
+    return FLOW_ROLE_COLUMNS[axis] if axis is not None else role
 
 
 @dataclass(frozen=True)
@@ -113,7 +275,11 @@ class UnitCard:
 
     `nouns` is what the card's served data calls each role's places, by
     role: `singular`, `plural` or both, as its retrieval's coverage states
-    them (`role_nouns`); `None` where it states none."""
+    them (`role_nouns`); `None` where it states none.
+
+    `total` is the sum the card's frame is, for a card on a sum of its one
+    retrieval (`SummedFrame`), `None` for a card on the retrieval's own
+    frame."""
 
     spec_id: str
     args: dict[str, Any]
@@ -128,6 +294,7 @@ class UnitCard:
     years: ScopeYears | None = None
     most: dict[str, int] | None = None
     nouns: dict[str, dict[str, str]] | None = None
+    total: SummedFrame | None = None
 
     def as_json(self) -> dict[str, Any]:
         stored: dict[str, Any] = {"spec_id": self.spec_id, "args": dict(self.args)}
@@ -153,6 +320,8 @@ class UnitCard:
             stored["most"] = dict(self.most)
         if self.nouns:
             stored["nouns"] = {role: dict(forms) for role, forms in self.nouns.items()}
+        if self.total is not None:
+            stored["summed"] = {"args": stored.pop("args"), **self.total.as_json()}
         return stored
 
     @classmethod
@@ -161,6 +330,10 @@ class UnitCard:
         if not isinstance(stored, Mapping):
             return None
         spec_id, args = stored.get("spec_id"), stored.get("args")
+        summed = stored.get("summed")
+        total = SummedFrame.from_json(summed)
+        if summed is not None:
+            args = summed.get("args") if total is not None else None
         if not isinstance(spec_id, str) or not spec_id or not isinstance(args, Mapping):
             return None
         scope, labels, roles = stored.get("scope"), stored.get("labels"), stored.get("roles")
@@ -193,6 +366,7 @@ class UnitCard:
             if isinstance(most, Mapping)
             else None,
             nouns=_read_nouns(stored.get("nouns")),
+            total=total,
         )
 
     def fetch_args(
@@ -551,14 +725,18 @@ def _breakdown(groupby: Any) -> dict[str, Any] | None:
     return {"code_system": code_system, "level": level}
 
 
-def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one retrieval
+def unit_card(
     component: Mapping[str, Any],
     lineage: CardLineage | None,
     blocks: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    total: SummedFrame | None = None,
 ) -> UnitCard | None:
     """The `UnitCard` of `component`, a written card, drawn from `lineage`;
-    `None` when the card does not draw one retrieval's own frame, or its
-    arguments cannot be read.
+    `None` when the card does not draw one retrieval's own frame, or the sum
+    `total` of it (`read_summed_frame`), or its arguments cannot be read. A
+    card on the sum reads the retrieval under it as a card on the
+    retrieval's own frame does, and keeps the sum (`UnitCard.total`).
 
     The card reads the served spec when `blocks`, the Search blocks the
     conversation keeps by spec_id (`ConversationBlocks`), hold one for it.
@@ -579,15 +757,33 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
         return None
     (member,) = lineage.lineage
     served = member.served_ref
-    if lineage.frame not in {
+    own = lineage.frame in {
         (member.spec_id, member.content_version),
         (served["spec_id"], served["content_version"]),
-    }:
+    }
+    summed = (
+        total is not None
+        and total.frame == lineage.frame
+        and total.root == (member.spec_id, member.content_version)
+    )
+    if not own and not summed:
         return None
     inputs = (component.get("provenance") or {}).get("inputs") or []
     spec_id = served["spec_id"]
-    if len(inputs) != 1 or not spec_id or inputs[0].get("spec_id") != spec_id:
+    drawn = spec_id if own else lineage.frame[0]
+    if len(inputs) != 1 or not spec_id or inputs[0].get("spec_id") != drawn:
         return None
+    card = _retrieval_card(member, spec_id, blocks)
+    return replace(card, total=total) if card is not None and not own else card
+
+
+def _retrieval_card(
+    member: ProvenanceInput,
+    spec_id: str,
+    blocks: Mapping[str, Mapping[str, Any]] | None,
+) -> UnitCard | None:
+    """The `UnitCard` of a card reading retrieval `member`, served under
+    `spec_id`, as `unit_card` reads it."""
     rendering = data_artifact(member.manifest.get("artifacts") or []).get("rendering")
     args = frame_arguments(rendering) if isinstance(rendering, Mapping) else None
     if args is None:
@@ -742,8 +938,9 @@ def card_unit_change(card: UnitCard, block: Mapping[str, Any] | None) -> UnitCha
     """The `unit_change` of a card reading `card`'s spec, whose Search block is
     `block`: the units the block converts into, starting on the one it is
     served in; `None` when it converts into none or its served unit lies
-    outside them."""
-    if block is None:
+    outside them, and for a card on a sum (`UnitCard.total`), whose unit
+    change would redraw the card on the retrieval and not on its sum."""
+    if block is None or card.total is not None:
         return None
     offer = unit_offer([block])
     served = served_unit(block)
@@ -946,6 +1143,9 @@ def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer
             roles.items(), key=lambda kv: listed.index(kv[0]) if kv[0] in listed else len(listed)
         )
     )
+    most = dict(card.most or {})
+    if card.total is not None:
+        roles, most = _summed_roles(card.total, roles, shown, most)
     # A place with no name is not shown by its ref, so its role offers no
     # change.
     return [
@@ -953,12 +1153,34 @@ def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer
             role=role,
             multiple=several,
             chosen=[PlaceOption(id=ref, label=labels[ref]) for ref in shown[role]],
-            max=(card.most or {}).get(role),
+            max=most.get(role),
             label=RoleLabel(**forms) if (forms := (card.nouns or {}).get(role)) else None,
         )
         for role, several in roles.items()
         if shown.get(role) and all(labels.get(ref) for ref in shown[role])
     ]
+
+
+def _summed_roles(
+    total: SummedFrame,
+    roles: Mapping[str, bool],
+    shown: Mapping[str, list[str]],
+    most: Mapping[str, int],
+) -> tuple[dict[str, bool], dict[str, int]]:
+    """The roles a card on the sum `total` offers places for, each with
+    whether it takes several, and the most places each can draw: a role
+    whose column the sum keeps as `roles` and `most` have it, and a role
+    whose column the sum adds up only while the card shows one place for it,
+    one place at a time, so the sum still runs over one place."""
+    kept: dict[str, bool] = {}
+    limits = dict(most)
+    for role, several in roles.items():
+        if role_column(role) in total.group_by:
+            kept[role] = several
+        elif len(shown.get(role) or ()) == 1:
+            kept[role] = False
+            limits[role] = 1
+    return kept, limits
 
 
 def drawn_places(card: UnitCard, block: Mapping[str, Any]) -> dict[str, list[str]]:

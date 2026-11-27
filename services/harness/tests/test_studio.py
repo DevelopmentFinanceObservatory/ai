@@ -689,7 +689,9 @@ async def test_a_turn_past_its_call_cap_ends_on_the_cap_sentence_with_no_further
 async def test_a_chart_call_writes_each_chart_and_a_refused_write_fails_its_line() -> None:
     """Each chart of one `make_charts` call is its own write and its own
     Activity line: a refused write fails its line while the turn completes,
-    and the card that landed names the line it came from."""
+    and the card that landed names the line it came from. The call's running
+    line announces both cards; the card that landed names its own, and the
+    refused one is named by no card as the call's line closes failed."""
     executor = ScriptedExecutor(
         [
             *_card_results(),
@@ -731,8 +733,63 @@ async def test_a_chart_call_writes_each_chart_and_a_refused_write_fails_its_line
     (created,) = [f for f in frames if f["event"] == "component.created"]
     assert created["component_id"] == "cmp_01test0001"
     assert created["created_from"]["step_id"] == lines[0]["step_id"]
+    (running,) = [
+        f
+        for f in frames
+        if f["event"] == "activity.step"
+        and f.get("tool") == "make_charts"
+        and f["status"] == "running"
+    ]
+    assert running["step_id"] == call["step_id"]
+    assert running["coming"] == [
+        {"placeholder_id": f"{call['step_id']}.0", "type": "stat_card", "title": "Aid to Kenya"},
+        {
+            "placeholder_id": f"{call['step_id']}.1",
+            "type": "stat_card",
+            "title": "Aid to Kenya (2)",
+        },
+    ]
+    assert created["created_from"]["placeholder_id"] == f"{call['step_id']}.0"
+    assert "coming" not in call
     done = _frame(frames, "done")
     assert [b["component_id"] for b in done["composition"]["blocks"]] == ["cmp_01test0001"]
+
+
+async def test_two_charts_of_one_title_and_type_each_name_their_own_placeholder() -> None:
+    """Two charts asked under one title and type, apart only in their
+    select, are two cards, and each names the entry it was asked as."""
+    second = json.loads(json.dumps(COMPONENT).replace("cmp_01test0001", "cmp_01test0002"))
+    executor = ScriptedExecutor(
+        [*_card_results(), {"outcome": "ok", "frame_refs": [], "component": second}]
+    )
+    charts = [
+        chart(FRAME_A, type_="stat_card", title="Aid to Kenya", select=select)
+        for select in ({"stat_var": "dcid:LifeExpectancy_Person"}, {"stat_var": "dcid:Aid"})
+    ]
+    script = (search_call("aid to Kenya"), fetch_call(SPEC_A), make_charts_call(*charts))
+    app = _app(*script, _text("Here are the cards."), resolver=_search(), executor=executor)
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body())
+
+    (running,) = [
+        f
+        for f in frames
+        if f["event"] == "activity.step"
+        and f.get("tool") == "make_charts"
+        and f["status"] == "running"
+    ]
+    assert [entry["placeholder_id"] for entry in running["coming"]] == [
+        f"{running['step_id']}.0",
+        f"{running['step_id']}.1",
+    ]
+    assert {
+        f["component_id"]: f["created_from"]["placeholder_id"]
+        for f in frames
+        if f["event"] == "component.created"
+    } == {
+        "cmp_01test0001": f"{running['step_id']}.0",
+        "cmp_01test0002": f"{running['step_id']}.1",
+    }
 
 
 async def test_a_planner_run_shows_working_on_a_plan_and_not_the_planners_late_reports(

@@ -2404,6 +2404,106 @@ async def test_a_step_that_removes_a_card_and_draws_one_streams_each_write_s_own
     ]
 
 
+def _call(tool: str, args: Mapping[str, Any] | None = None) -> ModelResponded:
+    """A model response making one call of `tool`, under the id `tool`."""
+    return ModelResponded(
+        parts=(types.Part(function_call=types.FunctionCall(id=tool, name=tool, args=args or {})),)
+    )
+
+
+_DRAWING = _call("make_charts", {"charts": [{"frame": "f", "type": "stat_card", "title": "Aid"}]})
+
+
+async def _held_removal(engine: AsyncEngine) -> tuple[StudioStore, _Translator, list[Any]]:
+    """A translator whose agent removed `cmp_01` of two cards, and the frames
+    up to the answer of that removal, which hold its canvas update."""
+    current_conversation_id.set("c1")
+    store, conversation = await _stored_conversation(engine)
+    for held in ("cmp_01", "cmp_02"):
+        await store.mutate_composition(
+            "principal",
+            "c1",
+            _on_canvas(
+                conversation,
+                lambda held=held: land_component(conversation, _written_component(held)),
+            ),
+        )
+    translator = _Translator(
+        conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
+    )
+    frames = await translated(translator, _call("remove_cards"))
+    await store.mutate_composition(
+        "principal",
+        "c1",
+        _on_canvas(conversation, lambda: remove_cards(conversation, ["cmp_01"], all_cards=False)),
+    )
+    answer = types.FunctionResponse(
+        id="remove_cards", name="remove_cards", response={"removed": ["cmp_01"]}
+    )
+    frames += await translated(translator, ToolsAnswered(answers=(answer,), state={}))
+    return store, translator, frames
+
+
+@pytest.mark.parametrize("ending", ["draws", "answers", "done", "pause", "error"])
+async def test_a_removal_shows_beside_the_next_drawing_line_or_when_nothing_is_drawn(
+    pg_engine: AsyncEngine, ending: str
+) -> None:
+    """The canvas update of a removal waits through the removal's answer, so
+    the removed cards stay on screen until the cards replacing them are
+    announced. It goes out right after the next response's `make_charts`
+    line, and otherwise before the next response draws nothing, the turn
+    ends, pauses or fails, once."""
+    _, translator, held = await _held_removal(pg_engine)
+    match ending:
+        case "draws":
+            frames = await translated(translator, _DRAWING)
+        case "answers":
+            frames = await translated(translator, ModelResponded(parts=(types.Part(text="Done."),)))
+        case "done":
+            frames = await translator.finish()
+        case "pause":
+            frames = await translated(translator, _pause("ask", {"questions": [_asked(1)]}))
+        case _:
+            frames = await translated(
+                translator, TurnFailed(node="orchestrate", error=RuntimeError("boom"))
+            )
+    frames += await translator.finish() if ending in {"draws", "answers"} else []
+
+    assert "composition.updated" not in [f.event for f in held]
+    events = [
+        f"{f.tool}:{f.status.value}" if f.event == "activity.step" else f.event for f in frames
+    ]
+    updates = [f.manifest for f in frames if f.event == "composition.updated"]
+    assert [[b.component_id for b in manifest.blocks] for manifest in updates] == [["cmp_02"]]
+    shown = events.index("composition.updated")
+    if ending == "draws":
+        assert events[shown - 1] == "make_charts:running"
+    else:
+        later = {"answers": "message.delta", "pause": "elicitation.request", "error": "error"}
+        assert ending == "done" or shown < events.index(later[ending])
+
+
+async def test_a_held_removal_shows_a_canvas_edit_made_while_it_was_held(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A `/composition` edit committed while the removal's update is held,
+    here a pin, is on the update that goes out: never undone on screen."""
+    store, translator, _ = await _held_removal(pg_engine)
+
+    def pin(manifest: CompositionManifest | None, _components: object) -> CompositionManifest:
+        assert manifest is not None
+        blocks = [block.model_copy(update={"pinned": True}) for block in manifest.blocks]
+        return _next_manifest(manifest, blocks, actor=CompositionActor.USER)
+
+    pinned = await store.mutate_composition("principal", "c1", pin)
+    assert isinstance(pinned, CompositionManifest)
+    frames = await translated(translator, _DRAWING)
+
+    (update,) = [f.manifest for f in frames if f.event == "composition.updated"]
+    assert update.revision == pinned.revision
+    assert [(b.component_id, b.pinned) for b in update.blocks] == [("cmp_02", True)]
+
+
 async def test_component_frames_land_true_holds_when_auto_add_is_off(
     pg_engine: AsyncEngine,
 ) -> None:

@@ -99,6 +99,7 @@ EVENT_FIXTURES = {
     "event-21-elicitation-unit-pick.json": ElicitationRequest,
     "event-22-plan-proposed-unit.json": PlanProposed,
     "event-23-component-card-changes.json": ComponentCreated,
+    "event-24-activity-step-coming-cards.json": ActivityStep,
 }
 
 REQUEST_FIXTURES = {

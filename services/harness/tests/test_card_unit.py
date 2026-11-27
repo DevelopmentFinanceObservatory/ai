@@ -800,3 +800,183 @@ async def test_a_roles_places_are_listed_by_label() -> None:
         "Tanzania",
         "Türkiye",
     ]
+
+
+# --- a card on a sum of its one retrieval -----------------------------------
+
+_OPS = ("ops_" + "c" * 32, "ocv_" + "3" * 32)
+_SUM = {"aggregation": "sum", "group_by": ["time_period", "financingRecipient"]}
+
+
+def _sum_node(parameters: Mapping[str, Any], inputs: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "op_spec": {
+            "identity_version": "ops1",
+            "verb": "aggregate",
+            "frame_ref": {"spec_id": _SPEC, "content_version": _CV},
+            "parameters": dict(parameters),
+        },
+        "inputs": dict(inputs),
+    }
+
+
+def _root(spec_id: str = _SPEC) -> dict[str, Any]:
+    pair = {"spec_id": spec_id, "content_version": _CV}
+    return {"schema_version": 1, "frame": pair, "dataset": pair, "options": {}, "scope": {}}
+
+
+def _sum_recipe(**changed: Any) -> dict[str, Any]:
+    """The recipe dfo-apis' runner stores for a sum by year of one
+    retrieval, with the members `changed` names in place."""
+    return {
+        "schema_version": 1,
+        "tree": _sum_node(_SUM, {"frame_ref": {"root": 0}}),
+        "roots": [_root()],
+        "anchor": None,
+        "left_out": None,
+        **changed,
+    }
+
+
+@pytest.mark.parametrize(
+    ("recipe", "summed"),
+    [
+        (_sum_recipe(), True),
+        (_sum_recipe(roots=[_root(), _root("spec_" + "f" * 32)]), False),
+        (_sum_recipe(anchor={"period": "2023", "rule": "half", "left_out": []}), False),
+        (
+            _sum_recipe(
+                tree=_sum_node(
+                    {"aggregation": "sum", "group_by": ["financingRecipient"]},
+                    {"frame_ref": {"root": 0}},
+                )
+            ),
+            False,
+        ),
+        (
+            _sum_recipe(tree=_sum_node(_SUM | {"aggregation": "mean"}, {"frame_ref": {"root": 0}})),
+            False,
+        ),
+        (
+            _sum_recipe(
+                tree=_sum_node(_SUM, {"frame_ref": _sum_node(_SUM, {"frame_ref": {"root": 0}})})
+            ),
+            False,
+        ),
+        (
+            _sum_recipe(tree=_sum_node(_SUM | {"anchor_key": "k"}, {"frame_ref": {"root": 0}})),
+            False,
+        ),
+        (_sum_recipe(roots=[_root() | {"scope": {"columns": ["party_kind"]}}]), False),
+    ],
+    ids=[
+        "one-sum-by-year",
+        "two-roots",
+        "anchor",
+        "no-period",
+        "another-function",
+        "two-nodes",
+        "unknown-parameter",
+        "unknown-root-scope",
+    ],
+)
+async def test_only_one_sum_by_year_of_one_retrieval_can_change(
+    monkeypatch: pytest.MonkeyPatch, recipe: dict[str, Any], summed: bool
+) -> None:
+    """A card on a derived frame reads its recipe once, and changes only when
+    the recipe is one `aggregate` sum by year over the card's one retrieval:
+    the card then reads the retrieval as a plain card does, keeping the sum,
+    and stores it where a release that reads no sum finds no arguments."""
+    read: list[object] = []
+
+    async def recipe_of(ref: object) -> dict[str, Any]:
+        read.append(ref)
+        return recipe
+
+    monkeypatch.setattr(card_unit, "derived_recipe", recipe_of)
+    lineage = _lineage(_OPS)
+
+    total = await card_unit.read_summed_frame(lineage)
+    card = unit_card(_component(_OPS[0]), lineage, total=total)
+
+    assert len(read) == 1
+    assert (card is not None) is summed
+    if card is not None:
+        assert (card.spec_id, card.args, card.total) == (
+            _SPEC,
+            {},
+            card_unit.SummedFrame(frame=_OPS, root=(_SPEC, _CV), parameters=_SUM),
+        )
+        stored = card.as_json()
+        assert "args" not in stored
+        assert card_unit.UnitCard.from_json(stored) == card
+
+
+async def test_a_card_on_its_retrievals_own_frame_reads_no_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a derived frame resting on one retrieval has its recipe read."""
+
+    async def recipe_of(ref: object) -> dict[str, Any]:
+        raise AssertionError(f"read the recipe of {ref}")
+
+    monkeypatch.setattr(card_unit, "derived_recipe", recipe_of)
+
+    assert await card_unit.read_summed_frame(_lineage((_SPEC, _CV))) is None
+    assert await card_unit.read_summed_frame(_lineage(_OPS, members=2)) is None
+
+
+def _summed_card(shown: dict[str, list[str]], *, cut: bool = False) -> card_unit.UnitCard:
+    """A line chart on the sum by year and recipient of France to Kenya,
+    showing the places `shown` names."""
+    block = _france_kenya_block()
+    return card_unit.UnitCard(
+        spec_id=block["spec_id"],
+        args={},
+        scope={"entities": {role: [f"dcid:{ref}" for ref in refs] for role, refs in shown.items()}},
+        labels={"country/KEN": "Kenya", "country/FRA": "France", "country/DEU": "Germany"},
+        roles=dict.fromkeys(shown, True),
+        shown=shown,
+        most=dict.fromkeys(shown, 10),
+        cut=cut,
+        years=card_unit.ScopeYears(
+            spec_id=block["spec_id"],
+            entities=shown,
+            first=1978,
+            last=2024,
+        ),
+        total=card_unit.SummedFrame(frame=_OPS, root=(_SPEC, _CV), parameters=_SUM),
+    )
+
+
+@pytest.mark.parametrize(
+    ("donors", "offered"),
+    [
+        (["country/FRA"], {"destination": (True, 10), "origin": (False, 1)}),
+        (["country/FRA", "country/DEU"], {"destination": (True, 10)}),
+    ],
+    ids=["one-donor", "summed-donors"],
+)
+def test_a_sum_offers_the_places_it_keeps_apart_and_not_the_ones_it_adds_up(
+    donors: list[str], offered: dict[str, tuple[bool, int]]
+) -> None:
+    """The sum keeps each recipient apart and adds up the donors. The
+    recipient changes as on a plain card. One donor changes only to one other,
+    so the sum still runs over one donor; two donors summed offer no change,
+    since others would give another sum under the same title. Its unit
+    cannot change."""
+    block = _france_kenya_block()
+    card = _summed_card({"destination": ["country/KEN"], "origin": donors})
+
+    offer = card_unit.card_changes(card, block, fact_summary=_FETCHED_2016_2024, places=True)
+
+    assert offer is not None and offer.window is not None
+    assert {p.role: (p.multiple, p.max) for p in offer.places or ()} == offered
+    assert card_unit.card_unit_change(card, block) is None
+
+
+def test_a_sum_cut_to_its_largest_members_offers_nothing() -> None:
+    block = _france_kenya_block()
+    card = _summed_card({"destination": ["country/KEN"], "origin": ["country/FRA"]}, cut=True)
+
+    assert card_unit.card_changes(card, block, fact_summary=_FETCHED_2016_2024, places=True) is None

@@ -21,11 +21,13 @@ class OrchestratorCall:
     specs and call counts from it and write theirs to it. `turn_id` names the
     turn and is the same on every run of the turn, before a hand-off and
     after it, so a card drawn before the user answered counts as drawn this
-    turn (`harness.orchestrator_tools`).
+    turn (`harness.orchestrator_tools`). `call_id` is the model's id for this
+    call, the id its answer carries, `None` outside a model's call.
     """
 
     state: SessionState
     turn_id: str
+    call_id: str | None = None
 
 
 __all__ = ["HANDED_OFF", "OrchestratorCall"]

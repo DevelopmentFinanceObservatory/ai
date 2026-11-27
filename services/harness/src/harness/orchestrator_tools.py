@@ -204,6 +204,15 @@ from harness.wire import RetryMode
 
 logger = logging.getLogger(__name__)
 
+# The chart a `make_charts` call is drawing while it calls the executor: the
+# call's id (`OrchestratorCall.call_id`) and the chart's index in its
+# `charts`. The Studio's recording executor keeps it with each write, so the
+# card names the entry the call's running line announced
+# (`harness.studio_translate`), however many entries share a title and type.
+current_chart_entry: ContextVar[tuple[str, int] | None] = ContextVar(
+    "make_charts_current_chart_entry", default=None
+)
+
 # The turn's completed fetches: `_fetch_key` -> the spec_id fetched, its
 # summary and the ids of its frames, every one described, or the refusal of a
 # fetch that served no observations.
@@ -3008,9 +3017,13 @@ def build_orchestrator_tools(
                 dimension=dimension[0],
             )
 
+        entered = None
         try:
             attempted = charts[:MAX_CHARTS_PER_CALL]
             for index, chart in enumerate(attempted):
+                if call.call_id is not None:
+                    token = current_chart_entry.set((call.call_id, index))
+                    entered = entered or token
                 later = index < len(attempted) - 1
                 frame = frames.get(chart.frame)
                 if frame is None:
@@ -3132,6 +3145,8 @@ def build_orchestrator_tools(
                 if stop:
                     break
         finally:
+            if entered is not None:
+                current_chart_entry.reset(entered)
             # After the awaits, so the counts are read afresh. The `finally`
             # covers cancellation and anything raised outside the per-chart
             # `try`. A failed write is caught above. A call that read a card

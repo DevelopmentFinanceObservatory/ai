@@ -25,11 +25,13 @@ from common.live_apis import LiveApisError
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from compiler.surface import ProgressCallback, ToolCallResult, ToolId
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
+from harness import card_unit
 from harness.card_unit import UNIT_GONE_NOTE, ChangeMove, UnitCard
 from harness.chart_binding import LINE_CHART_MAX_VALUES
+from harness.conversation import current_conversation_id
 from harness.graph.state import frame_id_for
 from harness.place_options import ApisPlaceOptions
-from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceInput
+from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceInput, ProvenanceStore
 from harness.studio_edit import _changed_title, _composed_title, _redrawn_intent
 from harness.studio_state import PLAN_LINK_KEY, DatabaseUnavailable
 from harness.studio_store import StudioStore
@@ -2521,3 +2523,196 @@ async def test_a_change_never_shrinks_the_years_a_card_offers(pg_engine: AsyncEn
     window = narrowed["card_changes"]["window"]
     assert (window["first_year"], window["last_year"]) == (1978, 2024)
     assert _frame(widened, "component.created")["card_changes"]["window"]["start_year"] == 1978
+
+
+# --- a card on a sum of its one retrieval ------------------------------------
+
+_SUM_OPS = {"spec_id": "ops_" + "c" * 32, "content_version": "ocv_" + "3" * 32}
+_SUM_PARAMETERS = {"aggregation": "sum", "group_by": ["time_period", "financingRecipient"]}
+
+
+def _sum_recipe(root: Mapping[str, str]) -> dict[str, Any]:
+    """The recipe dfo-apis' runner stores for the sum by year and recipient
+    of the retrieval `root`."""
+    return {
+        "schema_version": 1,
+        "tree": {
+            "op_spec": {
+                "identity_version": "ops1",
+                "verb": "aggregate",
+                "frame_ref": dict(root),
+                "parameters": dict(_SUM_PARAMETERS),
+            },
+            "inputs": {"frame_ref": {"root": 0}},
+        },
+        "roots": [{"schema_version": 1, "frame": dict(root), "dataset": dict(root), "options": {}}],
+        "anchor": None,
+        "left_out": None,
+    }
+
+
+def _on_sum(written: dict[str, Any], ops: Mapping[str, str]) -> dict[str, Any]:
+    """`written`, a card on its retrieval's frame, drawn on the sum `ops` of it."""
+    lineage = written[CARD_LINEAGE_KEY]
+    written[CARD_LINEAGE_KEY] = replace(lineage, frame=(ops["spec_id"], ops["content_version"]))
+    written["component"]["provenance"]["inputs"] = [dict(ops)]
+    return written
+
+
+class _SummingSearch(_Search):
+    """Search's resolve, and analysis-mcp's `aggregate`, which answers a sum
+    under a pair of its own, or refuses when `refuse`."""
+
+    def __init__(self, *, refuse: bool = False) -> None:
+        super().__init__()
+        self.summed: list[dict[str, Any]] = []
+        self.refuse = refuse
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Any, on_progress: ProgressCallback | None = None
+    ) -> ToolCallResult:
+        if tool.name != "aggregate":
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        self.summed.append(dict(arguments))
+        if self.refuse:
+            return ToolCallResult(
+                is_error=True,
+                structured_content={"code": "unit_heterogeneous", "message": "two units"},
+            )
+        digest = hashlib.sha1(json.dumps(arguments, sort_keys=True).encode()).hexdigest()
+        return ToolCallResult(
+            is_error=False,
+            structured_content={
+                "spec_id": "ops_" + digest[:32],
+                "content_version": "ocv_" + "6" * 32,
+                "rows": 9,
+            },
+        )
+
+
+class _SummedChanger(_Changer):
+    """`_Changer` for a card on a sum: each retrieval is kept in `provenance`
+    as the executor keeps one, under the pair it is stored by, and each
+    redraw is on the sum the write names."""
+
+    def __init__(self, provenance: ProvenanceStore) -> None:
+        super().__init__()
+        self.provenance = provenance
+        self.conversation: str | None = None
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        answer = await super().__call__(tool=tool, args=args, **kw)
+        if tool == "get_data":
+            (ref,) = answer["frame_refs"]
+            self.conversation = current_conversation_id.get()
+            self.provenance.put_retrieval(
+                conversation=self.conversation,
+                manifest={
+                    "definition": {"spec_id": ref["spec_id"]},
+                    "content_version": ref["content_version"],
+                    "frame_ref": dict(ref),
+                    "artifacts": [{"rendering": _SUMMED}],
+                },
+            )
+            answer["store_refs"] = [dict(ref)]
+        if tool == "write_component":
+            answer = _on_sum(answer, args["intent"]["frame_ref"])
+        return answer
+
+
+def _summed_app(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, surface: _SummingSearch
+) -> tuple[Any, ProvenanceStore]:
+    """The first turn draws France's aid to Kenya on the sum by year and
+    recipient of its retrieval, whose recipe the runner serves."""
+
+    async def recipe_of(ref: Any) -> dict[str, Any] | None:
+        return _sum_recipe(_REF) if ref.spec_id == _SUM_OPS["spec_id"] else None
+
+    monkeypatch.setattr(card_unit, "derived_recipe", recipe_of)
+    provenance = ProvenanceStore()
+    results = _first_results()
+    results[-1] = _on_sum(results[-1], _SUM_OPS)
+    app = _app(
+        *_first_turn(),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(results),
+        tool_surface=surface,  # ty: ignore[invalid-argument-type] -- resolve and aggregate
+        engine=pg_engine,
+        provenance=provenance,
+    )
+    # The runner the server builds holds the executor's provenance store.
+    app.state.studio.provenance = provenance
+    return app, provenance
+
+
+@pytest.mark.parametrize("change", [_YEARS, _UGANDA], ids=["years", "places"])
+async def test_a_card_on_a_sum_changes_by_summing_its_new_retrieval_as_recorded(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any]
+) -> None:
+    """The card draws the sum by year and recipient of its one retrieval. It
+    offers years and places, and no unit. A change fetches the retrieval over
+    the new scope, sums it with the parameters the recipe recorded, writes
+    the sum's lineage from the new retrieval, and redraws the card on the sum
+    in its slot, offering its changes again."""
+    surface = _SummingSearch()
+    app, provenance = _summed_app(pg_engine, monkeypatch, surface)
+    app.state.studio.place_options = _Places()
+    changer = _SummedChanger(provenance)
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, change)
+        )
+
+    drawn = _frame(first, "component.created")
+    assert "unit_change" not in drawn
+    assert drawn["card_changes"]["window"]["first_year"] == 1978
+    assert [p["role"] for p in drawn["card_changes"]["places"]] == ["destination", "origin"]
+    (fetched,) = changer.fetched()
+    assert fetched["stat_vars"] == "sum"
+    (summed,) = surface.summed
+    root = {k: v for k, v in summed.items() if k == "frame_ref"}
+    assert {k: v for k, v in summed.items() if k != "frame_ref"} == _SUM_PARAMETERS
+    write = next(call for call in changer.calls if call["tool"] == "write_component")
+    sum_ref = write["args"]["intent"]["frame_ref"]
+    assert sum_ref["spec_id"].startswith("ops_") and sum_ref != _SUM_OPS
+    assert changer.conversation is not None
+    lineage = provenance.get(conversation=changer.conversation, **sum_ref)
+    assert lineage is not None
+    assert [(m.spec_id, m.content_version) for m in lineage] == [
+        (root["frame_ref"]["spec_id"], root["frame_ref"]["content_version"])
+    ]
+    created = _frame(frames, "component.created")
+    assert created["replaces"] == "cmp_01unit0001"
+    assert "window" in created["card_changes"]
+    assert "unit_change" not in created
+
+
+async def test_a_sum_the_analysis_service_refuses_leaves_the_card(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sum refused over the new data ends the change on the retrieval's
+    step: nothing is written, and the card keeps its slot and offers."""
+    surface = _SummingSearch(refuse=True)
+    app, provenance = _summed_app(pg_engine, monkeypatch, surface)
+    changer = _SummedChanger(provenance)
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+        )
+        read = await client.get(
+            "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 0}, headers=AUTH
+        )
+
+    assert len(surface.summed) == 1
+    assert "write_component" not in [call["tool"] for call in changer.calls]
+    failed = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+    assert [f["step_id"] for f in failed] == ["u2"]
+    assert _frame(frames, "message.complete")["text"].startswith("The card is unchanged.")
+    (card,) = read.json()["closed_since"][0]["cards"]
+    assert card["component_id"] == "cmp_01unit0001"
+    assert card["card_changes"] == _frame(first, "component.created")["card_changes"]

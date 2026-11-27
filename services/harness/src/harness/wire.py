@@ -1899,6 +1899,19 @@ class StepProgress(_WireModel):
     total: int = Field(ge=1)
 
 
+class ComingCard(_WireModel):
+    """A card a running step may draw, for the page to hold a place for:
+    `placeholder_id`, `"<step_id>.<entry>"` with the entry's index in the
+    call's `charts`, which the card's `created_from.placeholder_id` names
+    when it lands; the card's `type`, which is the type that lands; and its
+    `title` as the call asked it, which the card's own can extend (with the
+    period `make_charts` adds, for one)."""
+
+    placeholder_id: str = Field(min_length=1)
+    type: Literal["line_chart", "bar_chart", "stat_card", "table"]
+    title: str
+
+
 class ActivityStep(_WireModel):
     """One execution step -- the only progress channel (Activity tab and the
     "2/3 complete" line). A step-scoped failure surfaces here as
@@ -1920,6 +1933,12 @@ class ActivityStep(_WireModel):
     duration_ms: int | None = None
     produced: StepProduced | None = None
     progress: StepProgress | None = None
+    # On a `make_charts` line's running frame only: the cards the call may
+    # draw, one per chart it asks for up to the most one call draws
+    # (`harness.chart_binding.MAX_CHARTS_PER_CALL`), in its order
+    # (`ComingCard`). A placeholder ends when a card names it, when this line
+    # closes, or when the stream ends.
+    coming: list[ComingCard] | None = Field(default=None, min_length=1)
     # The plan this line runs a step of and that step (`PlanStep.id`), both
     # or neither; absent on a line outside a plan. A replan reuses step ids,
     # so a step is named by the two together.
@@ -1936,12 +1955,16 @@ class CreatedFrom(_WireModel):
     drawn from a frame no plan step produced names no plan. A replan reuses
     step ids, so a step is named by the two together. A card that takes
     another's slot (`ComponentCreated.replaces`) keeps the plan of the card
-    it replaced."""
+    it replaced.
+
+    `placeholder_id` names the `ComingCard` of the running `make_charts`
+    line this card fills, absent on a card no such line announced."""
 
     step_id: str
     message_seq: int | None = Field(default=None, ge=0)
     plan_version_id: str | None = None
     plan_step_id: str | None = None
+    placeholder_id: str | None = Field(default=None, min_length=1)
 
 
 class PlanLink(TypedDict):
@@ -1981,12 +2004,17 @@ class ComponentCreated(_WireModel):
 
 
 def component_created(
-    component: dict[str, Any], *, step_id: str, plan: PlanLink | None = None
+    component: dict[str, Any],
+    *,
+    step_id: str,
+    plan: PlanLink | None = None,
+    placeholder_id: str | None = None,
 ) -> ComponentCreated:
     """The `component.created` frame for `component` (a `write_component`
     result's own `component` member), with `seq` 0 until the caller stamps it.
-    `step_id` is the step that produced it and `plan` the plan step its frame
-    came from, unless the component names its own `created_from`.
+    `step_id` is the step that produced it, `plan` the plan step its frame
+    came from and `placeholder_id` the `ComingCard` it fills, unless the
+    component names its own `created_from`.
 
     Raises:
         ValidationError: `component` does not satisfy the contract above.
@@ -1996,7 +2024,12 @@ def component_created(
             **component,
             "event": "component.created",
             "seq": 0,
-            "created_from": component.get("created_from") or {"step_id": step_id, **(plan or {})},
+            "created_from": component.get("created_from")
+            or {
+                "step_id": step_id,
+                **(plan or {}),
+                **({"placeholder_id": placeholder_id} if placeholder_id else {}),
+            },
         }
     )
 

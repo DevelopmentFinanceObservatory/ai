@@ -1063,6 +1063,9 @@ class StudioRunner:
         # The bare surface a card's unit change re-reads its spec through
         # (`harness.studio_edit.change_events`), off the Activity feed.
         self.definition_surface = tool_surface
+        # Where a card's change on a sum writes the new sum's lineage
+        # (`harness.studio_edit.change_events`), the store the executor reads.
+        self.provenance = provenance
         self.run_ledger = run_ledger
         self.early_mints = early_mints
         self.store = store
@@ -1288,9 +1291,12 @@ class _SegmentWork:
             case Outcome.PAUSED:
                 return outcome, await self._translator.finish()
             case Outcome.FAILED if not self._failed:
-                return outcome, [recorded_fatal(conversation, segment.cursor.error or {})]
+                return outcome, [
+                    *self._translator.release_removal(),
+                    recorded_fatal(conversation, segment.cursor.error or {}),
+                ]
             case Outcome.UNCLOSED if not self._failed:
-                return Outcome.CANCELLED, []
+                return Outcome.CANCELLED, [*self._translator.release_removal()]
             case Outcome.ABANDONED if self._failed:
                 return Outcome.FAILED, []
         return outcome, []
@@ -2974,6 +2980,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             conversation=conversation,
                             move=moved,
                             places=places_offered(studio.place_options),
+                            provenance=studio.provenance,
                         ),
                     ),
                     owners=studio.owners,

@@ -43,7 +43,7 @@ from enum import Enum
 from typing import Any
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
-from compiler.surface import ToolSurface
+from compiler.surface import ToolId, ToolSurface, ToolSurfaceUnavailableError
 from pydantic import BaseModel
 
 from harness.card_unit import (
@@ -52,6 +52,7 @@ from harness.card_unit import (
     ChangeMove,
     ConversationBlocks,
     ScopeYears,
+    SummedFrame,
     UnitCard,
     UnitMove,
     bound_facets,
@@ -68,9 +69,9 @@ from harness.card_unit import (
     unit_card,
     unit_pattern,
 )
-from harness.conversation import current_conversation_key
+from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
-from harness.provenance import CARD_FRAME_KEY, CardLineage
+from harness.provenance import CARD_FRAME_KEY, CardLineage, ProvenanceStore
 from harness.scope_choices import mark_planner_axes
 from harness.studio_state import (
     PLAN_LINK_KEY,
@@ -332,6 +333,7 @@ async def change_events(
     conversation: ConversationState,
     move: UnitMove | ChangeMove,
     places: bool = False,
+    provenance: ProvenanceStore | None = None,
 ) -> AsyncGenerator[EditEvent]:
     """The events of a card's change in code with no model call: its unit
     (`TurnRequest.apply_unit`, a `UnitMove`), or its years or places
@@ -352,6 +354,15 @@ async def change_events(
     among them where `places` says Search's places door is on, and the scope
     it was fetched over, so a later change keeps this one.
 
+    A card on a sum of its retrieval (`harness.card_unit.UnitCard.total`)
+    changes its years or places the same way, with one more call: once the
+    retrieval is fetched, analysis-mcp's `aggregate` is called through
+    `surface` with the parameters the sum's recipe recorded and the new
+    frame, and the card is redrawn on that sum. The sum's lineage is written
+    into `provenance` from the new retrieval's, so the card's write finds its
+    sources. A sum refused, or one whose lineage cannot be written, ends the
+    change as a refused fetch does.
+
     The turn's record (`ConversationState.turn_user_message`) names the
     change and the spec_id, with the scope a change of years or places
     fetched over, which the new card's entry keeps too (`FETCHED_KEY`). A
@@ -367,6 +378,7 @@ async def change_events(
             conversation=conversation,
             move=move,
             places=places,
+            provenance=provenance,
         ):
             yield event
     except Exception as exc:
@@ -388,6 +400,13 @@ _NO_DATA = "The data holds no figures for that choice."
 # The closing sentence of a redraw whose data counts another source, method or
 # unit than the card did, which binding the card's facets rules out.
 _OTHER_BASIS = "The data for that choice is counted another way."
+# The step and closing sentence of a sum that could not be worked out again
+# over the new data: analysis-mcp unreachable, or its answer or the
+# retrieval's lineage unread.
+_SUM_UNREAD = "The total for that choice could not be worked out."
+
+# The analysis-mcp tool a card on a sum is summed again by.
+_AGGREGATE = ToolId(server="analysis-mcp", name="aggregate")
 
 
 @dataclass(frozen=True)
@@ -736,6 +755,7 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
     conversation: ConversationState,
     move: UnitMove | ChangeMove,
     places: bool,
+    provenance: ProvenanceStore | None,
 ) -> AsyncGenerator[EditEvent]:
     """`change_events`' steps, their frames numbered by `edit_event_frames`."""
     if surface is None:
@@ -781,6 +801,16 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         for event in _close(f"{_UNIT_UNCHANGED} {_NO_DATA}"):
             yield event
         return
+    frame_ref = frame_refs[0]
+    if card.total is not None:
+        summed = await _summed_again(surface, provenance, card.total, fetched)
+        if isinstance(summed, str):
+            yield _step("u2", label, failed=summed)
+            for event in _close(f"{_UNIT_UNCHANGED} {summed}"):
+                yield event
+            return
+        frame_ref, total = summed
+        card = replace(card, total=total)
     card = await _with_years(surface, conversation, card, read)
     yield _step("u2", label)
 
@@ -793,7 +823,7 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
             yield event
         return
 
-    intent, retitle = _redrawn_intent(stored, frame_refs[0], move)
+    intent, retitle = _redrawn_intent(stored, frame_ref, move)
     written = await recorder(tool="write_component", args={"intent": intent})
     if written.get("outcome") != "ok" or not written.get("component"):
         for event in _refused("u3", "Redraw the card", _UNIT_UNCHANGED, written):
@@ -807,12 +837,18 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
     shown = read.phrase.removeprefix("in ").removeprefix("for ")
     # A change of years or places names the scope the card now shows, so the
     # next turn's model fetches what the card draws.
+    summed_with = (
+        ""
+        if card.total is None
+        else f", then aggregate {json.dumps(card.total.parameters, sort_keys=True)}"
+    )
     record_line = (
         f"Changed {move.title} to {shown} ({read.spec_id})."
         if read.scope is None
         else f"Changed {move.title} to {shown} "
         "(get_data "
-        f"{json.dumps(card.fetch_args(read.spec_id, read.scope, facets=facets), sort_keys=True)})."
+        f"{json.dumps(card.fetch_args(read.spec_id, read.scope, facets=facets), sort_keys=True)}"
+        f"{summed_with})."
     )
     display_line = f"Change {move.title} to {shown}."
 
@@ -841,6 +877,65 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         card=card,
         intent=intent,
     )
+
+
+async def _summed_again(  # noqa: PLR0911 -- one sentence per way the sum fails
+    surface: ToolSurface,
+    provenance: ProvenanceStore | None,
+    total: SummedFrame,
+    fetched: Mapping[str, Any],
+) -> tuple[dict[str, str], SummedFrame] | str:
+    """The sum `total` over the retrieval `fetched` gave: analysis-mcp's
+    `aggregate` called with the parameters `total` recorded and the
+    retrieval's frame, as the store holds it (`store_refs`), in place of the
+    one it read. Its frame comes back with the sum it is, and its lineage is
+    written into `provenance` as the new retrieval's, with the count of
+    StatVars the old sum's lineage holds. Otherwise the sentence the change
+    ends on: no figures for a sum with no rows, else `_SUM_UNREAD`, or the
+    sentence for the code `aggregate` refused with."""
+    refs = fetched.get("store_refs") or fetched.get("frame_refs") or []
+    root = refs[0] if refs and isinstance(refs[0], Mapping) else {}
+    root_pair = (root.get("spec_id"), root.get("content_version"))
+    if not all(isinstance(part, str) and part for part in root_pair):
+        return _SUM_UNREAD
+    try:
+        answer = await surface.call_tool(
+            tool=_AGGREGATE, arguments={**total.parameters, "frame_ref": dict(root)}
+        )
+    except ToolSurfaceUnavailableError as exc:
+        logger.warning("a card's sum was not worked out again: %s", exc)
+        return _SUM_UNREAD
+    result = answer.structured_content or {}
+    if answer.is_error:
+        logger.info("a card's sum was refused (%s): %s", result.get("code"), result.get("message"))
+        return failure_detail(result)
+    spec_id, content_version = result.get("spec_id"), result.get("content_version")
+    if not isinstance(spec_id, str) or not isinstance(content_version, str):
+        return _SUM_UNREAD
+    if result.get("rows") == 0:
+        return _NO_DATA
+    if provenance is not None:
+        conversation = current_conversation_id.get()
+        old_spec_id, old_content_version = total.frame
+        linked = provenance.alias(
+            conversation=conversation,
+            spec_id=spec_id,
+            content_version=content_version,
+            sources=[(str(root_pair[0]), str(root_pair[1]))],
+            stat_var_count=provenance.stat_var_count(
+                conversation=conversation,
+                spec_id=old_spec_id,
+                content_version=old_content_version,
+            ),
+        )
+        if not linked:
+            return _SUM_UNREAD
+    summed = SummedFrame(
+        frame=(spec_id, content_version),
+        root=(str(root_pair[0]), str(root_pair[1])),
+        parameters=dict(total.parameters),
+    )
+    return {"spec_id": spec_id, "content_version": content_version}, summed
 
 
 def _changed_card(move: UnitMove | ChangeMove, read: _Read) -> UnitCard:
@@ -1134,7 +1229,10 @@ def _swapped(
     token = recorder.write_token(component)
     lineage = recorder.card_lineage(component)
     blocks = ConversationBlocks(conversation.turn_specs, conversation.turns, specs)
-    drawn = unit_card(component, lineage, blocks)
+    # A card on a sum reads its sum off the card it was fetched or rebuilt
+    # as, which names the frame the sum gave and the retrieval it read: the
+    # lineage of the written card must name both.
+    drawn = unit_card(component, lineage, blocks, total=card.total if card is not None else None)
     card = card if card is not None and drawn is not None else drawn
     if card is not None:
         block = blocks.get(card.spec_id)

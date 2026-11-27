@@ -1,0 +1,21 @@
+{
+  "event": "activity.step",
+  "seq": 3,
+  "step_id": "s1",
+  "label": "Making 2 charts",
+  "status": "running",
+  "detail": "Official aid to Ethiopia \u00b7 +1 more",
+  "tool": "make_charts",
+  "coming": [
+    {
+      "placeholder_id": "s1.0",
+      "type": "stat_card",
+      "title": "Official aid to Ethiopia"
+    },
+    {
+      "placeholder_id": "s1.1",
+      "type": "line_chart",
+      "title": "Official aid to Ethiopia by donor"
+    }
+  ]
+}

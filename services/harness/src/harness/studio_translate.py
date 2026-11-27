@@ -47,7 +47,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from common.period_note import period_note
@@ -81,12 +81,15 @@ from submission.service import SEARCH_DEFAULT_RATIONALE
 from harness import plan_display
 from harness.card_unit import (
     ConversationBlocks,
+    SummedFrame,
     UnitCard,
     card_changes,
     card_unit_change,
     encoded,
+    read_summed_frame,
     unit_card,
 )
+from harness.chart_binding import MAX_CHARTS_PER_CALL
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.fatal_codes import stated_refusal, wire_error
 from harness.graph.events import AgentStatus, GraphEvent, PlannerStarted, StepProgress
@@ -101,7 +104,7 @@ from harness.graph.state import (
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
-from harness.orchestrator_tools import HANDED_OFF, cut_cards
+from harness.orchestrator_tools import HANDED_OFF, current_chart_entry, cut_cards
 from harness.provenance import (
     CARD_FRAME_KEY,
     CARD_LINEAGE_KEY,
@@ -149,6 +152,7 @@ from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
     ClientFeature,
+    ComingCard,
     ComponentCreated,
     CompositionUpdated,
     Done,
@@ -500,6 +504,10 @@ class _ExecutorRecord:
     # The lineage of the frame a drawn card rests on, taken off its result
     # with the write token, which the card's write commits with the card.
     card_lineage: CardLineage | None = None
+    # The `make_charts` call and chart entry a write drew, read off
+    # `harness.orchestrator_tools.current_chart_entry` at call time; `None`
+    # for a call outside `make_charts`.
+    chart_entry: tuple[str, int] | None = None
 
 
 class _Records:
@@ -667,6 +675,7 @@ class _RecordingExecutor:
                 step_id=step_id if step_id is not None else current_step_id.get(),
                 write_token=write_token,
                 card_lineage=card_lineage,
+                chart_entry=current_chart_entry.get(),
             )
         )
 
@@ -1209,6 +1218,10 @@ def _chart_key(chart: Mapping[Any, Any]) -> _ChartKey:
     its frame and its type. A corrected chart keeps both and changes its title
     or select."""
     return (str(chart.get("frame")), str(chart.get("type")))
+
+
+# The types a `make_charts` chart can be, as a `ComingCard` states them.
+_CHART_TYPES = frozenset(get_args(ComingCard.model_fields["type"].annotation))
 
 
 def _asked_charts(args: Mapping[str, Any]) -> list[Any]:
@@ -1880,6 +1893,15 @@ class _Translator:
         self._unanswered: list[tuple[str, str]] = []
         # The highest composition revision this stream has sent.
         self._sent_revision = 0
+        # The placeholder id of each chart entry a running `make_charts` line
+        # announced (`ActivityStep.coming`), by (call id, entry index), until
+        # a card names it or the line closes.
+        self._coming: dict[tuple[str, int], str] = {}
+        # Whether a `remove_cards` changed the canvas and its
+        # `composition.updated` is held, to go out beside the next drawing
+        # line so the canvas never shows empty while the cards replacing the
+        # removed ones are drawn (`_release_removal`).
+        self._removal_held = False
 
     async def translate_recorded(self, event: SegmentEvent, marks: RecordMarks) -> list[Any]:
         """The frames of `event`, emitted with `marks` (`_EventRecords`):
@@ -1916,6 +1938,7 @@ class _Translator:
                 # a plan step's among them, show before the turn's error.
                 return [
                     *await self._record_frames(records),
+                    *self._release_removal(),
                     _stream_fatal(self._conversation, error),
                 ]
             case ToolsAnswered(answers=answers, state=state):
@@ -1946,6 +1969,7 @@ class _Translator:
         frames: list[Any] = []
         match event:
             case Paused():
+                frames.extend(self._release_removal())
                 frames.extend(self._close_status())
                 if event.kind == APPROVE_PAUSE:
                     frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
@@ -2315,16 +2339,15 @@ class _Translator:
             else {}
         )
         frames: list[Any] = self._close_starting() if records else []
-        # A removal changed the canvas as its tool ran, before any landing
-        # below, so its frame goes first. It carries the live canvas, the
-        # latest one this instance wrote, rather than the one the removal
-        # wrote: a `/composition` edit may have written a newer revision on
-        # top of the removal since (`StudioStore.mutate_composition`), and
-        # the client renders every update, so an older one would undo that
-        # edit on screen. One frame stands for every removal since the last
-        # drain.
+        # A removal changed the canvas as its tool ran. Its frame is held
+        # until the next response's drawing line (`_agent_response`), unless
+        # a card these records drew lands, before which it goes out.
         if self._conversation.take_unreported_removal():
-            frames.extend(self._composition_update())
+            self._removal_held = True
+        if any(
+            record.land and isinstance(record.result.get("component"), dict) for record in records
+        ):
+            frames.extend(self._release_removal())
         for record in records:
             if self._unshown(record):
                 continue
@@ -2338,8 +2361,15 @@ class _Translator:
                 # (`stored_card_unreadable`). A bare executor's card is logged
                 # and left off the wire here.
                 plan = self._plan_of(record)
+                placeholder = (
+                    self._coming.pop(record.chart_entry, None)
+                    if record.chart_entry is not None
+                    else None
+                )
                 try:
-                    created = component_created(component, step_id=step_id, plan=plan)
+                    created = component_created(
+                        component, step_id=step_id, plan=plan, placeholder_id=placeholder
+                    )
                 except ValidationError as fault:
                     log_unreadable_card(
                         logger, component, fault, where="record_frames", frame=step_id
@@ -2385,6 +2415,9 @@ class _Translator:
                         record.card_lineage,
                         created=created,
                         intent=record.args.get("intent"),
+                        # A card on a sum of one retrieval changes as one on
+                        # the retrieval's frame does (`harness.card_unit`).
+                        total=await read_summed_frame(record.card_lineage),
                     )
                     if lands
                     else None
@@ -2410,16 +2443,18 @@ class _Translator:
         *,
         created: ComponentCreated,
         intent: Any = None,
+        total: SummedFrame | None = None,
     ) -> UnitCard | None:
         """The `UnitCard` of `component` when it can change, with its
         `unit_change` and `card_changes` set on `created`: a card drawing one
-        retrieval's own frame of a spec whose Search block, this turn's or one
-        an earlier turn kept, converts its unit, offers other years, or binds
-        places (`harness.card_unit`). The encoding is the one `intent`, the
-        card's written intent, fixes (`harness.card_unit.encoded`)."""
+        retrieval's own frame, or `total`, the sum of it the card's frame is,
+        of a spec whose Search block, this turn's or one an earlier turn
+        kept, converts its unit, offers other years, or binds places
+        (`harness.card_unit`). The encoding is the one `intent`, the card's
+        written intent, fixes (`harness.card_unit.encoded`)."""
         c = self._conversation
         blocks = ConversationBlocks(c.turn_specs, c.turns)
-        card = unit_card(component, lineage, blocks)
+        card = unit_card(component, lineage, blocks, total=total)
         if card is None:
             return None
         block = blocks.get(card.spec_id)
@@ -2523,6 +2558,24 @@ class _Translator:
         return await self._recorder.store.change_canvas(
             *key, land, lineage=card_lineage, landed=lambda landed: landed == "created"
         )
+
+    def _release_removal(self) -> list[CompositionUpdated]:
+        """The held removal's `composition.updated`, once, or none when none
+        is held. It carries the live canvas, the latest one this instance
+        wrote, rather than the one the removal wrote: a `/composition` edit
+        may have written a newer revision on top of the removal since
+        (`StudioStore.mutate_composition`), and the client renders every
+        update, so an older one would undo that edit on screen. One frame
+        stands for every removal held."""
+        if not self._removal_held:
+            return []
+        self._removal_held = False
+        return self._composition_update()
+
+    def release_removal(self) -> list[CompositionUpdated]:
+        """`_release_removal` for a segment that ends with no `finish`, on a
+        failure the turn's cursor records or a Stop."""
+        return self._release_removal()
 
     def _composition_update(self) -> list[CompositionUpdated]:
         """The `composition.updated` frame for the conversation's stored
@@ -3012,7 +3065,35 @@ class _Translator:
                 detail,
             )
             frames.append(frame)
-        return frames
+            if name == "make_charts":
+                frame.coming = self._announce(call.id, frame.step_id, args) or None
+                # The held removal goes out beside the first line that draws
+                # the cards replacing the removed ones.
+                frames.extend(self._release_removal())
+        # A response that draws nothing releases the held removal.
+        return [*self._release_removal(), *frames]
+
+    def _announce(
+        self, call_id: str | None, step_id: str, args: Mapping[str, Any]
+    ) -> list[ComingCard]:
+        """The `ComingCard` of each chart a `make_charts` call with `args`
+        asks for, up to the `MAX_CHARTS_PER_CALL` it draws, each kept by its
+        call and entry index for the card that fills it (`_coming`). An entry
+        whose type or title does not read is left out, its index kept, and so
+        is every entry of a call with no id, whose cards no record ties to it."""
+        if not call_id:
+            return []
+        coming = []
+        for index, chart in enumerate(_asked_charts(args)[:MAX_CHARTS_PER_CALL]):
+            if not isinstance(chart, Mapping):
+                continue
+            kind, title = chart.get("type"), chart.get("title")
+            if kind not in _CHART_TYPES or not isinstance(title, str):
+                continue
+            placeholder = f"{step_id}.{index}"
+            self._coming[(call_id, index)] = placeholder
+            coming.append(ComingCard(placeholder_id=placeholder, type=kind, title=title))
+        return coming
 
     def _answered(self, answers: Sequence[types.FunctionResponse]) -> list[types.FunctionResponse]:
         """The answers of the agent's latest response's calls, in call order:
@@ -3093,6 +3174,11 @@ class _Translator:
             opened = self._open_calls.get(response.id or "")
             if opened is None:
                 continue
+            if response.name == "make_charts":
+                # The line closes, and its placeholders no card named end with it.
+                self._coming = {
+                    key: value for key, value in self._coming.items() if key[0] != response.id
+                }
             step_id, label, args, started, running = opened
             if failed:
                 status, detail = StepStatus.FAILED, _answer_failure(answer)
@@ -3380,6 +3466,7 @@ class _Translator:
         frames: list[Any] = [
             *self._take_restored(),
             *await self._drain_recorder(),
+            *self._release_removal(),
             *self._close_status(),
         ]
         # A held refusal no later call corrected is a failed step after all.
