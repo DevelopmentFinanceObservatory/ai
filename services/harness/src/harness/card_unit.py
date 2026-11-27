@@ -121,12 +121,14 @@ _ROOT_SCOPE_MEMBERS = frozenset({"entities", "window", "facets"})
 class SummedFrame:
     """The one `aggregate` call a card's derived frame was computed by, as
     dfo-apis' analysis runner recorded it in the frame's recipe: the frame it
-    gave (`frame`), the retrieval frame it read, as the store holds it
+    gave (`frame`), the retrieval frame it read, as the runner recorded it
     (`root`), and the pair the data API serves that retrieval under
     (`served`), each as `(spec_id, content_version)`, and the parameters it
-    was called with besides the frame, as recorded (`summed_frame`). The two
-    retrieval pairs differ for a frame minted with extra columns, and only
-    the served one can be described (`ProvenanceInput.served_ref`)."""
+    was called with besides the frame, as recorded (`summed_frame`). For a
+    frame minted with extra columns, `root`, the served pair and the frame
+    key the card's lineage holds the retrieval under all differ. Only the
+    served pair names the retrieval on both sides, and only it can be
+    described (`ProvenanceInput.served_ref`)."""
 
     frame: tuple[str, str]
     root: tuple[str, str]
@@ -220,9 +222,12 @@ def summed_frame(  # noqa: PLR0911 -- one `None` per way a recipe is not one sum
 async def read_summed_frame(lineage: CardLineage | None) -> SummedFrame | None:
     """The sum a card drawn from `lineage` shows (`summed_frame`), read from
     the recipe dfo-apis' analysis runner stored with its frame: one read, made
-    only for a derived (`ops_`) frame resting on one retrieval, whose frame
-    must be the sum's root. `None` for any other card, and when the recipe
-    cannot be read, so such a card offers no change."""
+    only for a derived (`ops_`) frame resting on one retrieval, which must be
+    the sum's root. The two are matched by the pair the data API serves the
+    retrieval under (`SummedFrame.served`), since the runner records the
+    frame it read under a pair of its own, which neither the lineage's frame
+    key nor the store's pair is. `None` for any other card, and when the
+    recipe cannot be read, so such a card offers no change."""
     if lineage is None or len(lineage.lineage) != 1:
         return None
     frame = _pair(list(lineage.frame))
@@ -237,7 +242,7 @@ async def read_summed_frame(lineage: CardLineage | None) -> SummedFrame | None:
         return None
     summed = summed_frame(recipe, frame)
     (member,) = lineage.lineage
-    if summed is None or summed.root != (member.spec_id, member.content_version):
+    if summed is None or summed.served != _pair(member.served_ref):
         return None
     return summed
 
@@ -914,7 +919,7 @@ def unit_card(
     summed = (
         total is not None
         and total.frame == lineage.frame
-        and total.root == (member.spec_id, member.content_version)
+        and total.served == (served["spec_id"], served["content_version"])
     )
     if not own and not summed:
         return None

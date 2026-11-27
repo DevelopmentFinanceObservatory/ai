@@ -2618,6 +2618,9 @@ _SUM_PARAMETERS = {"aggregation": "sum", "group_by": ["time_period", "financingR
 # The pair the store holds the first retrieval under, minted with extra
 # columns, beside the pair the data API serves it under (`_REF`).
 _STORED = {"spec_id": _SPEC, "content_version": "cv_" + "8" * 32}
+# The pair the analysis runner records the retrieval it summed under, which
+# is neither of the other two.
+_RUNNER = {"spec_id": _SPEC, "content_version": "cv_" + "7" * 32}
 
 
 def _sum_recipe(
@@ -2763,7 +2766,7 @@ def _summed_app(
     async def recipe_of(ref: Any) -> dict[str, Any] | None:
         if ref.spec_id != _SUM_OPS["spec_id"]:
             return None
-        return _sum_recipe(_STORED, _REF, parameters)
+        return _sum_recipe(_RUNNER, _REF, parameters)
 
     monkeypatch.setattr(card_unit, "derived_recipe", recipe_of)
     provenance = ProvenanceStore()

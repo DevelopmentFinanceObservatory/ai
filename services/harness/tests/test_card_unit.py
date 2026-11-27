@@ -16,6 +16,8 @@ from harness import card_unit, chart_binding, derived_frames, place_options
 from harness.card_unit import frame_arguments, retitled, unit_card
 from harness.provenance import CardLineage, ProvenanceInput, lineage_from_json, lineage_json
 from harness.studio import _read_card_change
+from harness.studio_state import ConversationState
+from harness.studio_translate import _RecordingExecutor, _Translator
 from harness.wire import (
     CardChanges,
     PlaceOption,
@@ -26,8 +28,11 @@ from harness.wire import (
     UnitOffer,
     UnitPrices,
     WindowOffer,
+    component_created,
 )
 from pydantic import ValidationError
+
+from .turn_driver import unconnected_store
 
 _DEFAULT = {"format": "parquet", "bundle": False, "layout": "frame"}
 _SPEC = "spec_" + "b" * 32
@@ -1011,8 +1016,11 @@ async def test_the_recorded_sum_of_health_aid_to_kenya_reads_as_one_sum_by_year(
     """The manifest dfo-apis served for the live sum by year and recipient of
     health aid to Kenya. Its tree names each node's frame, the root node's
     among them, and its root is stored under a pair of its own beside the
-    pair the data API serves (`dataset`). The card reads it as one sum of its
-    stored retrieval, and keeps the served pair to describe it by."""
+    pair the data API serves (`dataset`). The card's lineage holds the
+    retrieval under the frame key the harness recorded for it
+    (`cv_28dd…`), a third pair. The card reads it as one sum of that
+    retrieval, matched by the served pair, and keeps the served pair to
+    describe it by."""
     manifest = _RECORDED_SUM
     tree, (root,) = manifest["recipe"]["tree"], manifest["recipe"]["roots"]
     assert tree["inputs"]["frame_ref"] == {"root": 0, "frame": root["frame"]}
@@ -1027,8 +1035,10 @@ async def test_the_recorded_sum_of_health_aid_to_kenya_reads_as_one_sum_by_year(
 
     monkeypatch.setattr(derived_frames, "read_derived_manifest", manifest_of)
     retrieval = {"definition": {"spec_id": served[0]}, "content_version": served[1]}
+    keyed = (served[0], "cv_28dd5e9a76102736b2088a5eb928979a")
+    assert keyed not in {stored, served}
     lineage = CardLineage(
-        component_id="cmp_1", frame=ops, lineage=(ProvenanceInput(*stored, retrieval),)
+        component_id="cmp_1", frame=ops, lineage=(ProvenanceInput(*keyed, retrieval),)
     )
 
     total = await card_unit.read_summed_frame(lineage)
@@ -1036,6 +1046,68 @@ async def test_the_recorded_sum_of_health_aid_to_kenya_reads_as_one_sum_by_year(
     assert total == card_unit.SummedFrame(
         frame=ops, root=stored, served=served, parameters=tree["op_spec"]["parameters"]
     )
+
+
+_PLAN_SUM_CARD = json.loads(
+    (Path(__file__).parent / "fixtures" / "recorded_plan_sum_card.json").read_text()
+)
+
+
+async def test_a_plan_runs_recorded_sum_offers_its_years_and_its_one_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan run drew the sum by year of health aid to Kenya. The runner
+    recorded the retrieval it summed under a frame pair of its own, which is
+    neither the lineage's frame key nor the store's, and all three name the
+    pair the data API serves. The card is read as the plan path reads it
+    (`read_summed_frame`, then `_Translator._changeable_card`) and offers
+    its years and its one recipient."""
+    recorded = _PLAN_SUM_CARD
+    manifest = recorded["derived_manifest"]
+    (root,) = manifest["recipe"]["roots"]
+    (member,) = lineage_from_json(recorded["lineage"])
+    assert (member.spec_id, member.content_version) != tuple(root["frame"].values())
+    assert member.served_ref == root["dataset"]
+    ops = (manifest["spec_id"], manifest["content_version"])
+
+    async def manifest_of(ref: Any) -> dict[str, Any]:
+        assert (ref.spec_id, ref.content_version) == ops
+        return manifest
+
+    monkeypatch.setattr(derived_frames, "read_derived_manifest", manifest_of)
+    component = recorded["component"]
+    lineage = CardLineage(component_id=component["component_id"], frame=ops, lineage=(member,))
+    block = recorded["search_block"]
+    conversation = ConversationState(conversation_id="c1")
+    conversation.turn_specs = {block["spec_id"]: block}
+    translator = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_no_call, store=unconnected_store()),
+        places=True,
+    )
+    created = component_created(component, step_id="s1")
+
+    card = translator._changeable_card(
+        component,
+        lineage,
+        created=created,
+        intent=recorded["stored_intent"],
+        total=await card_unit.read_summed_frame(lineage),
+    )
+
+    assert card is not None and created.card_changes is not None
+    window = created.card_changes.window
+    drawn = component["fact_summary"]["window"]
+    assert window is not None
+    assert (str(window.start_year), str(window.end_year)) == (drawn["start"], drawn["end"])
+    (places,) = created.card_changes.places or ()
+    assert [place.id for place in places.chosen] == block["definition"]["identity"]["entities"][
+        "destination"
+    ]
+
+
+async def _no_call(*, tool: str, args: dict[str, Any], **_: Any) -> dict[str, Any]:
+    raise AssertionError(f"no tool call expected, got {tool}")
 
 
 async def test_a_card_on_its_retrievals_own_frame_reads_no_recipe(
