@@ -4649,7 +4649,8 @@ async def test_a_closed_turn_writes_its_outcome_once_its_write_commits(
             "session_id": CONVERSATION,
             "user_id": _ACCOUNT,
             "tags": ["studio"],
-            "trace_metadata": {},
+            # The conftest runs every test on the forced `digest` arm.
+            "trace_metadata": {"history": "digest", "history_mode": "forced"},
             "request": "life expectancy in Kenya",
             "response": "done",
             "error": None,
@@ -4792,6 +4793,13 @@ async def test_a_closed_turn_logs_one_studio_turn_line_once_its_closing_write_co
         "error": "cancelled",
         "fetched_specs": ["spec_a"],
         "drawn_specs": ["spec_b"],
+        "turn": 1,
+        "history": "digest",
+        "history_arm": None,
+        "history_mode": "forced",
+        "history_assigned_turn": None,
+        "history_chain": None,
+        "carried_tokens": None,
     }
 
 
@@ -5471,24 +5479,42 @@ async def test_a_turn_loaded_from_a_row_with_no_usage_keeps_the_identity_it_take
     ]
 
 
+# Keys a stored `turn_usage` holds that `TurnUsage` has no field for.
+_UNKNOWN_USAGE_KEYS = {
+    "model_calls": 3,
+    "input_tokens": 3_000,
+    "cached_tokens": 1_000,
+    "output_tokens": 30,
+    "thinking_tokens": 9,
+}
+
+
 @pytest.mark.parametrize(
-    ("stored_trace_id", "caller", "started_at"),
+    ("stored_trace_id", "caller", "started_at", "unknown"),
     [
-        ("tr_current", "conversation:" + "c" * 32, "2026-11-19T10:00:00+00:00"),
-        ("tr_earlier", None, None),
+        ("tr_current", "conversation:" + "c" * 32, "2026-11-19T10:00:00+00:00", {}),
+        ("tr_earlier", None, None, {}),
+        (
+            "tr_current",
+            "conversation:" + "c" * 32,
+            "2026-11-19T10:00:00+00:00",
+            _UNKNOWN_USAGE_KEYS,
+        ),
     ],
-    ids=["this-turn", "another-turn"],
+    ids=["this-turn", "another-turn", "unknown-usage-keys"],
 )
 def test_a_stored_usage_reads_only_for_the_turn_it_names(
-    stored_trace_id, caller, started_at
+    stored_trace_id, caller, started_at, unknown
 ) -> None:
-    """A row whose usage names another turn's trace id reads as unset."""
+    """A row whose usage names another turn's trace id reads as unset. A row
+    holding keys `TurnUsage` has no field for reads without them."""
     stored = {
         "trace_id": "tr_current",
         "turn_usage": {
             "trace_id": stored_trace_id,
             "started_at": "2026-11-19T10:00:00+00:00",
             "caller": "conversation:" + "c" * 32,
+            **unknown,
         },
     }
     state = ConversationState(conversation_id=CONVERSATION)

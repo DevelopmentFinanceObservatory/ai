@@ -55,6 +55,7 @@ def planner_model(
         prefix_cache=prefix_cache,
         before_request=before_request,
         after_response=after_response,
+        role="planner",
     )
     provider = GoogleProvider(client=wrapped_client(client, stream))
     return GoogleModel(model_name, provider=provider, profile=GEMINI_PROFILE)

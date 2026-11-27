@@ -57,8 +57,9 @@ class of the exception the call raised (`_ERROR`). Pydantic AI's own
 `gen_ai.response.finish_reasons` maps several of Gemini's reasons onto one
 and leaves out a response that carried none. Each span also names the model
 surface the call was sent (`harness.surface.surface_fingerprint`). Those are
-the process's instruction set and tool descriptions, and short hashes of the
-system instruction and the declarations as sent.
+the process's instruction set and tool descriptions, the history arm of the
+Studio turn that sent it, and short hashes of the system instruction and the
+declarations as sent.
 """
 
 from __future__ import annotations
@@ -76,6 +77,7 @@ from google.genai import Client, errors, types
 from opentelemetry import trace
 from pydantic_ai.exceptions import ModelAPIError
 
+from harness.conversation import ModelRole, current_history, note_model_usage
 from harness.prefix_cache import CACHE_GONE_CODES, PrefixCache, against_cache
 from harness.sentences import StopCode
 from harness.surface import studio_surface, surface_fingerprint
@@ -98,6 +100,10 @@ CLIENT_CALL_ID_PREFIX = "adk-"
 # A planner call is sent at most this many times. The second send happens when
 # Gemini ends the first on a function call it could not parse.
 _ATTEMPTS = 2
+
+# How a Studio turn's history arm was chosen (`harness.conversation.TurnHistory`),
+# on each of its model spans beside `studio.surface.history`.
+HISTORY_MODE_ATTRIBUTE = "studio.history.mode"
 
 # Langfuse's `LangfuseOtelSpanAttributes.OBSERVATION_TYPE` is the observation
 # type Langfuse gives a span, ahead of the one it infers from the span's GenAI
@@ -193,6 +199,8 @@ class _Relay:
 class GeminiStream:
     """The streamed call `GoogleModel` makes, with its hooks, cache and budget.
 
+    `role` is the agent the stream serves, which each attempt that reported
+    usage names to the turn (`harness.conversation.note_model_usage`).
     `passes_text` passes answer text on as it arrives; left false, every chunk
     is held to the call's end (step 4 of the module docstring).
 
@@ -205,6 +213,7 @@ class GeminiStream:
     prefix_cache: PrefixCache | None
     before_request: BeforeRequest | None
     after_response: AfterResponse | None
+    role: ModelRole
     passes_text: bool = False
 
     def __post_init__(self) -> None:
@@ -249,9 +258,15 @@ class GeminiStream:
                             continue
                         for chunk in relay.take(item):
                             yield chunk
-            except (Exception, asyncio.CancelledError) as exc:
-                if span.is_recording():
+            except (Exception, asyncio.CancelledError, GeneratorExit) as exc:
+                if span.is_recording() and not isinstance(exc, GeneratorExit):
                     span.set_attribute(_ERROR, type(exc).__name__)
+                # The model billed what its chunks reported before the cut, a
+                # Stop, a lost lease, the caller closing the stream at a chunk
+                # or a failure mid-stream. An attempt cut before any chunk
+                # reported none.
+                note_model_usage(relay.usage, model=model, role=self.role)
+                record_usage(span, _added(spent, relay.usage))
                 raise
             unsent = relay.closing is not None and not relay.closing.sent and not sent_any
             if span.is_recording():
@@ -263,6 +278,7 @@ class GeminiStream:
                     span.set_attribute(_FINISH_REASON, relay.finish_reason or "none")
             sent_any = sent_any or (relay.closing is None or relay.closing.sent)
             usage = relay.usage
+            note_model_usage(usage, model=model, role=self.role)
             spent = _added(spent, usage)
             record_usage(span, spent)
             replaced = (
@@ -379,24 +395,30 @@ def client_call_id() -> str:
     return f"{CLIENT_CALL_ID_PREFIX}{uuid.uuid4()}"
 
 
-async def _with_client_call_ids(chunks: AsyncIterator[Chunk]) -> AsyncGenerator[Chunk]:
+async def _with_client_call_ids(chunks: AsyncGenerator[Chunk]) -> AsyncGenerator[Chunk]:
     """`chunks`, each function call that arrived without an id given one
-    (`client_call_id`).
+    (`client_call_id`), closed when this stream is.
 
     The call is stored under that id, given before its tool runs. Pydantic AI
     would invent an id of its own form, so this runs on every chunk the model
     hands Pydantic AI, a turn put in the model's place and a closing turn
     included. A chunk carries each call whole in one part, and Pydantic AI
     reads each function call part as one call, so one part gets one id.
+
+    Pydantic AI closes this stream when its caller stops reading. Closing
+    `chunks` with it lets `GeminiStream._respond` note a cut attempt's usage
+    in the turn's context, where garbage collection would close it later in
+    another.
     """
-    async for chunk in chunks:
-        if not any(_id_less_calls(chunk)):
-            yield chunk
-            continue
-        named = chunk.model_copy(deep=True)
-        for call in _id_less_calls(named):
-            call.id = client_call_id()
-        yield named
+    async with aclosing(chunks):
+        async for chunk in chunks:
+            if not any(_id_less_calls(chunk)):
+                yield chunk
+                continue
+            named = chunk.model_copy(deep=True)
+            for call in _id_less_calls(named):
+                call.id = client_call_id()
+            yield named
 
 
 def _id_less_calls(chunk: Chunk) -> list[types.FunctionCall]:
@@ -431,7 +453,10 @@ def _added(spent: Usage | None, usage: Usage | None) -> Usage | None:
 def surface_attributes(config: types.GenerateContentConfig) -> dict[str, str]:
     """The surface attributes of a call sent `config`, in canonical form. They
     hold the hash of its system instruction and of its declarations, each as the
-    SDK's JSON less unset fields, in the order sent."""
+    SDK's JSON less unset fields, in the order sent, and the history arm of the
+    Studio turn that sent it (`harness.conversation.current_history`), with how
+    that arm was chosen as `studio.history.mode`. A call outside a Studio turn
+    carries no history, and names the `digest` arm and no mode."""
     declarations = [
         json.loads(declaration.model_dump_json(exclude_none=True))
         for tool in config.tools or []
@@ -439,11 +464,16 @@ def surface_attributes(config: types.GenerateContentConfig) -> dict[str, str]:
         for declaration in tool.function_declarations or []
     ]
     instruction = config.system_instruction
-    return surface_fingerprint(
+    turn = current_history.get()
+    attributes = surface_fingerprint(
         studio_surface(),
         instruction=instruction if isinstance(instruction, str) else None,
         declarations=json.dumps(declarations, ensure_ascii=False),
+        history=turn.arm if turn is not None else "digest",
     )
+    if turn is not None and turn.mode is not None:
+        attributes[HISTORY_MODE_ATTRIBUTE] = turn.mode
+    return attributes
 
 
 def record_usage(span: trace.Span, usage: Usage | None) -> None:
@@ -715,6 +745,7 @@ class _Client:
 
 __all__ = [
     "CLIENT_CALL_ID_PREFIX",
+    "HISTORY_MODE_ATTRIBUTE",
     "NO_PARAMETERS",
     "AfterResponse",
     "BeforeRequest",

@@ -37,9 +37,9 @@ from harness.scripted import (
     scripted_publish_result,
 )
 from harness.scripted_plan import scripted_fetch_series_stats
-from harness.settings import Settings
+from harness.settings import HistorySettings, Settings
 from harness.studio import StudioRunner, create_studio_router
-from harness.studio_state import make_recall_part
+from harness.studio_state import make_carried_history, make_recall_part
 from harness.studio_store import StudioStore
 from harness.turn.store import FrameLineage, TurnStore
 from harness.turn_budget import TurnBudget, current_turn_budget
@@ -70,15 +70,16 @@ class ScriptLlm(ScriptedGenai):
     entry of `script` and recording the request (`requests`). A part is
     answered as one chunk. Once the script runs out it answers "done" in
     plain text, so a turn with no script is a plain-text answer.
-    `model` builds the orchestrator's model on it."""
+    `model` builds the orchestrator's model, `model_name`, on it."""
 
-    def __init__(self, script: Sequence[ScriptEntry] = ()) -> None:
+    def __init__(self, script: Sequence[ScriptEntry] = (), *, model_name: str = MODEL) -> None:
         super().__init__([])
         self.script: list[ScriptEntry] = list(script)
+        self.model_name = model_name
 
     def model(self, *, budget: TurnBudget | None = None) -> GoogleModel:
         """The orchestrator's model (`orchestrator.model.orchestrator_model`) on this client."""
-        return orchestrator_model(MODEL, client=self.client, budget=budget)
+        return orchestrator_model(self.model_name, client=self.client, budget=budget)
 
     async def _open(self, *, model: str, contents: Any, config: Any = None) -> Any:
         request = Request(
@@ -120,6 +121,8 @@ def orchestrator_app(
     stated_scope: StatedScopeReader | None = None,
     heartbeat_seconds: float | None = None,
     provenance: ProvenanceStore | None = None,
+    history: HistorySettings | None = None,
+    model_name: str = MODEL,
 ) -> tuple[FastAPI, ScriptLlm]:
     """The studio routes on the turn graph, and the agent's model client.
 
@@ -146,14 +149,17 @@ def orchestrator_app(
     `heartbeat_seconds`, the server's interval by default. The turn store
     keeps the lineage `provenance` holds of each frame a turn names, none
     by default. `stated_scope` reads the user's words for the turn's licence
-    and admission, none by default.
+    and admission, none by default. Every turn begins under `history`, read
+    from the environment as the app is built by default, as the server reads
+    it at startup. The orchestrator runs the model `model_name`, `MODEL` by
+    default.
     """
     if store is None:
         if engine is None:
             raise TypeError("orchestrator_app needs a store, or the engine to build one on")
         store = StudioStore(engine)
     resolved_settings = settings or Settings()
-    model = ScriptLlm(script)
+    model = ScriptLlm(script, model_name=model_name)
     resolver = resolver or no_resolver
     planner_model = handing_back_planner_failures(planner or ScriptedPlannerModel())
     ledger = (
@@ -175,6 +181,7 @@ def orchestrator_app(
             planner=planner_model,
             orchestrator=orchestrator_agent(tools, include_content=content_on_spans()),
             model=lambda: model.model(budget=current_turn_budget.get()),
+            carried=make_carried_history(store),
             tools=tools,
             executor=recorder,
             tool_surface=surface_recorder,
@@ -205,6 +212,8 @@ def orchestrator_app(
         early_mints=early_mints,
         run_ledger=ledger if isinstance(ledger, StudioRunLedger) else None,
         **({"heartbeat_seconds": heartbeat_seconds} if heartbeat_seconds is not None else {}),
+        history=history if history is not None else HistorySettings(),
+        model_name=model_name,
     )
     app = FastAPI()
     app.state.studio = studio

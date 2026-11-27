@@ -19,7 +19,13 @@ from compiler.compile import CompileIssue, CompileIssueCode, CompileResult
 from compiler.surface import ProgressReport, ToolSchema, ToolSurfaceUnavailableError
 from executor.outcomes import Accepted, RefusalKind, Refused
 from executor.run import execute_approved_plan
-from harness.scripted import SCRIPTED_SPEC, ScriptedPlannerModel, ScriptedSurface
+from google.genai import types
+from harness.scripted import (
+    SCRIPTED_SPEC,
+    ScriptedPlannerModel,
+    ScriptedSurface,
+    scripted_client,
+)
 from harness.scripted_plan import scripted_fetch_series_stats, scripted_plan
 from planner.plan import CUT_MARKER, MAX_QUESTION_CHARS, Plan, PlanStatus, cut_user_text
 from planner.workflow import ToolId
@@ -194,3 +200,18 @@ async def test_a_tool_the_scripted_surface_does_not_answer_is_not_retryable() ->
         )
 
     assert excinfo.value.retryable is False
+
+
+async def test_a_scripted_client_call_reports_usage() -> None:
+    """A `full`-arm chain resets when no call in it reported usage, so the
+    scripted client reports some, as every real Gemini call does."""
+    client = scripted_client(lambda request: types.Part(text="ok"))
+    chunks = [
+        chunk
+        async for chunk in await client.aio.models.generate_content_stream(
+            model="scripted", contents=[types.Content(role="user", parts=[types.Part(text="hi")])]
+        )
+    ]
+    usage = chunks[-1].usage_metadata
+    assert usage is not None
+    assert usage.prompt_token_count and usage.candidates_token_count

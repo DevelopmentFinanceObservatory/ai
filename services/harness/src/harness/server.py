@@ -66,12 +66,14 @@ from harness.settings import (
     COMBINED_MCP_MOUNT_PATH,
     DATA_MCP_MOUNT_PATH,
     PRESENTATION_MCP_MOUNT_PATH,
+    HistorySettings,
     Settings,
 )
 from harness.studio import StudioRunner, create_studio_router
 from harness.studio_state import (
     make_canvas_cards,
     make_canvas_series,
+    make_carried_history,
     make_recall_part,
     make_remove_cards,
 )
@@ -515,6 +517,9 @@ def create_app(
     # planner reads as it is built (`harness.planner_adapter.PlannerAdapter`).
     init_telemetry(service_name=SERVICE_NAME)
     resolved_settings = settings or Settings()
+    # Read once. An unknown value or a share outside [0, 1] refuses startup,
+    # and every turn begins under this one reading (`StudioRunner.history`).
+    history = HistorySettings()
     model_name = resolved_model_name(resolved_settings.model_name)
     # The one surface the process runs, which every agent's texts follow
     # (`harness.surface`). An unmapped model or a mixed pair refuses startup.
@@ -711,6 +716,7 @@ def create_app(
                 surface=surface,
             ),
             model=model,
+            carried=make_carried_history(store),
             tools=tools,
             executor=recorder,
             # The recorded wrapper, not the bare `tool_surface` above: the
@@ -750,6 +756,8 @@ def create_app(
         provenance=provenance,
         early_mints=early_mints,
         run_ledger=run_ledger,
+        history=history,
+        model_name=model_name,
     )
     app.state.studio = studio
     app.include_router(create_studio_router(studio, settings=resolved_settings))

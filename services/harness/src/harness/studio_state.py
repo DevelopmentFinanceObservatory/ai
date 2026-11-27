@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 import re
@@ -52,6 +53,7 @@ from harness.approval import ApprovalRecord
 from harness.card_unit import CARD_UNIT_KEY
 from harness.conversation import current_conversation_key
 from harness.reply_figures import drawn_series
+from harness.settings import DIGEST_HISTORY, HistorySettings, StudioHistory
 from harness.turn_records import (
     TURN_CARD_PROJECTED,
     TURN_CARD_RUNS,
@@ -92,6 +94,7 @@ from harness.wire import (
 if TYPE_CHECKING:
     from harness.provenance import CardLineage
     from harness.studio_store import StudioStore
+    from harness.turn.node import TurnKey
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +210,15 @@ CONVERSATION_DIGEST_MAX_BYTES = 5_000
 # What a newest turn's ask and answer are cut to once the newest turn alone
 # is over the digest's cap, halved each further try.
 _HISTORY_NEWEST_TEXT_CAP = CONVERSATION_DIGEST_MAX_BYTES // 2
+# On the `full` history arm, the most tokens a carried conversation may hold,
+# counted as the largest input plus output tokens any call in it reported
+# (`harness.graph.orchestrate.carried_record`). Past it the next turn opens a
+# fresh chain from the digest (`carried_opening`).
+CARRIED_HISTORY_TOKEN_CAP = 60_000
+# The chain reset a turn logs when the previous turn, on the `full` arm,
+# closed `done` and the write that would have stored its record and carry
+# failed (`harness.studio_store.record_closed_turn`).
+CHAIN_RESET_CLOSE_FAILED = "close_failed"
 type RecallPart = Literal["plan", "readings", "canvas"]
 # What `recall_part` renders of a turn's plan records, or of its readings, in
 # characters, which a turn's plans share. `_RECALL_ID_CAP` is the most component
@@ -501,6 +513,9 @@ class Segment:
 # The message, and the `event` field, of the log line `StudioStore` writes
 # for each turn close and each pause one of its writes commits.
 TURN_LOG_EVENT = "studio.turn"
+# The message, and the `event` field, of the log line written for each model
+# call attempt of a turn (`harness.studio_store.write_model_call_line`).
+MODEL_CALL_LOG_EVENT = "studio.model_call"
 
 # A turn record's `ended_by` for a turn the user ended by typing a different
 # question on its plan card (`ConversationState.close_turn`).
@@ -524,6 +539,35 @@ _ASKED_FOR = (
 )
 
 
+# The salt ahead of the conversation id in the hash that assigns its history
+# arm (`history_arm`), so another split hashed on the same ids divides the
+# conversations independently of this one.
+_HISTORY_ARM_SALT = "studio_history:"
+
+
+def history_arm(conversation_id: str, *, full_share: float) -> StudioHistory:
+    """The history arm `STUDIO_HISTORY=split` assigns `conversation_id`:
+    `full` when the first 8 bytes of the sha256 of the salted id, read as an
+    unsigned integer over 2**64, fall below `full_share`, else `digest`."""
+    digest = hashlib.sha256(f"{_HISTORY_ARM_SALT}{conversation_id}".encode()).digest()
+    return "full" if int.from_bytes(digest[:8], "big") / 2**64 < full_share else "digest"
+
+
+def _loads_as_history(history: object) -> bool:
+    """Whether `history`, a stored carried conversation, is JSON text that
+    validates as this revision's `orchestrator.run.StoredHistory`."""
+    # `orchestrator.run` imports `harness.graph.state`, which imports this module.
+    from orchestrator.run import StoredHistory  # noqa: PLC0415
+
+    if not isinstance(history, str):
+        return False
+    try:
+        StoredHistory.model_validate_json(history)
+    except ValidationError:
+        return False
+    return True
+
+
 @dataclass
 class TurnUsage:
     """Who asked the current turn and which specs it used, for its
@@ -543,6 +587,21 @@ class TurnUsage:
     reads as unset (`harness.studio_store._turn_usage`). `started_at` is when
     `begin_turn` began the turn, as an ISO 8601 UTC timestamp, so a turn
     closed days later still counts on the day it ran.
+
+    `turn` is the turn's number in its conversation, and the history fields
+    say how its orchestrator read the earlier turns, fixed by `begin_turn`
+    (`ConversationState.fix_history`). `history` is the turn's effective arm,
+    `digest` or `full`, which its opening, its carry and its model spans
+    follow. `history_mode` is `split` when that arm is the one stored with the
+    conversation, or `forced` when `STUDIO_HISTORY` named the arm for every
+    turn. `history_arm` and `history_assigned_turn` are the stored arm and the
+    turn that assigned it, `None` when none is stored. `history_chain` says how
+    a `full` turn's orchestrator opened: `fresh` on a first turn, `extended`
+    on the previous turn's conversation, of `carried_tokens` tokens, or
+    `reset:<reason>` from the whole digest (`ConversationState.carried_opening`).
+    It is `None` on a `digest` turn and on a turn that opened no orchestrator,
+    such as an Edit Card. Each is `None` on a turn that began before the
+    harness kept it.
     """
 
     trace_id: str | None = None
@@ -554,6 +613,13 @@ class TurnUsage:
     prompt_source: str | None = None
     fetched_specs: list[str] = field(default_factory=list)
     drawn_specs: list[str] = field(default_factory=list)
+    turn: int | None = None
+    history: StudioHistory | None = None
+    history_mode: Literal["split", "forced"] | None = None
+    history_arm: StudioHistory | None = None
+    history_assigned_turn: int | None = None
+    history_chain: str | None = None
+    carried_tokens: int | None = None
 
     @property
     def user_id(self) -> str | None:
@@ -567,9 +633,15 @@ class TurnUsage:
 
     @property
     def trace_metadata(self) -> dict[str, str]:
-        """The Langfuse trace metadata of the turn: its `prompt_source`, when
-        it has one."""
-        return {"prompt_source": self.prompt_source} if self.prompt_source else {}
+        """The Langfuse trace metadata of the turn: its `prompt_source`, and
+        its history arm and mode (`history`, `history_mode`), each when it has
+        one."""
+        metadata = {
+            "prompt_source": self.prompt_source,
+            "history": self.history,
+            "history_mode": self.history_mode,
+        }
+        return {key: value for key, value in metadata.items() if value}
 
     def copy(self) -> TurnUsage:
         """A copy whose spec lists are lists of their own."""
@@ -657,6 +729,22 @@ class ConversationState:
     # `harness.studio_store.keep_turn_records` keeps it back here. No model
     # reads it.
     licence: dict[str, Any] | None = None
+    # On the `full` history arm, the orchestrator's conversation as the
+    # latest closed turn's reply left it: `{"turn", "history", "tokens",
+    # "model"}`, where `turn` is the turn's number and the rest is the turn's
+    # `harness.graph.orchestrate.carried_record`. `close_turn` sets it from
+    # `turn_carried`, or to None when the turn closed with no conversation to
+    # carry or on an error, which breaks the chain (`carried_opening`). It is
+    # the one stored copy: the next turn's inputs name it by reference
+    # (`harness.graph.state.CarriedRef`). A turn whose carry was lost for a
+    # known reason leaves `{"turn", "reset"}` instead, the reason the next
+    # turn's chain reset logs (`mark_carry_lost`).
+    carried_history: dict[str, Any] | None = None
+    # The history arm stored with the conversation, `{"arm", "turn"}`: the arm
+    # `STUDIO_HISTORY=split` assigned it (`history_arm`) and the number of the
+    # turn that assigned it, the first to begin under `split`. None until
+    # then. A forced `STUDIO_HISTORY` leaves it as it is (`fix_history`).
+    history_assignment: dict[str, Any] | None = None
     # The current turn's record-in-progress; reset by begin_turn.
     # `turn_user_message` is the history record's text: the message, each
     # amendment and answer, and each switch on a plan card (`add_to_turn`).
@@ -699,6 +787,13 @@ class ConversationState:
     # `approved`, and the state read hands them to a page that never read
     # the frame.
     turn_approved: list[dict[str, Any]] = field(default_factory=list)
+    # The turn's orchestrator conversation once its run closed on the reply
+    # (`harness.graph.orchestrate.carried_record`), set by the Studio
+    # translator from the `answered` edge's output once the write that closed
+    # the turn committed, and taken by `close_turn`. Not durable, and no
+    # cursor holds it. Each segment starts with none, so a turn carries only
+    # what its own orchestrator closed on in this process.
+    turn_carried: dict[str, Any] | None = None
     turn_recorded: bool = False
     # Who asked the current turn and the specs it used; set by `begin_turn`.
     turn_usage: TurnUsage = field(default_factory=TurnUsage)
@@ -919,6 +1014,67 @@ class ConversationState:
             shrink += 1
             window[-1] = _history_turn(newest[-1], shrink=shrink)
         return digest(window)
+
+    def carried_opening(self, *, model_name: str) -> tuple[str, dict[str, Any]] | None:
+        """For the open turn of the `full` arm, called on a conversation
+        whose earlier turns are all recorded, what its orchestrator, which
+        runs `model_name`, opens from: the previous turn's conversation as
+        `StoredHistory` JSON text and the conversation digest's tail, its
+        `total_turns` without the `turns` list. None opens a fresh chain from
+        the whole digest: on a first turn, or, logged with its reason, when
+        the previous turn closed with no conversation to carry
+        (`previous_turn_carried_none`), as after an error, a Stop, a pause
+        left unanswered, an Edit Card turn, a reply the harness wrote or a
+        `digest` turn, when the turn closed `done` and its closing write
+        failed (`close_failed`, `mark_carry_lost`), when another
+        model wrote it (`model_changed`), since its thought signatures are
+        that model's, when no call in it reported usage (`no_usage`), when
+        its largest call reported more than `CARRIED_HISTORY_TOKEN_CAP`
+        tokens (`token_cap`), or when it no longer loads as a
+        `StoredHistory` (`unloadable`), as after a deploy that changed the
+        message schema. The outcome is kept on the turn's usage as
+        `history_chain`, and the carried tokens as `carried_tokens`. The
+        `orchestrate` node checks the conversation again as it opens, on the
+        model it runs, which differs from `model_name` when another instance
+        resumes the turn, and records its own reset over this outcome
+        (`harness.graph.orchestrate._carried_opening`)."""
+        if not self.turns:
+            self.turn_usage.history_chain = "fresh"
+            return None
+        carried = self.carried_history
+        reason: str | None = None
+        if carried is None or carried.get("turn") != len(self.turns):
+            reason = "previous_turn_carried_none"
+        elif isinstance(lost := carried.get("reset"), str):
+            reason = lost
+        elif carried.get("model") != model_name:
+            reason = "model_changed"
+        elif not isinstance(tokens := carried.get("tokens"), int) or tokens <= 0:
+            reason = "no_usage"
+        elif tokens > CARRIED_HISTORY_TOKEN_CAP:
+            reason = "token_cap"
+        elif not _loads_as_history(carried.get("history")):
+            reason = "unloadable"
+        if reason is not None:
+            logger.info(
+                "studio history: chain reset conversation_id=%s turn=%d reason=%s tokens=%s",
+                self.conversation_id,
+                len(self.turns) + 1,
+                reason,
+                carried.get("tokens") if carried is not None else None,
+            )
+            self.turn_usage.history_chain = f"reset:{reason}"
+            return None
+        assert carried is not None
+        self.turn_usage.history_chain = "extended"
+        self.turn_usage.carried_tokens = int(carried["tokens"])
+        logger.info(
+            "studio history: chain extended conversation_id=%s turn=%d tokens=%s",
+            self.conversation_id,
+            len(self.turns) + 1,
+            carried.get("tokens"),
+        )
+        return str(carried["history"]), {"total_turns": len(self.turns)}
 
     def canvas_series_ids(self) -> list[str]:
         """The id of every series the cards on the canvas draw, in canvas
@@ -1153,10 +1309,22 @@ class ConversationState:
         record["trace_id"] = self.trace_id
         record["usage"] = dataclasses.asdict(self.turn_usage)
         self.turns.append(record)
+        self.carried_history = (
+            {"turn": len(self.turns), **self.turn_carried}
+            if self.turn_carried is not None and not error
+            else None
+        )
+        self.turn_carried = None
         # Only once a record is appended, the minimal one included.
         self.turn_recorded = True
         if error:
             self.pending.clear()
+
+    def mark_carry_lost(self, reason: str) -> None:
+        """Keep `reason` as why the latest recorded turn carries no
+        conversation, in `carried_history`'s place, for the next turn's
+        chain reset (`carried_opening`) to log."""
+        self.carried_history = {"turn": len(self.turns), "reset": reason}
 
     def _turn_record(
         self,
@@ -1394,11 +1562,20 @@ class ConversationState:
         self.latest_plan_version = None
         self.turn_choice_baseline = {}
 
-    def begin_turn(self, usage: TurnUsage | None = None, *, trace_id: str | None = None) -> None:
+    def begin_turn(
+        self,
+        usage: TurnUsage | None = None,
+        *,
+        trace_id: str | None = None,
+        history: HistorySettings = DIGEST_HISTORY,
+    ) -> None:
         """Reset per-turn wire state. Abandons any pending interrupt: a fresh
         turn.request on a paused conversation ends the pause. `usage` names
         who asks the new turn, and `trace_id` is its id, minted here when not
-        given. A previous turn this closes as `abandoned`
+        given. The turn's history arm is fixed here from `history`, the
+        process's `STUDIO_HISTORY` setting (`harness.studio.StudioRunner.history`),
+        `digest` when not given (`fix_history`), and every later segment of the
+        turn keeps it. A previous turn this closes as `abandoned`
         keeps its own trace id and usage, and its record rides the new turn's
         claim save, whose commit writes its line
         (`harness.studio_store.StudioStore.save`). It opens no span. The owner
@@ -1433,10 +1610,38 @@ class ConversationState:
         self.turn_specs = {}
         self.turn_applied_choice = None
         self.turn_approved = []
+        self.turn_carried = None
         self.turn_recorded = False
         self.turn_usage = usage if usage is not None else TurnUsage()
         self.turn_usage.trace_id = self.trace_id
         self.turn_usage.started_at = datetime.now(UTC).isoformat()
+        self.turn_usage.turn = self.turn_index
+        self.fix_history(history)
+
+    def fix_history(self, history: HistorySettings) -> None:
+        """Fix the open turn's history arm on its usage. Under
+        `STUDIO_HISTORY=split` the turn takes the arm stored with the
+        conversation, which this stores first when none is (`history_arm`),
+        so a later change of the share moves no conversation already
+        assigned. Under `digest` or `full` the turn takes that arm, and the
+        stored one stays as it is, so a return to `split` finds it."""
+        usage = self.turn_usage
+        if history.studio_history == "split" and self.history_assignment is None:
+            self.history_assignment = {
+                "arm": history_arm(
+                    self.conversation_id, full_share=history.studio_history_full_share
+                ),
+                "turn": self.turn_index,
+            }
+        stored = self.history_assignment
+        usage.history_arm = stored["arm"] if stored is not None else None
+        usage.history_assigned_turn = stored["turn"] if stored is not None else None
+        if history.studio_history == "split":
+            usage.history, usage.history_mode = usage.history_arm, "split"
+        else:
+            usage.history, usage.history_mode = history.studio_history, "forced"
+        usage.history_chain = None
+        usage.carried_tokens = None
 
     def next_seq(self) -> int:
         value = self.seq
@@ -1469,6 +1674,49 @@ def make_recall_part(store: StudioStore) -> Any:
         return conversation.recall_part(part=part, turn=turn, component_id=component_id, runs=runs)
 
     return recall_part
+
+
+def make_carried_history(store: StudioStore) -> CarriedHistory:
+    """The source the `orchestrate` node reads a `full` turn's carried
+    conversation through and records its chain reset on
+    (`harness.graph.orchestrate.CarriedSource`), on the conversations this
+    instance holds, with no database access."""
+    return CarriedHistory(store)
+
+
+@dataclass
+class CarriedHistory:
+    """`make_carried_history`'s source, on `store`'s live conversations."""
+
+    store: StudioStore
+
+    def history(self, key: TurnKey) -> dict[str, Any] | None:
+        """The stored `ConversationState.carried_history` of the conversation
+        `key` names: an empty mapping when it stores none, and None when this
+        instance holds no state for it."""
+        conversation = self.store.current(key.principal, key.conversation_id)
+        if conversation is None:
+            return None
+        return conversation.carried_history or {}
+
+    def reset(self, key: TurnKey, reason: str) -> None:
+        """Record on the turn `key` names that its orchestrator opened from
+        the whole digest for `reason`, as its `history_chain`, with no
+        carried tokens, where the claim's check (`ConversationState.
+        carried_opening`) may have said `extended`. The turn's record, which
+        its line is written from, then holds the opening the request sent,
+        even when the first model call fails and the node's state is
+        dropped. Nothing is recorded once the conversation holds another turn
+        or the turn is recorded (`ConversationState.turn_recorded`)."""
+        conversation = self.store.current(key.principal, key.conversation_id)
+        if (
+            conversation is None
+            or conversation.turn_index != key.turn_index
+            or conversation.turn_recorded
+        ):
+            return
+        conversation.turn_usage.history_chain = f"reset:{reason}"
+        conversation.turn_usage.carried_tokens = None
 
 
 def make_canvas_series(store: StudioStore) -> Any:
