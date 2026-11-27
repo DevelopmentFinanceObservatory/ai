@@ -12,20 +12,32 @@ Search's options door lists the places of the type the role binds
 `common.live_apis.LiveApisClient.read_entity_options`). It reads no model and
 answers from the posted identity, in about 0.3 to 0.6 s on the dev
 deployment. `read_role_places` waits at most `PLACE_OPTIONS_DEADLINE_S` and
-keeps at most `PLACE_OPTIONS_CAP` places.
+keeps at most `PLACE_OPTIONS_CAP` places. `ApisPlaceOptions` keeps a role's
+places for `PLACE_OPTIONS_TTL_S`, so a picker's read and the change applied
+from it make one call.
+
+Places are offered only where dfo-apis serves the door, learnt when it is
+read, as the stated-scope reader learns its own door
+(`planner.stated_scope.ApisStatedScopeReader`): a 404 or an answer outside
+the contract makes `ApisPlaceOptions` read Search's capabilities document,
+and a document listing no live `options` door stops the offers for
+`PLACE_OPTIONS_TTL_S` (`ApisPlaceOptions.offering`), after which the next
+read tries the door again. Nothing is read at startup, so an apis that
+cannot be reached then costs nothing once it is back.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from common.apis_auth import apis_auth_provider
-from common.live_apis import LiveApisClient, LiveApisError
+from common.live_apis import RESPONSE_INVALID, LiveApisClient, LiveApisError
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +45,12 @@ logger = logging.getLogger(__name__)
 PLACE_OPTIONS_DEADLINE_S = 2.0
 # The most places one role lists; a longer list is cut and marked `truncated`.
 PLACE_OPTIONS_CAP = 300
+# How long `ApisPlaceOptions` keeps a role's places.
+PLACE_OPTIONS_TTL_S = 60.0
+# The door Search's capabilities document lists when apis serves the options route.
+OPTIONS_DOOR = "options"
+# The status apis answers a route it does not serve with.
+_NOT_SERVED_STATUS = 404
 
 
 class PlaceOptionsReader(Protocol):
@@ -48,6 +66,11 @@ class PlacesUnavailableError(Exception):
     """Search's options door failed or missed `PLACE_OPTIONS_DEADLINE_S`."""
 
 
+class PlacesNotServedError(PlacesUnavailableError):
+    """apis answered the options route 404 or outside its contract and its
+    capabilities document lists no live `options` door."""
+
+
 @dataclass(frozen=True)
 class RolePlaces:
     """The places a role can change to: `(ref, label)` in Search's order, at
@@ -60,32 +83,105 @@ class RolePlaces:
 class ApisPlaceOptions:
     """The `PlaceOptionsReader` of dfo-apis at `base_url` (`DFO_APIS_URL`),
     with the Cloud Run ID token `common.apis_auth.apis_auth_provider` mints.
-    Build it once for the process and close it at shutdown (`aclose`)."""
+    Build it once for the process and close it at shutdown (`aclose`).
 
-    def __init__(self, *, base_url: str) -> None:
-        self._client = LiveApisClient(
+    Each answer is kept for `PLACE_OPTIONS_TTL_S` by the identity's canonical
+    JSON and the role, read by `clock`. A door apis does not serve stops the
+    offers for `PLACE_OPTIONS_TTL_S` (`offering`)."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        client: LiveApisClient | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._client = client or LiveApisClient(
             base_url=base_url,
             auth=apis_auth_provider(base_url=base_url),
             read_timeout_s=PLACE_OPTIONS_DEADLINE_S,
             max_attempts=1,
         )
+        self._clock = clock
+        # Until when the door counts as not served, on `clock`.
+        self._unserved_until = float("-inf")
+        self._kept: dict[
+            tuple[str, str], tuple[float, tuple[tuple[tuple[str, str], ...], bool]]
+        ] = {}
 
     async def __call__(
         self, *, identity: Mapping[str, Any], role: str
     ) -> tuple[tuple[tuple[str, str], ...], bool]:
-        return await self._client.read_entity_options(identity=identity, role=role)
+        key = (json.dumps(identity, sort_keys=True, default=str), role)
+        now = self._clock()
+        kept = self._kept.get(key)
+        if kept is not None and now < kept[0]:
+            return kept[1]
+        if not self.offering():
+            raise PlacesNotServedError(role)
+        try:
+            answer = await self._client.read_entity_options(identity=identity, role=role)
+        except LiveApisError as exc:
+            if (exc.status == _NOT_SERVED_STATUS or exc.code == RESPONSE_INVALID) and not (
+                await self._door_listed()
+            ):
+                self._unserved_until = self._clock() + PLACE_OPTIONS_TTL_S
+                logger.warning(
+                    "studio place options not served: apis answered %s %s and lists no "
+                    "live %s door; cards offer no places for %.0f s",
+                    exc.status,
+                    exc.code,
+                    OPTIONS_DOOR,
+                    PLACE_OPTIONS_TTL_S,
+                )
+                raise PlacesNotServedError(role) from exc
+            raise
+        self._kept = {k: v for k, v in self._kept.items() if now < v[0]}
+        self._kept[key] = (now + PLACE_OPTIONS_TTL_S, answer)
+        return answer
+
+    def offering(self) -> bool:
+        """Whether cards offer places: false for `PLACE_OPTIONS_TTL_S` after a
+        read learnt apis serves no options door."""
+        return self._clock() >= self._unserved_until
+
+    async def _door_listed(self) -> bool:
+        """Whether Search's capabilities document lists a live options door.
+        A document that cannot be read raises a retryable failure, so the read
+        ends on a retryable refusal and the offers stay; any other reads as
+        listed, so the read's own failure stands."""
+        try:
+            doors = await self._client.read_search_doors()
+        except LiveApisError as exc:
+            logger.error(
+                "places door answered outside its contract and the search capabilities "
+                "document could not be read: status=%s code=%s",
+                exc.status,
+                exc.code,
+            )
+            if exc.retryable:
+                raise
+            return True
+        return OPTIONS_DOOR in doors
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
 
 async def read_role_places(
-    reader: PlaceOptionsReader, *, identity: Mapping[str, Any], role: str
+    reader: PlaceOptionsReader,
+    *,
+    identity: Mapping[str, Any],
+    role: str,
+    conversation_id: str = "",
+    component_id: str = "",
 ) -> RolePlaces:
     """The places role `role` of `identity`, a card's Search block identity,
-    can change to, read under `PLACE_OPTIONS_DEADLINE_S`.
+    can change to, read under `PLACE_OPTIONS_DEADLINE_S`. A failed read logs
+    the conversation and the card it was read for.
 
     Raises:
+        PlacesNotServedError: apis serves no options door (`ApisPlaceOptions`).
         PlacesUnavailableError: the door refused, failed or missed the deadline.
     """
     started = time.monotonic()
@@ -93,7 +189,13 @@ async def read_role_places(
         async with asyncio.timeout(PLACE_OPTIONS_DEADLINE_S):
             listed, truncated = await reader(identity=identity, role=role)
     except (LiveApisError, OSError, TimeoutError) as exc:
-        logger.info("places for role %s not read: %r", role, exc)
+        logger.warning(
+            "places not read: conversation=%s component=%s role=%s: %r",
+            conversation_id,
+            component_id,
+            role,
+            exc,
+        )
         raise PlacesUnavailableError(role) from exc
     logger.info(
         "places for role %s read in %.0f ms (%d listed)",
@@ -105,3 +207,11 @@ async def read_role_places(
         places=tuple(listed[:PLACE_OPTIONS_CAP]),
         truncated=truncated or len(listed) > PLACE_OPTIONS_CAP,
     )
+
+
+def places_offered(reader: PlaceOptionsReader | None) -> bool:
+    """Whether cards offer a change of places through `reader`: one is set,
+    and, for `ApisPlaceOptions`, apis has not been learnt to serve no door."""
+    if reader is None:
+        return False
+    return not isinstance(reader, ApisPlaceOptions) or reader.offering()

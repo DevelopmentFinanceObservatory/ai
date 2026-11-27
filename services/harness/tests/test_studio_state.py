@@ -2007,6 +2007,28 @@ def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_fr
     assert (restored.card, restored.frames) == (card, (note, card))
 
 
+def test_a_pending_card_or_frame_this_release_cannot_read_is_dropped_on_load() -> None:
+    """A pending entry a later release stored, its card and one frame holding a
+    member this release does not know, loads with neither, and the frames it
+    can read."""
+    raw = json.loads(
+        (
+            Path(__file__).parent / "wire_fixtures" / "studio" / "event-03-plan-proposed.json"
+        ).read_text()
+    )
+    note = MessageComplete(event="message.complete", seq=8, text="Still there.")
+    pending = _PendingInterrupt(
+        adk_id="adk_1", kind="plan", card=PlanProposed.model_validate(raw), frames=(note,)
+    )
+    entry = json.loads(json.dumps(studio_store._serialize_pending({"int_1": pending})["int_1"]))
+    entry["card"]["later_member"] = True
+    entry["frames"] = [{**entry["card"]}, *entry["frames"]]
+
+    restored = studio_store._deserialize_entry(entry)
+
+    assert (restored.card, restored.frames) == (None, (note,))
+
+
 def test_a_stored_unit_question_is_kept_in_its_whole_units_form() -> None:
     """A unit question marks the emitted frame with the `unit` input and its offer. An
     instance rolled back to a model without them, or to one that adds `decisions` to

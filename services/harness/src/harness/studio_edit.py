@@ -34,6 +34,7 @@ the turn, and writes the card to the canvas (`StudioStore.change_canvas`).
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import re
 from collections.abc import AsyncGenerator, Callable, Mapping
@@ -53,8 +54,11 @@ from harness.card_unit import (
     UnitMove,
     card_changes,
     card_unit_change,
+    chosen_places,
+    encoded,
     joined_words,
     known_blocks,
+    place_labels,
     retitled,
     unit_card,
 )
@@ -334,17 +338,19 @@ async def change_events(
     Either way `get_data` fetches the spec with the arguments that shaped the
     card's frame (`harness.card_unit.UnitCard.args`) and the scope the card
     carries, and the card is written again from its stored intent on the new
-    frame and takes its own slot, as an Edit Card recreate does. Its title,
-    and the words of its slot's card meta, say the new unit, years or places
-    where they named the old (`harness.card_unit.retitled`,
-    `_retitled_years`, `_retitled_place`), and a meta word still naming the
-    old years or places after that is dropped (`_rewritten`). The new card
+    frame and takes its own slot, as an Edit Card recreate does. A unit
+    change names the new unit in its title and meta where they named the old
+    (`harness.card_unit.retitled`); a change of years or places builds its
+    title again from its parts and drops the meta words that may name the
+    old ones (`_redrawn_intent`). The new card
     carries fresh offers, places among them where `places` says Search's
     places door is on, and the scope it was fetched over, so a later change
     keeps this one.
 
-    The turn's record names the change and the spec_id
-    (`ConversationState.turn_user_message`), and a unit change's new reading
+    The turn's record names the change and the spec_id, with the scope a
+    change of years or places fetched over, which the new card's entry keeps
+    too (`FETCHED_KEY`) (`ConversationState.turn_user_message`), and a unit
+    change's new reading
     joins the turn's readings with its block, so the next turn's model reads
     the card as it now is. A step Search or the platform refuses, and a
     retrieval that holds no figures, ends the turn on its sentence, the card
@@ -361,6 +367,12 @@ async def change_events(
     except Exception as exc:
         logger.exception("studio card change failed (trace_id=%s)", conversation.trace_id)
         yield EditFailed(exc)
+
+
+# The key of a card's digest entry naming the `get_data` arguments a change
+# fetched it with, which the model reads, so a follow-up fetch draws what the
+# card shows.
+FETCHED_KEY = "fetched_with"
 
 
 # What a closing message says before the reason for a change that did not land.
@@ -417,162 +429,163 @@ async def _read_change(surface: ToolSurface, move: UnitMove | ChangeMove) -> _Re
 
 def _redrawn_intent(
     stored: Mapping[str, Any], frame_ref: Any, move: UnitMove | ChangeMove
-) -> tuple[dict[str, Any], Callable[[str], str | None]]:
+) -> tuple[dict[str, Any], Callable[[str, str], str | None]]:
     """The intent `move` redraws its card from, on `frame_ref`, and how it
-    rewrites the words of the card's meta (`_rewritten`): `None` drops a word
-    that still names the old years or places.
+    rewrites each word of the card's meta, by name (`None` drops it).
 
     Every change drops the `order`'s period, since the new frame can hold
-    values at other periods. A change of years or places also drops the
-    intent's `window`, a period pinned on the old frame or a count of latest
-    periods that would override the new years, and a change of places drops
-    each `select` entry naming a place the card no longer shows."""
+    values at other periods. A unit change names the new unit in the title
+    and the meta where they named the old (`harness.card_unit.retitled`,
+    built from the unit offer's own words). A change of years or places
+    builds the title again from its parts (`_changed_title`) and drops the
+    model's meta words that may name the old years or places
+    (`_changed_meta`). A change of years drops the intent's `window`, a
+    period pinned on the old frame or a count of latest periods that would
+    override the new years. A change of places keeps it, since the years do
+    not change, and names the new places in each `select` entry that named
+    the role's old ones (`_reselected`)."""
     intent = {**stored, "frame_ref": frame_ref}
-    title_words: Callable[[str], str] | None = None
+    title = stored.get("title")
     match move:
         case UnitMove():
 
             def retitle(text: str) -> str:
                 return retitled(text, old=move.served, new=move.unit, offer=move.offer)
 
-        case ChangeMove(change=WindowChange() as change):
-            window = move.offer.window
-            assert window is not None, "a change of years is admitted only on an offer"
-            old, new = (window.start_year, window.end_year), (change.start_year, change.end_year)
+            if isinstance(title, str):
+                intent["title"] = retitle(title)
 
-            def retitle(text: str) -> str:
-                return _retitled_years(text, old=old, new=new)
+            def rewrite(_name: str, text: str) -> str | None:
+                return retitle(text)
 
-            def title_words(text: str) -> str:
-                return _retitled_years(text, old=old, new=new, lone=True)
-
-            def stale(text: str) -> bool:
-                return _names_years(text, old=old, new=new)
-
+        case ChangeMove(change=WindowChange()):
             intent.pop("window", None)
+            intent["title"] = _changed_title(title, move)
+            rewrite = functools.partial(_changed_meta, shown=_shown_labels(move))
         case ChangeMove(change=PlacesChange() as change):
             places = next(p for p in move.offer.places or () if p.role == change.role)
-            gone = {o.id for o in places.chosen} - set(change.entities)
-            old_labels, new_labels = list(move.old), list(move.new)
-            left = [label for label in old_labels if label not in new_labels]
-
-            def retitle(text: str) -> str:
-                return _retitled_place(text, old=old_labels, new=new_labels)
-
-            def stale(text: str) -> bool:
-                return any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", text) for w in left)
-
-            intent.pop("window", None)
+            old = {o.id for o in places.chosen}
             select = intent.get("select")
             if isinstance(select, Mapping):
                 intent["select"] = {
-                    key: value for key, value in select.items() if not _names_any(value, gone)
+                    key: _reselected(value, old, change.entities) for key, value in select.items()
                 }
-    if isinstance(stored.get("title"), str):
-        intent["title"] = (title_words or retitle)(stored["title"])
+            intent["title"] = _changed_title(title, move)
+            rewrite = functools.partial(_changed_meta, shown=_shown_labels(move))
     held = intent.get("order")
     if isinstance(held, dict) and "period" in held:
         intent["order"] = _without_period(held)
-    if isinstance(move, UnitMove):
-        return intent, retitle
-    return intent, functools.partial(_rewritten, retitle=retitle, stale=stale)
+    return intent, rewrite
 
 
-def _rewritten(
-    text: str, *, retitle: Callable[[str], str], stale: Callable[[str], bool]
-) -> str | None:
-    """`text`, a word of a card's meta, naming the new years or places where
-    it named the old (`retitle`), or `None` when it still names the old ones
-    after that (`stale`), so the card shows what the chart derives from its
-    data in its place."""
-    rewritten = retitle(text)
-    return None if stale(rewritten) else rewritten
-
-
-def _names_years(text: str, *, old: tuple[int, int], new: tuple[int, int]) -> bool:
-    """Whether `text` names a year that bounds `old` and not `new`, outside a
-    unit's words (`_period_year`)."""
-    gone = set(old) - set(new)
-    return any(_period_year(text, year) for year in gone)
-
-
-# The words around a year that make it part of a unit, such as "constant
-# 2023 US dollars" or "2023 prices", where it names a base year.
-_UNIT_BEFORE = re.compile(r"(?:constant|base\s+year)\s+$", re.IGNORECASE)
-_UNIT_AFTER = re.compile(r"^\s+(?:prices|US\s+dollars|dollars|euros|[A-Z]{3}\b)")
-
-
-# The words before a lone year that make it the start or the end of a period.
-_FROM_WORD = re.compile(r"\b(?:since|from)\s+$", re.IGNORECASE)
-_UNTIL_WORD = re.compile(r"\b(?:to|until|through)\s+$", re.IGNORECASE)
-
-
-def _period_year(text: str, year: int) -> list[re.Match[str]]:
-    """Each place `text` names `year` as a period: a standalone year outside
-    a unit's words."""
-    return [
-        m
-        for m in re.finditer(rf"(?<!\d){year}(?!\d)", text)
-        if not _UNIT_BEFORE.search(text[: m.start()]) and not _UNIT_AFTER.match(text[m.end() :])
-    ]
-
-
-def _names_any(value: Any, refs: set[str]) -> bool:
-    """Whether `value`, a `select` entry, names one of the places `refs`."""
+def _reselected(value: Any, old: set[str], new: list[str]) -> Any:
+    """`value`, a `select` entry, naming the places `new` where it names any of
+    `old`, the places a role showed: a list for a list or several places, in
+    the entry's own `dcid:` form."""
     values = value if isinstance(value, list) else [value]
-    return any(isinstance(v, str) and v.removeprefix("dcid:") in refs for v in values)
+    if not any(isinstance(v, str) and v.removeprefix("dcid:") in old for v in values):
+        return value
+    marked = any(isinstance(v, str) and v.startswith("dcid:") for v in values)
+    named = [f"dcid:{ref}" if marked else ref for ref in new]
+    return named if isinstance(value, list) or len(named) > 1 else named[0]
 
 
-def _retitled_years(
-    title: str, *, old: tuple[int, int], new: tuple[int, int], lone: bool = False
-) -> str:
-    """`title` with the range `old` it names, "2015 to 2023" or the two years
-    joined by a hyphen or an en dash, naming `new` in the same form. With
-    `lone`, a year left that bounded `old` and names a period, outside a
-    unit's words (`_period_year`), then names the new period: the new start
-    year after "since" or "from", the new end year after "to", "until" or
-    "through", and otherwise the one year when `new` starts and ends on it,
-    else "<start> to <end>". A year that bounded no end of `old` stays, and so
-    does every year when `new` is `old`."""
-    pattern = rf"(?<!\d){old[0]}(\s*[-\u2013]\s*|\s+to\s+){old[1]}(?!\d)"
-    words = str(new[0]) if new[0] == new[1] else f"{new[0]} to {new[1]}"
-
-    def lone_years(text: str) -> str:
-        if not lone or old == new:
-            return text
-        found = sorted(
-            (m for year in dict.fromkeys(old) for m in _period_year(text, year)),
-            key=lambda m: m.start(),
-        )
-        for match in reversed(found):
-            before = text[: match.start()]
-            if _FROM_WORD.search(before):
-                said = str(new[0])
-            elif _UNTIL_WORD.search(before):
-                said = str(new[1])
-            else:
-                said = words
-            text = f"{before}{said}{text[match.end() :]}"
-        return text
-
-    # The ranges are rewritten whole, and the lone years looked for only
-    # between them, so a bound the new range shares is not rewritten twice.
-    parts, at = [], 0
-    for match in re.finditer(pattern, title):
-        parts += [lone_years(title[at : match.start()]), f"{new[0]}{match.group(1)}{new[1]}"]
-        at = match.end()
-    return "".join([*parts, lone_years(title[at:])])
+# The period `orchestrator_tools._card_title` ends a title on: ", 2015 to 2023",
+# ", 2023", ", 2015/16", ", latest year", ", last 5 years", and the dashed
+# range a model writes, ", 1960-2024" or with an en dash.
+_PERIOD_TAIL = re.compile(
+    r",\s+(?:\d{4}(?:/\d{2,4})?(?:(?:\s+to\s+|\s*[-\u2013]\s*)\d{4}(?:/\d{2,4})?)?"
+    r"|latest \w+|last \d+ \w+)$"
+)
+_ANY_YEAR = re.compile(r"(?<!\d)\d{4}(?!\d)")
+# The longest title `orchestrator_tools._card_title` writes.
+_TITLE_CHARS = 120
 
 
-def _retitled_place(title: str, *, old: list[str], new: list[str]) -> str:
-    """`title` naming `new` where it names `old`: a swap of one place renames
-    it, and any other change of places names every place shown where the
-    title listed every place it showed before."""
-    said = joined_words(old)
-    if not said:
-        return title
-    pattern = rf"(?<!\w){re.escape(said)}(?!\w)"
-    return re.sub(pattern, lambda _: joined_words(new), title, count=1)
+def period_words(start: int, end: int) -> str:
+    """A period as a card title states it: "2023", "2010 to 2024"."""
+    return str(start) if start == end else f"{start} to {end}"
+
+
+def _title_subject(title: str) -> str | None:
+    """`title` without the period `make_charts` ended it on, or the whole title
+    when it ends on none; `None` when what is left still names a year, such
+    as a cut's suffix or a period the title words in its own way."""
+    subject = _PERIOD_TAIL.sub("", title, count=1)
+    return None if _ANY_YEAR.search(subject) else subject
+
+
+def _changed_title(title: Any, move: ChangeMove) -> str:
+    """The title of the card `move` redraws, built from parts, so it names no
+    year or place the card no longer shows.
+
+    A change of years keeps the subject the title opened on
+    (`_title_subject`) and states the new period after it. A change of places
+    states the measure, the places and the period the title ended on, or
+    the card's years where it ended on none, since the subject may name the
+    old places in any words. A title whose subject cannot be read, or a
+    card with no title, is built from the Search block's own facts: its
+    measure, the card's places and the period (`_composed_title`)."""
+    text = title if isinstance(title, str) else ""
+    card = replace(move.card, scope=move.scope)
+    if isinstance(move.change, WindowChange):
+        period = period_words(move.change.start_year, move.change.end_year)
+        subject = _title_subject(text) if text else None
+        if subject:
+            return f"{subject[: max(0, _TITLE_CHARS - len(period) - 2)]}, {period}"
+        return _composed_title(move.block, card, period)
+    tail = _PERIOD_TAIL.search(text)
+    window = move.offer.window
+    if tail is not None:
+        period = tail.group(0).removeprefix(",").strip()
+    elif window is not None:
+        period = period_words(window.start_year, window.end_year)
+    else:
+        period = None
+    return _composed_title(move.block, card, period)
+
+
+def _composed_title(block: Mapping[str, Any], card: UnitCard, period: str | None) -> str:
+    """A title from `block`'s facts: its measure (`measure_label`, else its
+    shape's label), the places `card` shows, and `period`."""
+    resolved = block.get("resolved") or {}
+    measure = resolved.get("measure_label") or (resolved.get("shape") or {}).get("label")
+    measure = str(measure) if measure else "The data"
+    parts = [measure[:1].upper() + measure[1:], _places_words(card, block), period]
+    return ", ".join(part for part in parts if part)[:_TITLE_CHARS]
+
+
+def _places_words(card: UnitCard, block: Mapping[str, Any]) -> str:
+    """The places `card` shows as a title states them: "France to Kenya" for a
+    flow from one party to another, else every role's places in a list."""
+    labels = {**place_labels(block), **(card.labels or {})}
+    shown = {
+        role: [labels.get(ref, ref) for ref in refs]
+        for role, refs in chosen_places(card, block).items()
+        if refs
+    }
+    if set(shown) == {"origin", "destination"}:
+        return f"{joined_words(shown['origin'])} to {joined_words(shown['destination'])}"
+    return joined_words([label for labels_ in shown.values() for label in labels_])
+
+
+def _shown_labels(move: ChangeMove) -> set[str]:
+    """The labels of every place the card showed before `move`."""
+    return {o.label for p in move.offer.places or () for o in p.chosen} | set(move.old)
+
+
+def _changed_meta(name: str, text: str, *, shown: set[str]) -> str | None:
+    """A word of the card's meta after a change of years or places: the
+    subtitle and the description, which the model wrote about the old years
+    and places, are dropped, and an axis label is kept only when it names no
+    year and none of the places in `shown`, the ones the card showed."""
+    if name in {"subtitle", "description"}:
+        return None
+    if _ANY_YEAR.search(text) or any(
+        re.search(rf"(?<!\w){re.escape(label)}(?!\w)", text) for label in shown if label
+    ):
+        return None
+    return text
 
 
 async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse the change
@@ -634,7 +647,15 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
             yield event
         return
     shown = read.phrase.removeprefix("in ").removeprefix("for ")
-    record_line = f"Changed {move.title} to {shown} ({read.spec_id})."
+    card = replace(move.card, spec_id=read.spec_id, scope=read.scope)
+    # A change of years or places names the scope the card now shows, so the
+    # next turn's model fetches what the card draws.
+    record_line = (
+        f"Changed {move.title} to {shown} ({read.spec_id})."
+        if read.scope is None
+        else f"Changed {move.title} to {shown} "
+        f"(get_data {json.dumps(card.fetch_args(read.spec_id, read.scope), sort_keys=True)})."
+    )
     display_line = f"Change {move.title} to {shown}."
 
     def record(work: ConversationState) -> None:
@@ -659,9 +680,8 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         places=places,
         # The card left the canvas while it was written.
         gone=gone,
-        card=UnitCard(
-            spec_id=read.spec_id, args=move.card.args, scope=read.scope, labels=move.card.labels
-        ),
+        card=card,
+        intent=intent,
     )
 
 
@@ -849,6 +869,10 @@ async def _edit_flow(
         closed=EditClosed(closing),
         places=places,
         reframed=_reframes(stored, intent),
+        # The rebuild draws the old card's frame, so it reads what the old
+        # card read: its scope, the labels a change set, and its places.
+        card=UnitCard.from_json((c.components.get(component_id) or {}).get(CARD_UNIT_KEY)),
+        intent=intent,
     )
 
 
@@ -863,12 +887,13 @@ def _swapped(
     closed: EditClosed,
     specs: Mapping[str, Any] | None = None,
     also: Callable[[ConversationState], None] | None = None,
-    rewrite: Callable[[str], str | None] | None = None,
+    rewrite: Callable[[str, str], str | None] | None = None,
     unit: bool = False,
     places: bool = False,
     gone: tuple[ActivityStep, EditClosed] | None = None,
     reframed: bool = False,
     card: UnitCard | None = None,
+    intent: Mapping[str, Any] | None = None,
 ) -> CardSwap:
     """The swap of `component`, a card written to take card
     `old_component_id`'s slot, ending the edit on `closed`: the step
@@ -883,8 +908,12 @@ def _swapped(
     `UnitCard` with its entry (`harness.card_unit`), its Search block read
     from `specs` and else from the conversation, places among its offers
     where `places` says Search's places door is on. `card` is the `UnitCard` a
-    change fetched the new card as; without it the card is read off its
-    frame (`unit_card`). `also` makes the write's other changes, and `specs`
+    change fetched the new card as, or the old card's for an Edit Card
+    rebuild, which draws the same frame; without it the card is read off its
+    frame (`unit_card`). Its encoding follows `intent`, the new card's
+    written intent (`harness.card_unit.encoded`). A card that a change
+    fetched over a scope names its `get_data` arguments in its entry
+    (`FETCHED_KEY`), which the next turn's model reads. `also` makes the write's other changes, and `specs`
     joins the turn's blocks once it commits. `rewrite` rewrites the words of
     the slot's card meta for a change of the card in place, and `unit` marks
     a unit change, which drops the card from a `comparison` hint
@@ -903,6 +932,7 @@ def _swapped(
     card = card if card is not None and drawn is not None else drawn
     if card is not None:
         block = blocks.get(card.spec_id)
+        card = encoded(card, block, intent=intent)
         created.unit_change = card_unit_change(card, block)
         created.card_changes = card_changes(
             card, block, fact_summary=component.get("fact_summary"), places=places
@@ -928,6 +958,8 @@ def _swapped(
         entry = _digest_entry(component)
         if kept is not None:
             entry[CARD_UNIT_KEY] = kept
+        if card is not None and card.scope:
+            entry[FETCHED_KEY] = card.fetch_args(card.spec_id, card.scope)
         if plan is not None:
             entry[PLAN_LINK_KEY] = plan
         work.components[created.component_id] = entry

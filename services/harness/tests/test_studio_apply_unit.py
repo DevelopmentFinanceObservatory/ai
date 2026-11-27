@@ -10,10 +10,13 @@ and redraws the card in its slot, with no model call.
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
 import hashlib
 import json
+import re
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,13 +25,23 @@ from common.live_apis import LiveApisError
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from compiler.surface import ProgressCallback, ToolCallResult, ToolId
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from harness.card_unit import UNIT_GONE_NOTE
+from harness.card_unit import UNIT_GONE_NOTE, ChangeMove, UnitCard
 from harness.graph.state import frame_id_for
+from harness.place_options import ApisPlaceOptions
 from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceInput
-from harness.studio_edit import _retitled_years
+from harness.studio_edit import _changed_title, _redrawn_intent
 from harness.studio_state import PLAN_LINK_KEY, DatabaseUnavailable
 from harness.studio_store import StudioStore
-from harness.wire import CompositionManifest, PlanLink
+from harness.wire import (
+    CardChanges,
+    CompositionManifest,
+    PlaceOption,
+    PlacesChange,
+    PlacesOffer,
+    PlanLink,
+    WindowChange,
+    WindowOffer,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -108,7 +121,13 @@ def _written(
     }
 
 
-def _described(component_id: str, ref: Mapping[str, str], title: str) -> dict[str, Any]:
+# The type of the cards these tests draw: a chart over a range of years.
+_TYPE = "line_chart"
+
+
+def _described(
+    component_id: str, ref: Mapping[str, str], title: str, type_: str = _TYPE
+) -> dict[str, Any]:
     return {
         "outcome": "ok",
         "frame_refs": [],
@@ -116,7 +135,7 @@ def _described(component_id: str, ref: Mapping[str, str], title: str) -> dict[st
             "component_id": component_id,
             "revision": 1,
             "stored_intent": {
-                "type": "stat_card",
+                "type": type_,
                 "title": title,
                 "select": {"stat_var": "dcid:Aid"},
                 "frame_ref": dict(ref),
@@ -155,7 +174,7 @@ def _first_turn() -> tuple[Any, ...]:
     return (
         search_call("aid from France to Kenya"),
         fetch_call(_SPEC, stat_vars="sum"),
-        make_charts_call(chart(frame_id_for(_REF), type_="stat_card", title=_TITLE)),
+        make_charts_call(chart(frame_id_for(_REF), type_=_TYPE, title=_TITLE)),
         text_part("Here is the card."),
     )
 
@@ -570,8 +589,8 @@ def _two_cards_app(pg_engine: AsyncEngine) -> Any:
         search_call("aid from France to Kenya"),
         fetch_call(_SPEC, stat_vars="sum"),
         make_charts_call(
-            chart(frame_id_for(_REF), type_="stat_card", title=_TITLE),
-            chart(frame_id_for(_REF), type_="stat_card", title=_SIBLING_TITLE),
+            chart(frame_id_for(_REF), type_=_TYPE, title=_TITLE),
+            chart(frame_id_for(_REF), type_=_TYPE, title=_SIBLING_TITLE),
         ),
         text_part("Here are the cards."),
         resolver=CannedSearch(_ENVELOPE),
@@ -881,12 +900,13 @@ class _Changer:
         self.rows = rows
         self.drawn = 1
         self.title = _TITLE
+        self.type = _TYPE
         self.window = (2015, 2023)
 
     async def __call__(self, *, tool: str, args: dict[str, Any], **_: Any) -> dict[str, Any]:
         self.calls.append({"tool": tool, "args": args})
         if tool == "describe_component":
-            return _described(args["component_id"], _REF, self.title)
+            return _described(args["component_id"], _REF, self.title, self.type)
         if tool == "get_data":
             window = (args.get("scope") or {}).get("window")
             if window is not None:
@@ -957,52 +977,151 @@ async def test_a_card_offers_its_years_and_a_change_of_years_redraws_it_over_the
     assert card["card_changes"] == created["card_changes"]
 
 
-_EN_DASH = chr(0x2013)
+def _recorded_card_titles() -> list[str]:
+    """Every card title the repository's JSON fixtures hold: the title of each
+    object drawn as a card (a card type, or a `frame_ref`), with the titles
+    this module's own tests and the edit tests draw cards under."""
+    kinds = {"stat_card", "line_chart", "bar_chart", "table"}
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            title = node.get("title")
+            title = title.get("text") if isinstance(title, dict) else title
+            kind = node.get("type")
+            drawn = (isinstance(kind, str) and kind in kinds) or "frame_ref" in node
+            if drawn and isinstance(title, str):
+                found.add(title)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for path in sorted(Path(__file__).parents[2].glob("*/tests/**/*.json")):
+        with contextlib.suppress(ValueError):
+            walk(json.loads(path.read_text()))
+    return sorted(
+        found
+        | {
+            _TITLE,
+            "Aid 2020 to 2024, against 2023",
+            "Aid in 2024",
+            "Aid to Kenya, 2018-2024",
+            "Aid to Malawi by donor (3 largest of 70 in 2024)",
+            "Growth since 2019",
+            "The top three donors in 2019 and in 2023",
+            "Aid to Kenya, 2015/16",
+            "Kenya's 2023 ODA receipts",
+            "Aid to Kenya compared with Uganda",
+        }
+    )
 
 
-_RANGE = ((2015, 2023), (2010, 2024))
+_RECORDED_TITLES = _recorded_card_titles()
+
+
+def _move(title: str, change: Any) -> ChangeMove:
+    """A change of France's aid to Kenya, drawn 2015 to 2023, titled `title`."""
+    block = _ENVELOPE["parts"][0]["spec"]
+    shown = {"destination": ["country/KEN"], "origin": ["country/FRA"]}
+    card = UnitCard(spec_id=_SPEC, args={"stat_vars": "sum"}, roles={"destination": False})
+    offer = CardChanges(
+        spec_id=_SPEC,
+        window=WindowOffer(start_year=2015, end_year=2023, first_year=1978, last_year=2024),
+        places=[
+            PlacesOffer(
+                role="destination",
+                multiple=False,
+                chosen=[PlaceOption(id="country/KEN", label="Kenya")],
+            )
+        ],
+    )
+    if isinstance(change, WindowChange):
+        scope: dict[str, Any] = {
+            "window": {
+                "kind": "range",
+                "start_year": change.start_year,
+                "end_year": change.end_year,
+            }
+        }
+        old: tuple[str, ...] = ()
+        new: tuple[str, ...] = ()
+    else:
+        shown["destination"] = list(change.entities)
+        scope = {"entities": {role: [f"dcid:{r}" for r in refs] for role, refs in shown.items()}}
+        card = replace(card, labels={"country/UGA": "Uganda"})
+        old, new = ("Kenya",), ("Uganda",)
+    return ChangeMove(
+        "cmp_01unit0001", title, card, change, scope, "", offer, block, old=old, new=new
+    )
+
+
+@pytest.mark.parametrize("title", _RECORDED_TITLES)
+def test_a_changed_cards_title_names_only_its_new_years(title: str) -> None:
+    """Over every recorded card title, a change to 2010 to 2024 ends the title
+    on the new period, and the title names no other year."""
+    retitled = _changed_title(
+        title, _move(title, WindowChange(kind="window", start_year=2010, end_year=2024))
+    )
+
+    assert retitled.endswith(", 2010 to 2024")
+    assert set(re.findall(r"(?<!\d)\d{4}(?!\d)", retitled)) == {"2010", "2024"}
+    assert len(retitled) <= 120
+
+
+@pytest.mark.parametrize("title", _RECORDED_TITLES)
+def test_a_changed_cards_title_names_only_its_new_places(title: str) -> None:
+    """Over every recorded card title, a change of Kenya to Uganda names
+    Uganda and not Kenya, keeping the period the title ended on."""
+    change = PlacesChange(kind="places", role="destination", entities=["country/UGA"])
+    retitled = _changed_title(title, _move(title, change))
+
+    assert "Uganda" in retitled
+    assert "Kenya" not in retitled
+    assert retitled.startswith("Gross disbursements, France to Uganda")
 
 
 @pytest.mark.parametrize(
-    ("title", "years", "retitled"),
+    ("title", "change", "retitled"),
     [
-        (f"Aid to Kenya, 2015{_EN_DASH}2023", _RANGE, f"Aid to Kenya, 2010{_EN_DASH}2024"),
-        ("Aid 2015 to 2023", _RANGE, "Aid 2010 to 2024"),
-        ("Aid, 2015-2023", _RANGE, "Aid, 2010-2024"),
-        ("Aid since 20152023", _RANGE, "Aid since 20152023"),
-        ("Aid to Kenya, 2023", ((2015, 2023), (2010, 2015)), "Aid to Kenya, 2010 to 2015"),
-        ("Aid to Kenya since 2015", _RANGE, "Aid to Kenya since 2010"),
-        ("Aid to Kenya until 2023", _RANGE, "Aid to Kenya until 2024"),
-        ("Aid to Kenya, 2023", ((2023, 2023), (2020, 2020)), "Aid to Kenya, 2020"),
         (
-            "Aid after the 2008 crisis, 2015 to 2023",
-            _RANGE,
-            "Aid after the 2008 crisis, 2010 to 2024",
+            "Gross disbursements to Nigeria for health, 2010 to 2024",
+            WindowChange(kind="window", start_year=2015, end_year=2020),
+            "Gross disbursements to Nigeria for health, 2015 to 2020",
         ),
         (
-            "Aid 2015 to 2023, constant 2023 US dollars",
-            ((2015, 2023), (2015, 2024)),
-            "Aid 2015 to 2024, constant 2023 US dollars",
+            "Aid to Kenya, 2015 to 2023",
+            WindowChange(kind="window", start_year=2020, end_year=2020),
+            "Aid to Kenya, 2020",
+        ),
+        (
+            "Kenya's 2023 ODA receipts",
+            WindowChange(kind="window", start_year=2010, end_year=2024),
+            "Gross disbursements, France to Kenya, 2010 to 2024",
+        ),
+        (
+            "Aid to Kenya, latest year",
+            PlacesChange(kind="places", role="destination", entities=["country/UGA"]),
+            "Gross disbursements, France to Uganda, latest year",
+        ),
+        (
+            "Malaria grants to Ethiopia",
+            WindowChange(kind="window", start_year=2010, end_year=2024),
+            "Malaria grants to Ethiopia, 2010 to 2024",
+        ),
+        (
+            "Guatemala's GDP, 1960\u20132024",
+            WindowChange(kind="window", start_year=2000, end_year=2020),
+            "Guatemala's GDP, 2000 to 2020",
         ),
     ],
-    ids=[
-        "en-dash",
-        "to",
-        "hyphen",
-        "no-range",
-        "lone-end-year",
-        "lone-start-year-after-since",
-        "lone-end-year-after-until",
-        "single-year-to-single-year",
-        "unrelated-year",
-        "shared-bound-and-base-year",
-    ],
+    ids=["range", "one-year", "year-inside", "latest-kept-on-places", "no-period", "dashed-range"],
 )
-def test_a_change_of_years_retitles_the_years_the_title_names(
-    title: str, years: tuple[tuple[int, int], tuple[int, int]], retitled: str
+def test_a_changed_cards_title_is_built_from_its_parts(
+    title: str, change: Any, retitled: str
 ) -> None:
-    old, new = years
-    assert _retitled_years(title, old=old, new=new, lone=True) == retitled
+    assert _changed_title(title, _move(title, change)) == retitled
 
 
 class _Places:
@@ -1138,10 +1257,10 @@ async def test_a_card_offers_its_places_and_a_change_swaps_one(pg_engine: AsyncE
     assert _frame(first, "component.created")["card_changes"]["places"] == [
         {
             "role": "destination",
-            "multiple": False,
+            "multiple": True,
             "chosen": [{"id": "country/KEN", "label": "Kenya"}],
         },
-        {"role": "origin", "multiple": False, "chosen": [{"id": "country/FRA", "label": "France"}]},
+        {"role": "origin", "multiple": True, "chosen": [{"id": "country/FRA", "label": "France"}]},
     ]
     (fetched,) = changer.fetched()
     assert fetched["scope"] == {
@@ -1150,7 +1269,7 @@ async def test_a_card_offers_its_places_and_a_change_swaps_one(pg_engine: AsyncE
     created = _frame(frames, "component.created")
     assert created["replaces"] == "cmp_01unit0001"
     write = next(call for call in changer.calls if call["tool"] == "write_component")
-    assert write["args"]["intent"]["title"] == "France's aid to Uganda, current US dollars"
+    assert write["args"]["intent"]["title"] == "Gross disbursements, France to Uganda, 2015 to 2023"
     (destination, _) = created["card_changes"]["places"]
     assert destination["chosen"] == [{"id": "country/UGA", "label": "Uganda"}]
 
@@ -1229,6 +1348,47 @@ async def test_a_places_read_that_cannot_answer_is_refused(
     )
 
 
+class _NoDoorApis:
+    """An apis with no options route: the route answers 404 and the
+    capabilities document lists no options door."""
+
+    async def read_entity_options(self, **_: Any) -> Any:
+        raise LiveApisError(status=404, code="not_found", retryable=False)
+
+    async def read_search_doors(self) -> frozenset[str]:
+        return frozenset({"stated_scope"})
+
+
+async def test_an_apis_serving_no_options_door_stops_the_cards_offering_places(
+    pg_engine: AsyncEngine,
+) -> None:
+    """After the first read meets the 404, the places read answers
+    `capability_unavailable` and the card offers its years and no places."""
+    app = _changes_app(pg_engine)
+    app.state.studio.place_options = ApisPlaceOptions(
+        base_url="http://apis.test",
+        client=_NoDoorApis(),  # ty: ignore[invalid-argument-type] -- the two reads the reader makes
+    )
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        reads = [
+            await client.get("/api/studio/places", params=_places_query(), headers=AUTH)
+            for _ in range(2)
+        ]
+        state = await client.get(
+            "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 0}, headers=AUTH
+        )
+
+    assert "places" in _frame(first, "component.created")["card_changes"]
+    assert [(r.status_code, r.json()["error"]) for r in reads] == [
+        (503, "capability_unavailable"),
+        (503, "capability_unavailable"),
+    ]
+    (card,) = state.json()["closed_since"][0]["cards"]
+    assert "places" not in card["card_changes"]
+    assert "window" in card["card_changes"]
+
+
 async def test_a_change_of_places_whose_door_cannot_be_read_is_refused(
     pg_engine: AsyncEngine,
 ) -> None:
@@ -1267,8 +1427,8 @@ async def test_a_card_offers_no_places_with_the_door_off(pg_engine: AsyncEngine)
 
 @pytest.mark.parametrize(
     "entities",
-    [["country/TZA"], ["country/UGA", "country/KEN"], ["country/KEN"]],
-    ids=["unlisted", "two-on-a-one-place-card", "the-place-it-shows"],
+    [["country/TZA"], ["country/KEN"]],
+    ids=["unlisted", "the-place-it-shows"],
 )
 async def test_a_change_of_places_outside_the_offer_is_refused(
     pg_engine: AsyncEngine, entities: list[str]
@@ -1409,33 +1569,31 @@ async def test_a_change_whose_data_comes_back_empty_leaves_the_card_and_its_offe
                 "x_label": "Year",
                 "y_label": "USD, current prices",
             },
-            {
-                "subtitle": "Gross disbursements, 2010 to 2024",
-                "x_label": "Year",
-                "y_label": "USD, current prices",
-            },
+            {"x_label": "Year", "y_label": "USD, current prices"},
         ),
         (
             _UGANDA,
             {
                 "subtitle": "What Kenya receives from France",
                 "description": "Kenya's receipts set beside Kenya's needs.",
+                "x_label": "Kenya",
                 "y_label": "USD, current prices",
             },
-            {"subtitle": "What Uganda receives from France", "y_label": "USD, current prices"},
+            {"y_label": "USD, current prices"},
         ),
     ],
     ids=["years", "places"],
 )
-async def test_a_change_of_years_or_places_rewrites_the_card_meta_or_drops_a_stale_word(
+async def test_a_change_of_years_or_places_drops_the_card_meta_that_may_name_the_old_ones(
     pg_engine: AsyncEngine,
     change: dict[str, Any],
     meta: dict[str, str],
     rewritten: dict[str, str],
 ) -> None:
-    """The slot's meta names the new years or places where it named the old,
-    and a word still naming the old ones after that is dropped, so the chart
-    shows what it derives from its data there. A `comparison` hint, which
+    """The model's subtitle and description, written about the old years or
+    places, are dropped, and an axis label is kept only when it names no year
+    and no place the card showed, so the chart shows what it derives from its
+    data there. A `comparison` hint, which
     aligns its members' units, keeps a card whose unit did not change. The
     state read's card states the new card's facts."""
     app = _two_cards_app(pg_engine)
@@ -1483,7 +1641,10 @@ async def test_a_change_of_years_or_places_rewrites_the_card_meta_or_drops_a_sta
 def _one_year_app(pg_engine: AsyncEngine, year: int) -> Any:
     """A first turn drawing France's aid to Kenya in `year` alone."""
     return _app(
-        *_first_turn(),
+        search_call("aid from France to Kenya"),
+        fetch_call(_SPEC, stat_vars="sum"),
+        make_charts_call(chart(frame_id_for(_REF), type_="stat_card", title=_TITLE)),
+        text_part("Here is the card."),
         resolver=CannedSearch(_ENVELOPE),
         executor=ScriptedExecutor(
             [
@@ -1508,6 +1669,7 @@ async def test_a_card_showing_one_year_moves_to_another_year(
     app = _one_year_app(pg_engine, 2023)
     changer = _Changer()
     changer.title = "Aid to Kenya, 2023"
+    changer.type = "stat_card"
     if latest:
         latest_window = {
             "start": {"anchor": "latest", "offset": 0},
@@ -1537,6 +1699,7 @@ async def test_a_card_showing_one_year_moves_to_another_year(
         "end_year": 2023,
         "first_year": 1978,
         "last_year": 2024,
+        "single": True,
     }
     (fetched,) = changer.fetched()
     assert fetched["scope"] == {"window": {"kind": "range", "start_year": 2020, "end_year": 2020}}
@@ -1545,3 +1708,240 @@ async def test_a_card_showing_one_year_moves_to_another_year(
     assert write["args"]["intent"]["title"] == "Aid to Kenya, 2020"
     window = _frame(frames, "component.created")["card_changes"]["window"]
     assert (window["start_year"], window["end_year"]) == (2020, 2020)
+
+
+async def test_a_card_showing_one_value_refuses_a_range_and_one_place_too_many(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A key number shows one value: its years change one at a time, and each
+    role takes one place."""
+    app = _one_year_app(pg_engine, 2023)
+    app.state.studio.place_options = _Places()
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        refused = [
+            await client.post(
+                "/api/studio/turn", json=_change_body("cmp_01unit0001", _SPEC, change), headers=AUTH
+            )
+            for change in (
+                {"kind": "window", "start_year": 2010, "end_year": 2020},
+                {**_UGANDA, "entities": ["country/UGA", "country/KEN"]},
+            )
+        ]
+
+    offered = _frame(first, "component.created")["card_changes"]
+    assert offered["window"]["single"] is True
+    assert {p["role"]: p["multiple"] for p in offered["places"]} == {
+        "destination": False,
+        "origin": False,
+    }
+    assert [(r.status_code, r.json()["constraint_id"]) for r in refused] == [
+        (422, "change_not_offered"),
+        (422, "change_not_offered"),
+    ]
+
+
+async def test_a_chart_cut_to_one_place_can_add_places_back(pg_engine: AsyncEngine) -> None:
+    """Whether a role takes several places is the chart's, fixed when it is
+    drawn: a chart of one recipient cut to another keeps `multiple`, and a
+    change adding a place back is drawn, its `select` naming every place."""
+    app = _changes_app(pg_engine)
+    app.state.studio.place_options = _Places()
+    changer = _Changer()
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        cut = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)
+        )
+        created = _frame(cut, "component.created")
+        both = {**_UGANDA, "entities": ["country/UGA", "country/KEN"]}
+        added = await _stream(
+            client,
+            "/api/studio/turn",
+            _change_body(created["component_id"], created["card_changes"]["spec_id"], both),
+        )
+
+    (destination, _) = created["card_changes"]["places"]
+    assert destination["multiple"] is True
+    (_, fetched) = changer.fetched()
+    assert fetched["scope"]["entities"]["destination"] == ["dcid:country/UGA", "dcid:country/KEN"]
+    (destination, _) = _frame(added, "component.created")["card_changes"]["places"]
+    assert [o["label"] for o in destination["chosen"]] == ["Uganda", "Kenya"]
+
+
+@pytest.mark.parametrize(
+    ("select", "entities", "reselected"),
+    [
+        (
+            {"destination": ["dcid:country/KEN", "dcid:country/UGA"]},
+            ["country/KEN", "country/UGA", "country/TZA"],
+            {"destination": ["dcid:country/KEN", "dcid:country/UGA", "dcid:country/TZA"]},
+        ),
+        (
+            {"destination": ["dcid:country/KEN", "dcid:country/UGA"]},
+            ["country/UGA"],
+            {"destination": ["dcid:country/UGA"]},
+        ),
+        ({"destination": "country/KEN"}, ["country/UGA"], {"destination": "country/UGA"}),
+        ({"stat_var": "dcid:Aid"}, ["country/UGA"], {"stat_var": "dcid:Aid"}),
+    ],
+    ids=["add-a-place", "remove-a-place", "swap-one", "other-entry"],
+)
+def test_a_change_of_places_names_the_new_places_in_the_select(
+    select: dict[str, Any], entities: list[str], reselected: dict[str, Any]
+) -> None:
+    change = PlacesChange(kind="places", role="destination", entities=entities)
+    move = _move("Aid to Kenya", change)
+    move = replace(
+        move,
+        offer=move.offer.model_copy(
+            update={
+                "places": [
+                    PlacesOffer(
+                        role="destination",
+                        multiple=True,
+                        chosen=[
+                            PlaceOption(id="country/KEN", label="Kenya"),
+                            PlaceOption(id="country/UGA", label="Uganda"),
+                        ],
+                    )
+                ]
+            }
+        ),
+    )
+    stored = {"type": "line_chart", "title": "Aid", "select": select}
+
+    intent, _ = _redrawn_intent(stored, {"spec_id": "s", "content_version": "c"}, move)
+
+    assert intent["select"] == reselected
+
+
+async def test_the_next_turns_model_reads_the_scope_a_changed_card_shows(
+    pg_engine: AsyncEngine,
+) -> None:
+    """After a change of places, the turn's record and the card's digest
+    entry name the `get_data` arguments that draw the card, scope included."""
+    app = _changes_app(pg_engine)
+    app.state.studio.place_options = _Places()
+    changer = _Changer()
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)
+        )
+
+    (fetched,) = changer.fetched()
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    new_id = _frame(frames, "component.created")["component_id"]
+    said = json.dumps(fetched, sort_keys=True)
+    assert said in conversation.turns[-1]["user"]
+    model_facing = json.dumps(conversation.recall_part(part="canvas", component_id=new_id))
+    assert "dcid:country/UGA" in model_facing
+
+
+class _Recreate:
+    """An Edit Card model that rewrites the card as a table."""
+
+    async def __call__(self, **_: Any) -> dict[str, Any]:
+        return {
+            "text": "Made it a table.",
+            "patch": None,
+            "recreate": {"type": "table", "title": "Aid to Uganda", "select": {"s": "v"}},
+        }
+
+
+async def test_an_edit_card_rebuild_keeps_the_places_a_change_set(pg_engine: AsyncEngine) -> None:
+    """A card changed to Uganda and then rebuilt through Edit Card reads what
+    the changed card read: its scope, Uganda's label and its encoding."""
+    app = _app(
+        *_first_turn(),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(_first_results()),
+        tool_surface=_Search(),  # ty: ignore[invalid-argument-type] -- the one tool a change reads
+        engine=pg_engine,
+        edit_model=_Recreate(),
+    )
+    app.state.studio.place_options = _Places()
+    changer = _Changer()
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)
+        )
+        changed = _frame(frames, "component.created")
+        write = next(c for c in changer.calls if c["tool"] == "write_component")
+        frame_ref = write["args"]["intent"]["frame_ref"]
+
+        async def edit(*, tool: str, args: dict[str, Any], **_: Any) -> dict[str, Any]:
+            if tool == "describe_component":
+                return _described(changed["component_id"], frame_ref, "Aid to Uganda")
+            if tool == "write_component":
+                return _written("cmp_01unit0009", frame_ref, args["intent"]["title"])
+            return {"outcome": "ok", "frame_refs": []}
+
+        app.state.studio.recorder._executor = edit
+        body = _turn_body("make it a table")
+        body["component_ref"] = {
+            "component_id": changed["component_id"],
+            "revision": 1,
+            "intent": "edit",
+        }
+        rebuilt = await _stream(client, "/api/studio/turn", body)
+
+    created = _frame(rebuilt, "component.created")
+    assert created["replaces"] == changed["component_id"]
+    places = {p["role"]: p for p in created["card_changes"]["places"]}
+    assert places["destination"]["chosen"] == [{"id": "country/UGA", "label": "Uganda"}]
+    assert places["destination"]["multiple"] is True
+
+
+async def test_a_bar_chart_over_time_keeps_one_place(pg_engine: AsyncEngine) -> None:
+    """A bar chart of one series draws its periods, and a second place would
+    turn it into one bar per place at one period: it offers one place per
+    role, and a change adding a place is refused."""
+    app = _app(
+        search_call("aid from France to Kenya"),
+        fetch_call(_SPEC, stat_vars="sum"),
+        make_charts_call(
+            chart(
+                frame_id_for(_REF),
+                type_="bar_chart",
+                title=_TITLE,
+                select={"stat_var": "dcid:Aid", "destination": "dcid:country/KEN"},
+            )
+        ),
+        text_part("Here is the card."),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(
+            [
+                {"outcome": "ok", "frame_refs": [_REF], "summary": "fetched"},
+                {
+                    "outcome": "ok",
+                    "frame_refs": [],
+                    "view": {
+                        "dimensions": [
+                            {"name": "stat_var", "values": ["dcid:Aid"], "plural": False},
+                            {"name": "destination", "values": ["country/KEN"], "plural": False},
+                        ]
+                    },
+                },
+                _written("cmp_01unit0001", _REF, _TITLE),
+            ]
+        ),
+        tool_surface=_Search(),  # ty: ignore[invalid-argument-type] -- the one tool a change reads
+        engine=pg_engine,
+    )
+    app.state.studio.place_options = _Places()
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        both = {**_UGANDA, "entities": ["country/UGA", "country/KEN"]}
+        refused = await client.post(
+            "/api/studio/turn", json=_change_body("cmp_01unit0001", _SPEC, both), headers=AUTH
+        )
+
+    places = _frame(first, "component.created")["card_changes"]["places"]
+    assert {p["role"]: p["multiple"] for p in places} == {"destination": False, "origin": False}
+    assert (refused.status_code, refused.json()["constraint_id"]) == (422, "change_not_offered")

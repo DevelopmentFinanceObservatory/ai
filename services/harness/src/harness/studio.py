@@ -11,6 +11,8 @@ The routes (`docs/studio-contract-v1.md`):
 * `POST /api/studio/composition`: applies canvas mutations and returns the
   new manifest as plain JSON.
 * `GET /api/studio/state`: the conversation as stored, read with no lease.
+* `GET /api/studio/places`: the places one role of a card can change to,
+  read from Search's options door (`harness.place_options`), with no lease.
 
 A turn runs on the turn loop (`harness.turn`) over the graph
 `harness.graph.workflow.studio_graph` builds: `/turn` opens it at the
@@ -108,8 +110,10 @@ from harness.graph.state import (
 )
 from harness.place_options import (
     PlaceOptionsReader,
+    PlacesNotServedError,
     PlacesUnavailableError,
     RolePlaces,
+    places_offered,
     read_role_places,
 )
 from harness.provenance import ProvenanceStore
@@ -1186,7 +1190,7 @@ class _SegmentWork:
             surface_recorder=runner.surface_recorder,
             approving=approving,
             restored=restored,
-            places=runner.place_options is not None,
+            places=places_offered(runner.place_options),
         )
         # The drive's half of the translation: it marks each event with the
         # calls recorded before it, and reads nothing else.
@@ -1808,14 +1812,34 @@ def _card_change_mark(move: UnitMove | ChangeMove | None) -> dict[str, Any] | No
     return None
 
 
+def _offering(studio: StudioRunner) -> PlaceOptionsReader | None:
+    """The places reader while cards offer places (`places_offered`), else `None`."""
+    reader = studio.place_options
+    return reader if places_offered(reader) else None
+
+
+def _places_not_served_response() -> JSONResponse:
+    """The 503 `capability_unavailable` of a deployment whose cards offer no
+    change of places, by its setting or because apis serves no options door."""
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CAPABILITY_UNAVAILABLE,
+            retry=RetryMode.DO_NOT_RETRY,
+            detail="Changing a card's places is not enabled on this deployment.",
+        ),
+        status_code=503,
+    )
+
+
 def _read_card_change(stored: Any) -> CardChangeMark | None:
     """The `CardChangeMark` a turn record or the open turn keeps, `None` for
-    none or one that does not validate."""
+    none or one that does not validate, which is logged."""
     if not isinstance(stored, Mapping):
         return None
     try:
         return CardChangeMark.model_validate(stored)
     except ValidationError:
+        logger.warning("studio state: a stored card change mark does not validate", exc_info=True)
         return None
 
 
@@ -2663,7 +2687,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if isinstance(checked, JSONResponse):
                 hold.release()
                 return checked
-            moved = await _card_move(conversation, body, places=studio.place_options)
+            moved = await _card_move(conversation, body, places=_offering(studio))
             if isinstance(moved, JSONResponse):
                 hold.release()
                 return moved
@@ -2794,7 +2818,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             moved = await _card_move(
                 work,
                 body,
-                places=studio.place_options,
+                places=_offering(studio),
                 listed=moved.listed if isinstance(moved, ChangeMove) else None,
             )
             if isinstance(moved, JSONResponse):
@@ -2917,7 +2941,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             surface=studio.definition_surface,
                             conversation=conversation,
                             move=moved,
-                            places=studio.place_options is not None,
+                            places=places_offered(studio.place_options),
                         ),
                     ),
                     owners=studio.owners,
@@ -2947,7 +2971,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             conversation=conversation,
                             component_id=body.component_ref.component_id,
                             message=body.message,
-                            places=studio.place_options is not None,
+                            places=places_offered(studio.place_options),
                         ),
                     ),
                     owners=studio.owners,
@@ -4040,11 +4064,11 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         stored = await studio.store.peek(principal, conversation_id)
         if stored is None:
             return _unknown_conversation_response(conversation_id)
-        read = _conversation_read(stored, since=since, places=studio.place_options is not None)
+        read = _conversation_read(stored, since=since, places=places_offered(studio.place_options))
         return JSONResponse(content=json.loads(read.model_dump_json(exclude_none=True)))
 
     @router.get("/places")
-    async def places(
+    async def places(  # noqa: PLR0911 -- one distinct refusal per documented answer
         conversation_id: str,
         component_id: str,
         role: str,
@@ -4061,22 +4085,16 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         `change_not_offered`, pointer `/role`; a door that fails or misses
         its deadline 503 `transient_unavailable`
         (`place_options_unavailable`), to retry; and a deployment with the
-        door off (`STUDIO_PLACE_OPTIONS=false`) 503
+        door off (`STUDIO_PLACE_OPTIONS=false`), or an apis learnt to serve
+        no options door (`harness.place_options.places_offered`), 503
         `capability_unavailable`."""
         principal = principal_for(authorization, settings=settings)
         stored = await studio.store.peek(principal, conversation_id)
         if stored is None:
             return _unknown_conversation_response(conversation_id)
-        reader = studio.place_options
+        reader = _offering(studio)
         if reader is None:
-            return _tool_error_response(
-                ToolError(
-                    error=ErrorCode.CAPABILITY_UNAVAILABLE,
-                    retry=RetryMode.DO_NOT_RETRY,
-                    detail="Changing a card's places is not enabled on this deployment.",
-                ),
-                status_code=503,
-            )
+            return _places_not_served_response()
         held = changeable(stored.state, component_id, None, places=True)
         if len(held) == 2:
             constraint, detail = held
@@ -4090,8 +4108,14 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             )
         try:
             listed = await read_role_places(
-                reader, identity=(block.get("definition") or {}).get("identity") or {}, role=role
+                reader,
+                identity=(block.get("definition") or {}).get("identity") or {},
+                role=role,
+                conversation_id=conversation_id,
+                component_id=component_id,
             )
+        except PlacesNotServedError:
+            return _places_not_served_response()
         except PlacesUnavailableError:
             return _places_unavailable_response(PLACES_UNREAD_NOTE, pointer="/role")
         answer = PlacesOptions(

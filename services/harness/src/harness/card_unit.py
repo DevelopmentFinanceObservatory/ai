@@ -32,7 +32,7 @@ what an earlier change set on another. No model reads it.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -87,19 +87,31 @@ class UnitCard:
     and the `scope` its retrieval named over that spec (`get_data`'s own
     shape, `entities` naming each place `dcid:`-marked), `None` for none,
     with the label of each place a change of places set (`labels`, by ref),
-    which the spec's Search block does not name."""
+    which the spec's Search block does not name.
+
+    `single` and `roles` are the card's encoding, fixed when the card is drawn
+    (`encoded`): whether it shows one value per series, so its years change
+    one at a time, and the roles whose places it can change, each with
+    whether it takes several. A card stored before they were kept has
+    `roles` `None`, and reads its roles off the places it shows."""
 
     spec_id: str
     args: dict[str, Any]
     scope: dict[str, Any] | None = None
     labels: dict[str, str] | None = None
+    single: bool = False
+    roles: dict[str, bool] | None = None
 
     def as_json(self) -> dict[str, Any]:
-        stored = {"spec_id": self.spec_id, "args": dict(self.args)}
+        stored: dict[str, Any] = {"spec_id": self.spec_id, "args": dict(self.args)}
         if self.scope:
             stored["scope"] = dict(self.scope)
         if self.labels:
             stored["labels"] = dict(self.labels)
+        if self.single:
+            stored["single"] = True
+        if self.roles is not None:
+            stored["roles"] = dict(self.roles)
         return stored
 
     @classmethod
@@ -110,7 +122,7 @@ class UnitCard:
         spec_id, args = stored.get("spec_id"), stored.get("args")
         if not isinstance(spec_id, str) or not spec_id or not isinstance(args, Mapping):
             return None
-        scope, labels = stored.get("scope"), stored.get("labels")
+        scope, labels, roles = stored.get("scope"), stored.get("labels"), stored.get("roles")
         return cls(
             spec_id=spec_id,
             args=dict(args),
@@ -118,12 +130,83 @@ class UnitCard:
             labels={str(k): str(v) for k, v in labels.items()}
             if isinstance(labels, Mapping) and labels
             else None,
+            single=stored.get("single") is True,
+            roles={str(k): v is True for k, v in roles.items()}
+            if isinstance(roles, Mapping)
+            else None,
         )
 
     def fetch_args(self, spec_id: str, scope: Mapping[str, Any] | None) -> dict[str, Any]:
         """The `get_data` arguments that fetch `spec_id` as this card's frame
         was fetched, over `scope`."""
         return {"spec_id": spec_id, **self.args, **({"scope": dict(scope)} if scope else {})}
+
+
+def one_value(intent: Mapping[str, Any] | None) -> bool:
+    """Whether a card drawn from `intent` shows one value per series: a stat
+    card, or a bar chart whose select lists one of its dimensions, which
+    `make_charts` draws at one period (`orchestrator_tools._card_period`)."""
+    if not isinstance(intent, Mapping):
+        return False
+    select = intent.get("select")
+    return intent.get("type") == "stat_card" or (
+        intent.get("type") == "bar_chart"
+        and isinstance(select, Mapping)
+        and any(isinstance(value, list) for value in select.values())
+    )
+
+
+def takes_several(intent: Mapping[str, Any] | None, refs: Sequence[str]) -> bool:
+    """Whether a role showing places `refs` on the card drawn from `intent`
+    can show several, each drawn as its own series, as dfo-apis' assembler
+    draws a select (dfo-data-tools' `assembler/resolve.py` and
+    `pipeline/candidate.py`): a select entry naming a role's places as a list
+    draws one series per place, and so does a place column the select leaves
+    unbound. A stat card draws one value; a table draws any select. A line
+    chart takes several unless its select lists another dimension, since the
+    platform refuses a line or bar chart listing two. A bar chart takes
+    several only where its listed dimension is the role's, one bar per place:
+    a bar chart of one series draws its periods, and a second place would
+    turn it into one bar per place at one period."""
+    if not isinstance(intent, Mapping):
+        return True
+    kind = intent.get("type")
+    if kind == "stat_card":
+        return False
+    if kind == "table":
+        return True
+    select = intent.get("select")
+    select = select if isinstance(select, Mapping) else {}
+    shown = set(refs)
+    naming = {
+        name
+        for name, value in select.items()
+        if any(
+            isinstance(v, str) and v.removeprefix("dcid:") in shown
+            for v in (value if isinstance(value, list) else [value])
+        )
+    }
+    listed = {name for name, value in select.items() if isinstance(value, list)}
+    if kind == "bar_chart":
+        return bool(listed) and listed <= naming
+    return listed <= naming
+
+
+def encoded(
+    card: UnitCard, block: Mapping[str, Any] | None, *, intent: Mapping[str, Any] | None
+) -> UnitCard:
+    """`card` with its encoding as the card drawn from `intent` fixes it:
+    `single` when it shows one value per series (`one_value`), and as `roles`
+    each role whose places it shows, the ones `card` already kept, else
+    those `block` and its scope bind, each marked with whether it can show
+    several places (`takes_several`)."""
+    shown = chosen_places(card, block) if block is not None else {}
+    if card.roles is not None:
+        bound: list[str] = list(card.roles)
+    else:
+        bound = [role for role, refs in shown.items() if refs]
+    roles = {role: takes_several(intent, shown.get(role) or ()) for role in bound}
+    return replace(card, single=one_value(intent), roles=roles)
 
 
 def frame_arguments(rendering: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -184,16 +267,21 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
     component: Mapping[str, Any],
     lineage: CardLineage | None,
     blocks: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    fetched: Mapping[str, Any] | None = None,
 ) -> UnitCard | None:
     """The `UnitCard` of `component`, a written card, drawn from `lineage`;
     `None` when the card does not draw one retrieval's own frame, or its
     arguments cannot be read.
 
-    The card reads the served spec when `blocks`, the Search blocks the
-    conversation keeps by spec_id (`known_blocks`), hold none for it but
-    hold one whose identity the served definition's matches outside its
-    places and window: the card reads that block's spec with the places and
-    window the served definition names as its scope (`_scope_over`)."""
+    The card reads the spec and scope `fetched`, the recorded `get_data`
+    arguments that served its frame, name. A frame no recorded call names
+    (a plan step's retrieval, whose record carries no frames, or one an
+    earlier turn fetched) reads the served spec when `blocks`, the Search
+    blocks the conversation keeps by spec_id (`known_blocks`), hold none for
+    it but hold one whose identity the served definition's matches outside
+    its places and window: the card reads that block's spec with the places
+    and window the served definition names as its scope (`_scope_over`)."""
     if lineage is None or len(lineage.lineage) != 1:
         return None
     (member,) = lineage.lineage
@@ -211,6 +299,14 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
     args = frame_arguments(rendering) if isinstance(rendering, Mapping) else None
     if args is None:
         return None
+    if fetched is not None and isinstance(fetched.get("spec_id"), str) and fetched["spec_id"]:
+        asked = fetched.get("scope")
+        scope = (
+            {k: asked[k] for k in _SCOPE_MEMBERS if k in asked}
+            if isinstance(asked, Mapping)
+            else {}
+        )
+        return UnitCard(spec_id=fetched["spec_id"], args=args, scope=scope or None)
     if blocks is None or spec_id in blocks:
         return UnitCard(spec_id=spec_id, args=args)
     served_identity = (member.manifest.get("definition") or {}).get("identity")
@@ -233,7 +329,12 @@ def _scope_over(base: Any, served: Any) -> dict[str, Any] | None:
         kept = {k: v for k, v in identity.items() if k not in {"entities", "requested_window"}}
         slots = kept.get("slots")
         if isinstance(slots, list):
-            kept["slots"] = sorted(slots, key=lambda slot: str(slot.get("property")))
+            kept["slots"] = sorted(
+                slots,
+                key=lambda slot: (
+                    str(slot.get("property")) if isinstance(slot, Mapping) else str(slot)
+                ),
+            )
         return kept
 
     if rest(base) != rest(served):
@@ -309,7 +410,7 @@ def card_changes(
     `places` holds each role whose places the card names."""
     if block is None:
         return None
-    window = _window_offer(block, fact_summary)
+    window = _window_offer(block, fact_summary, single=card.single)
     roles = _places_offers(card, block) if places else []
     if window is None and not roles:
         return None
@@ -346,7 +447,7 @@ def _years_held(block: Mapping[str, Any]) -> tuple[int, int, list[int]] | None:
 
 
 def _window_offer(
-    block: Mapping[str, Any], fact_summary: Mapping[str, Any] | None
+    block: Mapping[str, Any], fact_summary: Mapping[str, Any] | None, *, single: bool
 ) -> WindowOffer | None:
     drawn = (fact_summary or {}).get("window") or {}
     start, end = _year(drawn.get("start")), _year(drawn.get("end"))
@@ -363,19 +464,38 @@ def _window_offer(
         first_year=first,
         last_year=last,
         missing_years=missing or None,
+        single=True if single else None,
     )
 
 
 def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer]:
+    """One offer per role of the card's encoding (`UnitCard.roles`), taking
+    several places where it says so, whatever number it shows now; a card
+    stored with no encoding offers each role it shows places for, taking
+    several where it shows several."""
     labels = {**place_labels(block), **(card.labels or {})}
+    shown = chosen_places(card, block)
+    roles = card.roles if card.roles is not None else {r: len(v) > 1 for r, v in shown.items()}
+    # In the order Search lists the block's places, so every redraw lists
+    # the roles alike.
+    listed = [
+        str(entity.get("role"))
+        for entity in (block.get("resolved") or {}).get("entities") or ()
+        if isinstance(entity, Mapping)
+    ]
+    roles = dict(
+        sorted(
+            roles.items(), key=lambda kv: listed.index(kv[0]) if kv[0] in listed else len(listed)
+        )
+    )
     return [
         PlacesOffer(
             role=role,
-            multiple=len(refs) > 1,
-            chosen=[PlaceOption(id=ref, label=labels.get(ref, ref)) for ref in refs],
+            multiple=several,
+            chosen=[PlaceOption(id=ref, label=labels.get(ref, ref)) for ref in shown[role]],
         )
-        for role, refs in chosen_places(card, block).items()
-        if refs
+        for role, several in roles.items()
+        if shown.get(role)
     ]
 
 
@@ -446,6 +566,30 @@ UNIT_STALE_NOTE = "This card has changed since its unit menu opened, so nothing 
 UNIT_GONE_NOTE = "This card is no longer on the canvas, so nothing changed."
 
 
+def _admitted(
+    conversation: ConversationState, component_id: str, spec_id: str | None, *, stale: str
+) -> tuple[UnitCard, dict[str, Any], Mapping[str, Any], str] | tuple[str, str]:
+    """Card `component_id` of `conversation` as a unit change or a change of
+    years or places reads it: what it reads, its spec's Search block, its
+    digest entry and its title; or the `scope_choice_stale` refusal's
+    constraint and detail, `UNIT_GONE_NOTE` when the card is off the canvas
+    and `stale` when it reads a spec other than `spec_id` (any, with `None`)
+    or no turn kept its spec's block."""
+    composition = conversation.composition
+    blocks = composition.blocks if composition is not None else []
+    on_canvas = next((b for b in blocks if b.component_id == component_id), None)
+    if on_canvas is None:
+        return "scope_choice_stale", UNIT_GONE_NOTE
+    entry = conversation.components.get(component_id) or {}
+    card = UnitCard.from_json(entry.get(CARD_UNIT_KEY))
+    if card is None or (spec_id is not None and card.spec_id != spec_id):
+        return "scope_choice_stale", stale
+    block = stored_block(conversation.turn_specs, conversation.turns, card.spec_id)
+    if block is None:
+        return "scope_choice_stale", stale
+    return card, block, entry, str(entry.get("title") or on_canvas.title or "The card")
+
+
 def unit_move(conversation: ConversationState, pick: ApplyUnit) -> UnitMove | tuple[str, str]:
     """The change `pick` asks of `conversation`, or its refusal's constraint
     and detail: `scope_choice_stale` when the card is off the canvas, when its
@@ -453,18 +597,12 @@ def unit_move(conversation: ConversationState, pick: ApplyUnit) -> UnitMove | tu
     turn kept that spec's Search block; `unit_not_offered` for a unit the
     card's offer does not hold or the one it already shows. `pick.turn` plays
     no part."""
-    composition = conversation.composition
-    blocks = composition.blocks if composition is not None else []
-    on_canvas = next((b for b in blocks if b.component_id == pick.component_id), None)
-    if on_canvas is None:
-        return "scope_choice_stale", UNIT_GONE_NOTE
-    entry = conversation.components.get(pick.component_id) or {}
-    card = UnitCard.from_json(entry.get(CARD_UNIT_KEY))
-    if card is None or card.spec_id != pick.spec_id:
-        return "scope_choice_stale", UNIT_STALE_NOTE
-    block = stored_block(conversation.turn_specs, conversation.turns, card.spec_id)
+    held = _admitted(conversation, pick.component_id, pick.spec_id, stale=UNIT_STALE_NOTE)
+    if len(held) == 2:
+        return held
+    card, block, _, title = held
     change = card_unit_change(card, block)
-    if block is None or change is None:
+    if change is None:
         return "scope_choice_stale", UNIT_STALE_NOTE
     offer, served = change.offer, change.offer.start
     if (refused := offered_unit_refusal(offer, pick.unit)) is not None:
@@ -473,7 +611,7 @@ def unit_move(conversation: ConversationState, pick: ApplyUnit) -> UnitMove | tu
         return "unit_not_offered", f"The card already shows {unit_words(served, offer)}."
     return UnitMove(
         component_id=pick.component_id,
-        title=str(entry.get("title") or on_canvas.title or "The card"),
+        title=title,
         card=card,
         served=served,
         unit=pick.unit,
@@ -522,20 +660,14 @@ def changeable(
     the canvas, reads a spec other than `spec_id` (any, with `None`), no turn
     kept its spec's block or it offers no change. `places` says whether
     Search's places door is on."""
-    composition = conversation.composition
-    blocks = composition.blocks if composition is not None else []
-    on_canvas = next((b for b in blocks if b.component_id == component_id), None)
-    if on_canvas is None:
-        return "scope_choice_stale", UNIT_GONE_NOTE
-    entry = conversation.components.get(component_id) or {}
-    card = UnitCard.from_json(entry.get(CARD_UNIT_KEY))
-    if card is None or (spec_id is not None and card.spec_id != spec_id):
-        return "scope_choice_stale", CHANGE_STALE_NOTE
-    block = stored_block(conversation.turn_specs, conversation.turns, card.spec_id)
+    held = _admitted(conversation, component_id, spec_id, stale=CHANGE_STALE_NOTE)
+    if len(held) == 2:
+        return held
+    card, block, entry, title = held
     offer = card_changes(card, block, fact_summary=entry.get("fact_summary"), places=places)
-    if block is None or offer is None:
+    if offer is None:
         return "scope_choice_stale", CHANGE_STALE_NOTE
-    return card, block, offer, str(entry.get("title") or on_canvas.title or "The card")
+    return card, block, offer, title
 
 
 async def change_move(
@@ -573,6 +705,8 @@ async def change_move(
                 reader,
                 identity=(block.get("definition") or {}).get("identity") or {},
                 role=change.role,
+                conversation_id=conversation.conversation_id,
+                component_id=pick.component_id,
             )
         except PlacesUnavailableError:
             return "place_options_unavailable", PLACES_UNREAD_NOTE
@@ -586,6 +720,8 @@ def _window_move(
     if window is None:
         return "change_not_offered", "This card's years cannot change."
     start, end = change.start_year, change.end_year
+    if window.single and start != end:
+        return "change_not_offered", "This card shows one year at a time."
     if start < window.first_year or end > window.last_year:
         return (
             "change_not_offered",
@@ -614,7 +750,7 @@ def _places_refusal(offer: CardChanges, change: PlacesChange) -> tuple[str, str]
     picked = list(dict.fromkeys(change.entities))
     if not places.multiple and len(picked) != 1:
         return "change_not_offered", "This card shows one place at a time."
-    if picked == [o.id for o in places.chosen]:
+    if set(picked) == {o.id for o in places.chosen}:
         return "change_not_offered", "The card already shows those places."
     return None
 

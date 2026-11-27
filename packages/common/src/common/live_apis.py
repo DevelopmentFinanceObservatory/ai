@@ -778,12 +778,14 @@ class LiveApisClient:
         """The places of the same kind Search lists for role `role` of
         `identity` (`POST /api/search/options`, `for: {role, scope: peers}`),
         each as `(ref, label)`, in the order Search lists them, and whether
-        Search capped the list (`truncated`). A listed entry that names no
-        ref is left out.
+        Search capped the list (`truncated`). A listed entry whose value names
+        no ref is left out.
 
         Raises:
             LiveApisError: apis refused the call, or answered a body with no
-                `options.items` list (`response_invalid`).
+                `options.items` list, or an item whose `value` is no object or
+                whose `ref` is no object with a text label
+                (`response_invalid`).
         """
         response = await self._send(
             "POST",
@@ -800,8 +802,15 @@ class LiveApisClient:
             raise _invalid(response, "options answer")
         listed = []
         for item in items:
-            ref = ((item.get("value") or {}).get("ref") or {}) if isinstance(item, dict) else {}
-            if isinstance(ref, dict) and isinstance(ref.get("ref"), str) and ref["ref"]:
+            value = item.get("value") if isinstance(item, dict) else None
+            if not isinstance(value, dict):
+                raise _invalid(response, "options answer")
+            ref = value.get("ref")
+            if ref is None:
+                continue
+            if not isinstance(ref, dict) or not isinstance(ref.get("label", ""), str | None):
+                raise _invalid(response, "options answer")
+            if isinstance(ref.get("ref"), str) and ref["ref"]:
                 listed.append((ref["ref"], str(ref.get("label") or ref["ref"])))
         assert isinstance(options, dict)
         return tuple(listed), options.get("truncated") is True

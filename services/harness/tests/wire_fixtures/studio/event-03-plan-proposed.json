@@ -63,7 +63,23 @@
       "step_ids": [
         "s2",
         "s3"
-      ]
+      ],
+      "kind": "unit"
+    },
+    {
+      "id": "d3",
+      "question": "Which years?",
+      "chosen": "2016 to 2024",
+      "alternatives": [
+        "2010 to 2024"
+      ],
+      "reason": "The question names the years since 2016.",
+      "resolved_by": "user",
+      "step_ids": [
+        "s2",
+        "s3"
+      ],
+      "kind": "window"
     }
   ],
   "actions": [

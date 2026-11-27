@@ -110,6 +110,7 @@ from compiler.surface import transient
 from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
 from planner.stated_scope import LICENCE_STATE_KEY, STATED_SCOPE_STATE_KEY, StatedScopeRecord
+from pydantic import ValidationError
 from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -575,6 +576,43 @@ def _unit_questions_back(frame: dict[str, Any], offers: Mapping[str, Any] | None
     }
 
 
+def _loaded_card(entry: Mapping[str, Any]) -> PlanProposed | None:
+    """The plan card a pending entry keeps, or `None` for none or for one this
+    release cannot read, such as one a later release stored with members this
+    one does not know, which is logged."""
+    if not entry.get("card"):
+        return None
+    try:
+        return PlanProposed.model_validate(
+            {
+                **_units_back(entry["card"], entry.get("card_units")),
+                "new_plan": True if entry.get("card_new_plan") else None,
+            }
+        )
+    except ValidationError:
+        logger.warning(
+            "studio store: a pending plan card cannot be read and is dropped", exc_info=True
+        )
+        return None
+
+
+def _loaded_frame(entry: Mapping[str, Any], index: int, stored: Any) -> Any:
+    """Frame `index` a pending entry keeps, or `None`, logged, for one this
+    release cannot read."""
+    try:
+        return STUDIO_FRAME_ADAPTER.validate_python(
+            _unit_questions_back(
+                _units_back(stored, (entry.get("frames_units") or {}).get(str(index))),
+                (entry.get("frames_unit_questions") or {}).get(str(index)),
+            )
+        )
+    except ValidationError:
+        logger.warning(
+            "studio store: pending frame %d cannot be read and is dropped", index, exc_info=True
+        )
+        return None
+
+
 def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
     pending = _PendingInterrupt(
         adk_id=entry["adk_id"],
@@ -595,25 +633,12 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             )
             for choice_id, choice in (entry.get("choices") or {}).items()
         },
-        card=(
-            PlanProposed.model_validate(
-                {
-                    **_units_back(entry["card"], entry.get("card_units")),
-                    "new_plan": True if entry.get("card_new_plan") else None,
-                }
-            )
-            if entry.get("card")
-            else None
-        ),
+        card=_loaded_card(entry),
         admitted_run=entry.get("admitted_run"),
         frames=tuple(
-            STUDIO_FRAME_ADAPTER.validate_python(
-                _unit_questions_back(
-                    _units_back(frame, (entry.get("frames_units") or {}).get(str(index))),
-                    (entry.get("frames_unit_questions") or {}).get(str(index)),
-                )
-            )
-            for index, frame in enumerate(entry.get("frames") or ())
+            frame
+            for index, stored in enumerate(entry.get("frames") or ())
+            if (frame := _loaded_frame(entry, index, stored)) is not None
         ),
     )
     if "questions" in entry:

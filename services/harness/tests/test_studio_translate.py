@@ -644,7 +644,7 @@ def test_the_row_stating_how_a_pin_is_counted_is_a_row_the_card_can_switch() -> 
 @pytest.mark.parametrize(
     ("fixes", "scope", "kind"),
     [
-        (DecisionFixes(window_start=2010), None, "years"),
+        (DecisionFixes(window_start=2010), None, "window"),
         (DecisionFixes(entities=(Entity(name="Kenya", role="destination"),)), None, "places"),
         (
             DecisionFixes(),
@@ -4616,3 +4616,19 @@ def test_a_recorded_plan_after_a_switch_reaches_the_card_in_the_users_words() ->
             "The user chose net disbursements, current USD on the plan.",
         ),
     ]
+
+
+def test_an_execute_output_whose_frames_and_steps_differ_in_length_names_no_plan_step(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    translator = _translator()
+    translator._conversation.plan_version_ids = {"v1": "plan_1"}
+    ref = {"spec_id": "spec_" + "a" * 32, "content_version": "cv_1"}
+
+    with caplog.at_level(logging.WARNING):
+        translator._remember_plan_frames(
+            {"plan_version": "v1", "frame_refs": [ref, ref], "frame_ref_steps": []}
+        )
+
+    assert translator._conversation.turn_plan_frames == {}
+    assert "frame steps" in caplog.text

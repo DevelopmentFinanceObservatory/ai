@@ -777,7 +777,17 @@ async def test_read_entity_options_posts_the_identity_and_role_and_reads_each_pl
     assert listed == ((("country/KEN", "Kenya"), ("country/UGA", "country/UGA")), True)
 
 
-@pytest.mark.parametrize("answer", [{"options": {}}, {"items": []}], ids=["no-items", "no-options"])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"options": {}},
+        {"items": []},
+        {"options": {"items": [{"value": "country/KEN"}]}},
+        {"options": {"items": [{"value": {"ref": "country/KEN"}}]}},
+        {"options": {"items": ["country/KEN"]}},
+    ],
+    ids=["no-items", "no-options", "value-text", "ref-text", "item-text"],
+)
 async def test_read_entity_options_answer_outside_the_contract_is_invalid(answer: object) -> None:
     calls = Calls(ok(answer))
 

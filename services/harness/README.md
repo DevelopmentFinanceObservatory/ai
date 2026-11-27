@@ -44,7 +44,7 @@ The harness serves the studio (`docs/studio-contract-v1.md`). A turn is one orch
 
 ## The studio surface
 
-Six conversation routes under `/api/studio` (see the contract doc for the full protocol), and the refresh route described under "The refresh route" below:
+Seven conversation routes under `/api/studio` (see the contract doc for the full protocol), and the refresh route described under "The refresh route" below:
 
 - `POST /api/studio/turn`: runs one turn, streams contract frames as SSE. A `component_ref` with `intent: "edit"` takes the Edit Card route instead (no search, no plan; see below).
 - `POST /api/studio/interrupt`: resumes a paused turn (plan approval, elicitation answers or skip) on a NEW stream.
@@ -52,6 +52,7 @@ Six conversation routes under `/api/studio` (see the contract doc for the full p
 - `POST /api/studio/cancel`: aborts the conversation's in-flight segment (the Stop button).
 - `POST /api/studio/resume`: carries on a running turn whose client left, from where it stopped, on a NEW stream.
 - `GET /api/studio/state`: the conversation as stored (turn status and lease, closed turns after `since` and how many there are, the open pause and its frames, the manifest), read with no lease. The read and `/resume` act on one standing of the turn (`harness.studio_store.turn_standing`), so every status the read gives has one `/resume` answer.
+- `GET /api/studio/places`: the places one role of a card can change to, read from Search's options door when asked (`harness.place_options`), with no lease. A `turn.request` carrying `apply_change` changes a card's years or places on `/turn`.
 
 Every stream names the index of the turn it carries in its `x-dfo-turn-index` response header.
 
@@ -249,6 +250,7 @@ The migrations, in order: `0001_conversations.sql` (the conversation and run-led
 - `orchestrator_thinking_level`: Reasoning effort of the orchestrator agent: `LOW`, `MEDIUM` or `HIGH`, case-insensitive. Unset or blank means `LOW`, the default; any other value fails at startup. Override with `ORCHESTRATOR_THINKING_LEVEL`. Thought summaries are requested at every setting and reach the traces only.
 - `edit_thinking_level`: Reasoning effort of the Edit Card's model call, read like `orchestrator_thinking_level` (`LOW` by default). Override with `EDIT_THINKING_LEVEL`.
 - `studio_prefix_cache`: Builds the shared explicit cache of each agent's static prompt prefix (`harness.prefix_cache`), `true` by default. It applies only to a surface that allows explicit caches (`gemini-3.8-flash`). On `gemini-4-hydrogen` it has no effect. Override with `STUDIO_PREFIX_CACHE`.
+- `studio_place_options`: Offers a change of a card's places and serves `GET /api/studio/places`, `true` by default. Startup logs `studio place options: on` or `off`. When Search's options door answers 404 or outside its contract and its capabilities document lists no live `options` door, cards offer no places for 60 s (`harness.place_options.ApisPlaceOptions.offering`). Override with `STUDIO_PLACE_OPTIONS`.
 - `studio_cors_origins`: Comma-separated browser origins a live server answers CORS preflights for, e.g. `http://localhost:8091` for a locally served page testing against the real agent. Empty (the default, and the deployed posture) sends no CORS headers; the deployed service is reached same-origin through the website's proxy.
 - `mcp_api_token` (inherited from `BaseServiceSettings`): Shared bearer token the three MCP mounts require (`common.auth`). Unset (the default) mints one at startup and hands it to the harness's own MCP clients, so a local run needs no configuration. Set it before pointing `DATA_MCP_URL` / `ANALYSIS_MCP_URL` / `PRESENTATION_MCP_URL` off loopback. Construction refuses that combination without it, and refuses an off-loopback URL over anything but `https` even with it set, since that bearer is attached to every request.
 - `mcp_auth_disabled` (inherited from `BaseServiceSettings`): Turns the MCP mount gate off entirely, for a raw client with no bearer token to present. Logged at error level. Never set on a server reachable beyond the developer's machine.

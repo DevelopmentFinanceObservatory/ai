@@ -396,6 +396,19 @@ def _postgres_database(settings: Settings) -> DatabaseHandle:
     return database
 
 
+def log_place_options(app: FastAPI) -> None:
+    """Log whether `STUDIO_PLACE_OPTIONS` offers a change of places. With it
+    on, whether apis serves the options door is learnt when the door is read
+    (`harness.place_options.ApisPlaceOptions`), so startup reads nothing."""
+    if app.state.place_options is None:
+        logger.info("studio place options: off (STUDIO_PLACE_OPTIONS is false)")
+        return
+    logger.info(
+        "studio place options: on (STUDIO_PLACE_OPTIONS is true; apis' options door "
+        "is checked when it answers 404 or outside its contract)"
+    )
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
@@ -429,6 +442,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "harness could not authenticate to its own data-mcp mount at startup -- "
             "check MCP_API_TOKEN (and MCP_AUTH_DISABLED) agree across this process"
         ) from exc
+    log_place_options(app)
     yield
     # Early mints still running are cancelled first, before the clients they
     # call through close. apis finishes any mint already posted. No closing

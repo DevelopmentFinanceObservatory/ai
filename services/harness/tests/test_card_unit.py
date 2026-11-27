@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 import pytest
 from common.live_apis import LiveApisError
 from data_mcp.get_data_tool import _SUM_STAT_VARS_GROUPBY, Breakdown
-from harness import place_options
+from harness import card_unit, place_options
 from harness.card_unit import frame_arguments, retitled, unit_card
 from harness.provenance import CardLineage, ProvenanceInput
-from harness.wire import UnitChoice, UnitCurrency, UnitOffer, UnitPrices
+from harness.studio import _read_card_change
+from harness.wire import (
+    CardChanges,
+    PlaceOption,
+    PlacesChange,
+    PlacesOffer,
+    UnitChoice,
+    UnitCurrency,
+    UnitOffer,
+    UnitPrices,
+)
 
 _DEFAULT = {"format": "parquet", "bundle": False, "layout": "frame"}
 _SPEC = "spec_" + "b" * 32
@@ -294,12 +305,22 @@ class _Door:
     "door", [_Door(fail=True), _Door(stall=True)], ids=["door-fails", "door-misses-deadline"]
 )
 async def test_a_place_read_that_fails_or_misses_its_deadline_is_unavailable(
-    monkeypatch: pytest.MonkeyPatch, door: _Door
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, door: _Door
 ) -> None:
+    """The read is refused, and the warning names the conversation and card."""
     monkeypatch.setattr(place_options, "PLACE_OPTIONS_DEADLINE_S", 0.05)
 
-    with pytest.raises(place_options.PlacesUnavailableError):
-        await place_options.read_role_places(door, identity=_BASE_IDENTITY, role="destination")
+    with caplog.at_level(logging.WARNING), pytest.raises(place_options.PlacesUnavailableError):
+        await place_options.read_role_places(
+            door,
+            identity=_BASE_IDENTITY,
+            role="destination",
+            conversation_id="conv_1",
+            component_id="cmp_1",
+        )
+
+    (warned,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warned.args[:2] == ("conv_1", "cmp_1")
 
 
 async def test_a_place_read_keeps_the_cap_and_says_it_cut_the_list() -> None:
@@ -308,3 +329,203 @@ async def test_a_place_read_keeps_the_cap_and_says_it_cut_the_list() -> None:
     )
 
     assert (len(read.places), read.truncated) == (place_options.PLACE_OPTIONS_CAP, True)
+
+
+class _Client:
+    """A `LiveApisClient` stand-in: Search's options for any identity, or the
+    failure `fails` names, and the doors its capabilities document lists."""
+
+    def __init__(self, doors: frozenset[str] = frozenset({"options"})) -> None:
+        self.doors = doors
+        self.fails: BaseException | None = None
+        self.asked = 0
+
+    async def read_entity_options(
+        self, *, identity: Mapping[str, Any], role: str
+    ) -> tuple[tuple[tuple[str, str], ...], bool]:
+        del identity, role
+        self.asked += 1
+        if self.fails is not None:
+            raise self.fails
+        return (("country/UGA", "Uganda"),), False
+
+    async def read_search_doors(self) -> frozenset[str]:
+        return self.doors
+
+
+_NOT_FOUND = LiveApisError(status=404, code="not_found", retryable=False)
+
+
+def _reader(client: _Client, now: list[float]) -> place_options.ApisPlaceOptions:
+    return place_options.ApisPlaceOptions(
+        base_url="http://apis.test",
+        client=client,  # ty: ignore[invalid-argument-type] -- the two reads the reader makes
+        clock=lambda: now[0],
+    )
+
+
+async def _read(reader: place_options.ApisPlaceOptions, role: str = "destination") -> object:
+    return await place_options.read_role_places(reader, identity=_BASE_IDENTITY, role=role)
+
+
+async def test_an_apis_serving_no_options_door_stops_the_offers_until_the_ttl_runs_out() -> None:
+    """The first 404 reads the capabilities document; with no door listed the
+    offers stop and reads are refused without a call, until the TTL runs out
+    and the next read finds the door back."""
+    now = [0.0]
+    client = _Client(doors=frozenset({"stated_scope"}))
+    client.fails = _NOT_FOUND
+    reader = _reader(client, now)
+
+    with pytest.raises(place_options.PlacesNotServedError):
+        await _read(reader)
+    offered_after_404 = place_options.places_offered(reader)
+    with pytest.raises(place_options.PlacesNotServedError):
+        await _read(reader, "origin")
+    asked_while_off = client.asked
+    now[0] = place_options.PLACE_OPTIONS_TTL_S + 1
+    client.fails, client.doors = None, frozenset({"options"})
+    offered_after_ttl = place_options.places_offered(reader)
+    read = await _read(reader)
+
+    assert (offered_after_404, asked_while_off, offered_after_ttl) == (False, 1, True)
+    assert read == place_options.RolePlaces(places=(("country/UGA", "Uganda"),), truncated=False)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("connection refused"), LiveApisError(status=503, code=None, retryable=True)],
+    ids=["unreachable", "unavailable"],
+)
+async def test_an_apis_unreachable_at_first_costs_nothing_once_it_is_back(
+    failure: BaseException,
+) -> None:
+    """A read that cannot reach apis is refused to retry and leaves the offers
+    on, and the next read once apis is back answers."""
+    now = [0.0]
+    client = _Client()
+    client.fails = failure
+    reader = _reader(client, now)
+
+    with pytest.raises(place_options.PlacesUnavailableError) as refused:
+        await _read(reader)
+    client.fails = None
+    read = await _read(reader)
+
+    assert not isinstance(refused.value, place_options.PlacesNotServedError)
+    assert place_options.places_offered(reader)
+    assert read.places == (("country/UGA", "Uganda"),)
+
+
+async def test_a_404_with_the_options_door_listed_is_refused_to_retry() -> None:
+    client = _Client()
+    client.fails = _NOT_FOUND
+    reader = _reader(client, [0.0])
+
+    with pytest.raises(place_options.PlacesUnavailableError) as refused:
+        await _read(reader)
+
+    assert not isinstance(refused.value, place_options.PlacesNotServedError)
+    assert place_options.places_offered(reader)
+
+
+def test_a_roles_places_are_read_once_a_minute() -> None:
+    """A picker's read and the change applied from it make one call."""
+    now = [0.0]
+    client = _Client()
+    reader = _reader(client, now)
+
+    async def read(role: str = "destination") -> object:
+        return await reader(identity=_BASE_IDENTITY, role=role)
+
+    async def reads() -> None:
+        await read()
+        now[0] = place_options.PLACE_OPTIONS_TTL_S - 1
+        await read()
+        await read("origin")
+        now[0] = place_options.PLACE_OPTIONS_TTL_S + 1
+        await read()
+
+    asyncio.run(reads())
+
+    assert client.asked == 3
+
+
+def test_a_slot_that_is_no_mapping_reads_as_any_other_slot() -> None:
+    base = {**_BASE_IDENTITY, "slots": ["odd", {"property": "a", "value": 2}]}
+    served = {**base, "entities": {"destination": ["country/UGA"], "origin": ["country/FRA"]}}
+
+    scope = card_unit._scope_over(base, served)
+
+    assert scope == {
+        "entities": {"destination": ["dcid:country/UGA"], "origin": ["dcid:country/FRA"]}
+    }
+
+
+@pytest.mark.parametrize(
+    ("entities", "refused"),
+    [(["country/UGA", "country/KEN"], True), (["country/KEN", "country/TZA"], False)],
+    ids=["same-places-reordered", "other-places"],
+)
+def test_the_same_places_in_another_order_are_no_change(entities: list[str], refused: bool) -> None:
+    offer = CardChanges(
+        spec_id=_BASE,
+        places=[
+            PlacesOffer(
+                role="destination",
+                multiple=True,
+                chosen=[
+                    PlaceOption(id="country/KEN", label="Kenya"),
+                    PlaceOption(id="country/UGA", label="Uganda"),
+                ],
+            )
+        ],
+    )
+    change = PlacesChange(kind="places", role="destination", entities=entities)
+
+    assert (card_unit._places_refusal(offer, change) is not None) is refused
+
+
+def test_a_stored_card_change_mark_that_does_not_validate_is_dropped_and_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        mark = _read_card_change({"component_id": "cmp_1", "kind": "later_kind"})
+
+    assert mark is None
+    assert caplog.records
+
+
+@pytest.mark.parametrize(
+    ("kind", "select", "several"),
+    [
+        ("line_chart", {"stat_var": "dcid:Aid"}, True),
+        ("line_chart", {"stat_var": "dcid:Aid", "recipient": "country/KEN"}, True),
+        ("line_chart", {"stat_var": ["dcid:Aid", "dcid:Loans"], "recipient": "country/KEN"}, False),
+        ("bar_chart", {"stat_var": "dcid:Aid", "recipient": "country/KEN"}, False),
+        ("bar_chart", {"stat_var": "dcid:Aid", "recipient": ["country/KEN"]}, True),
+        ("bar_chart", {"stat_var": ["dcid:Aid", "dcid:Loans"], "recipient": "country/KEN"}, False),
+        ("table", {"stat_var": ["dcid:Aid", "dcid:Loans"], "recipient": "country/KEN"}, True),
+        ("stat_card", {"stat_var": "dcid:Aid", "recipient": "country/KEN"}, False),
+    ],
+    ids=[
+        "line-place-unbound",
+        "line-one-place",
+        "line-listing-another-dimension",
+        "bar-over-time",
+        "bar-one-bar-per-place",
+        "bar-listing-another-dimension",
+        "table",
+        "key-number",
+    ],
+)
+def test_a_role_takes_several_places_where_each_draws_its_own_series(
+    kind: str, select: dict[str, Any], several: bool
+) -> None:
+    """dfo-apis' assembler draws a line chart over Kenya and Uganda as two
+    series, from a select listing both or leaving the place unbound; refuses a
+    line or bar chart listing two dimensions; and draws a bar chart of two
+    places as one bar each at one period, so a bar chart over time keeps one."""
+    intent = {"type": kind, "select": select}
+
+    assert card_unit.takes_several(intent, ["country/KEN"]) is several

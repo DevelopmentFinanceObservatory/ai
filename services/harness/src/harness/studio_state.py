@@ -2297,7 +2297,7 @@ def _replace_block(
     *,
     old_component_id: str,
     component: dict[str, Any],
-    rewrite: Callable[[str], str | None] | None = None,
+    rewrite: Callable[[str, str], str | None] | None = None,
     unit: bool = False,
 ) -> bool:
     """Swap the named card's block for `component`, in place. The new block
@@ -2305,11 +2305,11 @@ def _replace_block(
     note and labels), and a layout hint naming the old card names the new one
     in its place, so nothing on the canvas stays on the old id.
 
-    `rewrite` rewrites the kept meta's subtitle, description and axis labels
-    for a card changed in place: a unit change names the new unit where they
-    named the old (`harness.card_unit.retitled`), and a change of years or
-    places names the new ones, dropping a word that still names the old
-    (`harness.studio_edit._rewritten`). `unit` marks a unit change, whose
+    `rewrite` rewrites the kept meta's subtitle, description and axis labels,
+    each by name, for a card changed in place: a unit change names the new
+    unit where they named the old (`harness.card_unit.retitled`), and a
+    change of years or places drops the words that may name the old ones
+    (`harness.studio_edit._changed_meta`). `unit` marks a unit change, whose
     card a `comparison` hint, which aligns its members' units, drops, a hint
     left with fewer than two members going with it. A `row` hint keeps the
     card.
@@ -2332,7 +2332,7 @@ def _replace_block(
     if meta is not None and rewrite is not None:
         meta = meta.model_copy(
             update={
-                name: rewrite(text)
+                name: rewrite(name, text)
                 for name in ("subtitle", "description", "x_label", "y_label")
                 if isinstance(text := getattr(meta, name), str)
             }

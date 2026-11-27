@@ -968,13 +968,16 @@ class WindowOffer(_WireModel):
     (`start_year`, `end_year`, equal on a card showing one year) and the first and last year its data holds
     (`first_year`, `last_year`), with the years between those two that hold
     no data (`missing_years`, absent when none is missing or the source
-    states none)."""
+    states none). `single` is true on a card that shows one value per series,
+    such as a key number, whose years change one at a time: a change names
+    one year as both bounds. Absent on every other card."""
 
     start_year: int
     end_year: int
     first_year: int
     last_year: int
     missing_years: list[int] | None = None
+    single: Literal[True] | None = None
 
 
 class PlaceOption(_WireModel):
@@ -1577,10 +1580,11 @@ class PlanDecisionOption(_WireModel):
 
 
 # What a plan decision settles, where the harness knows it: the unit (a unit
-# question's row, or a decision fixing the unit or its price basis), the years,
+# question's row, or a decision fixing the unit or its price basis), the years
+# (`window`, the word `apply_change` and `card_change` use),
 # the places, a scope choice's axis, or how pinned sources' flows are counted.
 type DecisionKind = Literal[
-    "unit", "years", "places", "sector", "region", "measure_basis", "provider", "count"
+    "unit", "window", "places", "sector", "region", "measure_basis", "provider", "count"
 ]
 
 
