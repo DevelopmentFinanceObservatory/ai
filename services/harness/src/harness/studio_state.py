@@ -606,8 +606,8 @@ class TurnUsage:
     on the previous turn's conversation, of `carried_tokens` tokens, or
     `reset:<reason>` from the whole digest (`ConversationState.carried_opening`).
     It is `None` on a `digest` turn and on a turn that opened no orchestrator,
-    such as an Edit Card. Each is `None` on a turn that began before the
-    harness kept it.
+    such as an Edit Card or a card change (`apply_change`, `apply_unit`).
+    Each is `None` on a turn that began before the harness kept it.
     """
 
     trace_id: str | None = None
@@ -1042,9 +1042,10 @@ class ConversationState:
         the whole digest: on a first turn, or, logged with its reason, when
         the previous turn closed with no conversation to carry
         (`previous_turn_carried_none`), as after an error, a Stop, a pause
-        left unanswered, an Edit Card turn, a reply the harness wrote or a
-        `digest` turn, when the turn closed `done` and its closing write
-        failed (`close_failed`, `mark_carry_lost`), when another
+        left unanswered, an Edit Card or card change (`apply_change`,
+        `apply_unit`) turn, a reply the harness wrote or a `digest` turn,
+        when the turn closed `done` and its closing write failed
+        (`close_failed`, `mark_carry_lost`), when another
         model wrote it (`model_changed`), since its thought signatures are
         that model's, when no call in it reported usage (`no_usage`), when
         its largest call reported more than `CARRIED_HISTORY_TOKEN_CAP`
