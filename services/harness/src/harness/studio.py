@@ -132,6 +132,7 @@ from harness.studio_edit import (
 )
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
+    PLAN_LINK_KEY,
     REPLACED_CARD_KEY,
     ConversationState,
     SegmentBusy,
@@ -1708,8 +1709,9 @@ def _stored_card(
     (`stored_unit_change`) and the changes it offers (`stored_card_changes`),
     as `apply_unit` and `apply_change`, which refuse a card off the
     canvas, reads it. A card `swapped` in by the turn being read names the
-    card whose slot it took (`REPLACED_CARD_KEY`). A `fact_summary` or a
-    unit offer that cannot be read is left out and logged, and an entry
+    card whose slot it took (`REPLACED_CARD_KEY`), and a card drawn on a plan
+    step's frame names that plan and step (`PLAN_LINK_KEY`). A `fact_summary`
+    or a unit offer that cannot be read is left out and logged, and an entry
     with no type or title gives no card."""
     if not entry.get("type") or not entry.get("title"):
         return None
@@ -1738,6 +1740,12 @@ def _stored_card(
                 exc_info=True,
             )
     replaces = entry.get(REPLACED_CARD_KEY) if swapped else None
+    plan = entry.get(PLAN_LINK_KEY)
+    linked = (
+        isinstance(plan, Mapping)
+        and isinstance(plan.get("plan_version_id"), str)
+        and isinstance(plan.get("plan_step_id"), str)
+    )
     return StoredCard(
         component_id=component_id,
         type=str(entry["type"]),
@@ -1747,6 +1755,8 @@ def _stored_card(
         unit_change=unit_change,
         card_changes=card_changes,
         replaces=replaces if isinstance(replaces, str) else None,
+        plan_version_id=plan["plan_version_id"] if linked else None,
+        plan_step_id=plan["plan_step_id"] if linked else None,
     )
 
 

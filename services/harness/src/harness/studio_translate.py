@@ -2074,6 +2074,19 @@ class _Translator:
             return None
         return self._conversation.turn_plan_frames.get(frame_id_for(ref))
 
+    def _plan_step(self, step: str | None) -> dict[str, str]:
+        """The members of an `activity.step` line running plan step `step`:
+        the step's id and the wire id of the plan running it, the turn's
+        latest card, since every run follows the approval of the card the
+        turn showed last. Empty for a line outside a plan, and for one whose
+        plan the conversation gave no card."""
+        plan_version_id = self._conversation.plan_version_ids.get(
+            self._conversation.latest_plan_version
+        )
+        if step is None or plan_version_id is None:
+            return {}
+        return {"plan_version_id": plan_version_id, "plan_step_id": step}
+
     def _planner_call_status(self, name: str) -> list[ActivityStep]:
         """The status line for one of the planner's own calls. A
         `propose_plan` call opens the checking line, since the tool translates
@@ -2228,7 +2241,7 @@ class _Translator:
             status=StepStatus.RUNNING,
             tool=tool or None,
             detail=_plan_step_detail(progress),
-            plan_step_id=step,
+            **self._plan_step(step),
         )
 
     def _close_unrecorded_steps(self, output: Mapping[str, Any]) -> list[ActivityStep]:
@@ -2250,7 +2263,7 @@ class _Translator:
                 tool=tool or None,
                 detail=failure_detail({"code": code, "retry_mode": RetryMode.DO_NOT_RETRY.value}),
                 duration_ms=int((now - started) * 1000),
-                plan_step_id=plan_step,
+                **self._plan_step(plan_step),
             )
             for plan_step, (step_id, label, tool, started) in self._running_plan_steps.items()
         ]
@@ -2354,7 +2367,7 @@ class _Translator:
                         if isinstance(component, dict) and created is not None
                         else None
                     ),
-                    plan_step_id=record.step_id,
+                    **self._plan_step(record.step_id),
                 )
             )
             if isinstance(component, dict) and created is not None:

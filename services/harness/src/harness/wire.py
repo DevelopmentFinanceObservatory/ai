@@ -1894,9 +1894,10 @@ class ActivityStep(_WireModel):
     duration_ms: int | None = None
     produced: StepProduced | None = None
     progress: StepProgress | None = None
-    # The plan step this line runs (`PlanStep.id`); absent on a line outside
-    # a plan. A replan reuses step ids, so a step is named by its plan's
-    # `plan_version_id` and this id together.
+    # The plan this line runs a step of and that step (`PlanStep.id`), both
+    # or neither; absent on a line outside a plan. A replan reuses step ids,
+    # so a step is named by the two together.
+    plan_version_id: str | None = None
     plan_step_id: str | None = None
 
 
@@ -2293,7 +2294,12 @@ class StoredCard(_WireModel):
     conversation keeps with the card, set while the card is on the canvas.
     `replaces` names the card whose canvas slot this one took, on the closed
     turn that swapped it in. A card an earlier release stored carries no
-    `replaces`."""
+    `replaces`.
+
+    `plan_version_id` and `plan_step_id` are the plan and plan step its
+    `component.created` named in `created_from` (`CreatedFrom`), both or
+    neither, so a page that missed the stream links the card to the turn's
+    approved plan."""
 
     component_id: str
     type: str
@@ -2303,6 +2309,8 @@ class StoredCard(_WireModel):
     unit_change: UnitChange | None = None
     card_changes: CardChanges | None = None
     replaces: str | None = None
+    plan_version_id: str | None = None
+    plan_step_id: str | None = None
 
 
 class CardChangeMark(_WireModel):

@@ -1482,10 +1482,14 @@ def _surface_record(step_id: str, result: dict[str, Any]) -> _ExecutorRecord:
 
 
 def _progress_translator() -> tuple[_Translator, _RecordingSurface]:
+    """A translator whose conversation showed plan version 1 as `plan_a`."""
     current_conversation_id.set("c1")
     surface_recorder = _RecordingSurface(_UnreachableSurface())
+    conversation = ConversationState(conversation_id="c1")
+    conversation.plan_version_ids = {1: "plan_a"}
+    conversation.latest_plan_version = 1
     translator = _Translator(
-        conversation=ConversationState(conversation_id="c1"),
+        conversation=conversation,
         recorder=_RecordingExecutor(_dummy_executor, store=unconnected_store()),
         surface_recorder=surface_recorder,
     )
@@ -1531,6 +1535,8 @@ async def test_a_step_keeps_one_wire_id_from_its_first_report_to_its_final_frame
         (other.step_id, StepStatus.COMPLETE, "pop"),
     ]
     assert [f.plan_step_id for f in (first, other, later)] == ["debt", "pop", "debt"]
+    # A replan can reuse step ids, so each line names its plan's version too.
+    assert {f.plan_version_id for f in (first, other, later, *final)} == {"plan_a"}
     # The Activity log replaces a line's detail with each frame, so the frame
     # that fails a line a report was showing on states a reason of its own.
     assert is_user_sentence(final[0].detail)
@@ -1593,12 +1599,14 @@ async def test_a_started_step_with_no_record_closes_as_failed_at_the_runs_hand_b
     frames = await translated(translator, NodeDone("execute", "ok", output))
 
     steps = [f for f in frames if f.tool is not None]
-    assert [(f.step_id, f.status, f.detail, f.plan_step_id) for f in steps] == [
-        (done.step_id, StepStatus.COMPLETE, "done", "debt"),
-        (lost.step_id, StepStatus.FAILED, detail, "pop"),
+    assert [(f.step_id, f.status, f.detail, f.plan_step_id, f.plan_version_id) for f in steps] == [
+        (done.step_id, StepStatus.COMPLETE, "done", "debt", "plan_a"),
+        (lost.step_id, StepStatus.FAILED, detail, "pop", "plan_a"),
     ]
     # The agent's own status lines run no plan step.
-    assert [f.plan_step_id for f in frames if f.tool is None] == [None] * (len(frames) - len(steps))
+    assert [(f.plan_step_id, f.plan_version_id) for f in frames if f.tool is None] == [
+        (None, None)
+    ] * (len(frames) - len(steps))
     assert steps[1].label == lost.label
     assert steps[1].duration_ms is not None
     assert is_user_sentence(steps[1].detail)
