@@ -33,6 +33,7 @@ from harness.plan_display import (
     card_decision_text,
     card_questions,
     card_rows,
+    card_steps,
     card_summary,
     card_title,
     choice_id,
@@ -3137,6 +3138,29 @@ def test_the_card_shows_one_row_per_step_the_model_wrote(decision: DecisionFacto
     assert [row["id"] for row in requirement_rows(plan)] == ["debt", "total", "last_five"]
     assert [row["id"] for row in operation_rows(plan)] == ["debt", "total", "last_five"]
     assert "debt_history" not in repr([steps, cards, requirement_rows(plan), operation_rows(plan)])
+
+
+@pytest.mark.parametrize("name", ["split", "long", "long_switched_to_net", "short"])
+def test_each_workflow_step_runs_for_a_step_the_card_shows(
+    decision: DecisionFactory, name: str
+) -> None:
+    """Every step `card_steps` names is a row of the card, so an Activity line
+    naming one links to a step the reader sees: each row's step runs for
+    itself, and the rolling copy `debt_history`, which has no row, for `debt`,
+    the step it copies. The split plan and the three plans a live harness
+    proposed (`_recorded_plan`)."""
+    plan = stored_split_plan(decision) if name == "split" else _recorded_plan(name)
+    assert plan.workflow is not None
+
+    steps = card_steps(plan)
+
+    card = [str(row["id"]) for row in card_rows(plan)]
+    assert set(steps.values()) <= set(card)
+    assert {step: steps[step] for step in card} == {step: step for step in card}
+    copies = {step.id for step in plan.workflow.steps} - set(card)
+    assert {step: steps.get(step) for step in copies} == (
+        {"debt_history": "debt"} if name == "split" else {}
+    )
 
 
 def test_the_card_states_a_series_answer_over_the_years_the_plan_states(

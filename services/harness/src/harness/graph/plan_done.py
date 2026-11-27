@@ -734,7 +734,8 @@ class HandBack:
     `describe` describes one frame through `executor`. `listing` registers
     the described frames under ids the orchestrator charts by, each with the
     pair the materialisation store holds it under and, for a frame of
-    shares, the whole they divide by (`wholes`), and returns them with the
+    shares, the whole they divide by (`wholes`), and for a frame one plan
+    step gave, that step's id (`plan_steps`), and returns them with the
     step summaries, the notes on how the figures were computed
     (`totals`, `harness.graph.answer.answer_notes`), the frames no view was
     prepared for (`frames_not_chartable`), and the asks. `read` says whether
@@ -751,6 +752,9 @@ class HandBack:
     not_chartable: list[dict[str, Any]] = field(default_factory=list)
     reads: list[bool] = field(default_factory=list)
     wholes: dict[str, str] = field(default_factory=dict)
+    # Frame id -> the id of the step that gave it, None for a frame two steps
+    # gave or one described with no step: a card drawn on it names no step.
+    plan_steps: dict[str, str | None] = field(default_factory=dict)
 
     @property
     def read(self) -> bool:
@@ -770,6 +774,7 @@ class HandBack:
         tool: str,
         store_ref: dict[str, Any] | None,
         whole: str | None = None,
+        step_id: str | None = None,
     ) -> dict[str, Any]:
         """Describe one final frame for listing, and return its status as
         `_ask_status` reports it: `data`, `empty` for a frame with no series,
@@ -777,13 +782,18 @@ class HandBack:
         the frame is described and drawn by, and `store_ref` the pair the
         materialisation store holds it under, or None when the step states no
         store pair. `whole` is what the frame's shares divide by
-        (`plan_display.share_wholes`), None for a frame of anything else."""
+        (`plan_display.share_wholes`), None for a frame of anything else.
+        `step_id` is the plan step whose result the frame is."""
         view = await self.executor(tool="describe_frame", args={"frame_ref": ref})
         self.reads.append(frame_read(view))
         if view.get("outcome") == "ok":
             self.described.append((ref, view.get("view") or {}, store_ref))
+            frame_id = frame_id_for(ref)
             if whole is not None:
-                self.wholes[frame_id_for(ref)] = whole
+                self.wholes[frame_id] = whole
+            self.plan_steps[frame_id] = (
+                step_id if self.plan_steps.get(frame_id, step_id) == step_id else None
+            )
             empty = (view.get("view") or {}).get("series_count") == 0
             return {"status": "empty" if empty else "data", "frame": frame_id_for(ref)}
         # The reason comes from a closed vocabulary
@@ -796,7 +806,14 @@ class HandBack:
         """The frames, summaries, computation notes and asks the agent
         reads, the described frames registered in `state` under their ids."""
         result: dict[str, Any] = {
-            "frames": register_frames(state, self.described, wholes=self.wholes),
+            "frames": register_frames(
+                state,
+                self.described,
+                wholes=self.wholes,
+                plan_steps={
+                    frame_id: step for frame_id, step in self.plan_steps.items() if step is not None
+                },
+            ),
             "step_summaries": [_hand_back_text(summary) for summary in self.summaries],
             "totals": self.totals,
         }
@@ -1009,6 +1026,7 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                             step["frame_ref"],
                             tool=step["tool"],
                             store_ref=step.get("store_ref"),
+                            step_id=step.get("step_id"),
                         ),
                     }
                     for step in entry["steps"]
@@ -1089,6 +1107,7 @@ def plan_done_node(*, executor: Executor, run_ledger: RunLedger) -> Node[GraphEv
                     tool=step.get("tool", ""),
                     store_ref=step.get("store_ref"),
                     whole=wholes.get(step_id),
+                    step_id=step_id or None,
                 )
         # The run's own frames decide its delivery; an earlier run's kept
         # frames, described below, do not.

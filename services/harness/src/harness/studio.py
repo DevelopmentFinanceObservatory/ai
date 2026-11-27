@@ -3431,6 +3431,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ledger_conversation_id(principal, body.conversation_id),
                     pending.step_order,
                     pending.step_labels,
+                    pending.card_steps,
                 )
 
             if body.decision is InterruptDecision.REJECT:
@@ -3802,6 +3803,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ledger_conversation_id(principal, conversation_id),
                     answered.step_order,
                     answered.step_labels,
+                    answered.card_steps,
                 )
             _set_turn_context(principal, conversation_id, conversation, settings)
             approving = (

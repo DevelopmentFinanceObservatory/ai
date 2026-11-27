@@ -1434,10 +1434,21 @@ def _surface_record(step_id: str, result: dict[str, Any]) -> _ExecutorRecord:
     )
 
 
-def _progress_translator() -> tuple[_Translator, _RecordingSurface]:
-    """A translator whose conversation showed plan version 1 as `plan_a`."""
+def _progress_translator(
+    card_steps: dict[str, str] | None = None,
+) -> tuple[_Translator, _RecordingSurface]:
+    """A translator whose conversation showed plan version 1 as `plan_a`, a
+    card whose steps `card_steps` maps each workflow step to, by default
+    one for each step these tests run."""
     current_conversation_id.set("c1")
     surface_recorder = _RecordingSurface(_UnreachableSurface())
+    surface_recorder.set_step_order(
+        "c1",
+        [],
+        card_steps=card_steps
+        if card_steps is not None
+        else {step: step for step in ("debt", "pop", "s2")},
+    )
     conversation = ConversationState(conversation_id="c1")
     conversation.plan_version_ids = {1: "plan_a"}
     conversation.latest_plan_version = 1
@@ -1493,6 +1504,62 @@ async def test_a_step_keeps_one_wire_id_from_its_first_report_to_its_final_frame
     # The Activity log replaces a line's detail with each frame, so the frame
     # that fails a line a report was showing on states a reason of its own.
     assert is_user_sentence(final[0].detail)
+
+
+@pytest.mark.parametrize(
+    ("card_steps", "labels", "named"),
+    [
+        ({"debt": "debt", "debt_history": "debt"}, {}, ["debt", "debt", None]),
+        ({}, {"debt": "Fetch debt"}, ["debt", None, None]),
+    ],
+    ids=["card-steps", "labels-only"],
+)
+async def test_an_activity_line_names_the_card_step_its_plan_step_runs_for(
+    card_steps: dict[str, str], labels: dict[str, str], named: list[str | None]
+) -> None:
+    """A rolling copy's line names the card step it copies, and a step the card
+    shows in no row names none, so every line names a step the card holds. A
+    plan stored before its card steps were kept names the steps it holds labels
+    for, the card's own, and a copy none."""
+    translator, surface_recorder = _progress_translator(card_steps)
+    surface_recorder.set_step_order("c1", [], labels, card_steps)
+
+    lines = [
+        line
+        for step in ("debt", "debt_history", "whole_sum")
+        for line in await translated(translator, _progress_event(step, "Preparing the dataset"))
+    ]
+
+    assert [line.plan_step_id for line in lines] == named
+    assert [line.plan_version_id for line in lines] == [
+        None if step is None else "plan_a" for step in named
+    ]
+
+
+async def test_a_plan_stored_without_card_steps_links_its_copies_to_no_step() -> None:
+    """A pending plan stored by a release that keeps no card steps loads with an
+    empty map. Resumed from it, a line of a step the card shows names that step,
+    and a rolling copy's line names none."""
+    entry = {
+        "adk_id": "adk_1",
+        "kind": "plan",
+        "step_order": ["debt_history", "debt"],
+        "step_labels": {"debt": "Fetch debt"},
+    }
+    pending = studio_store._deserialize_pending({"int_1": entry})["int_1"]
+    assert pending.card_steps == {}
+    translator, surface_recorder = _progress_translator()
+    surface_recorder.set_step_order(
+        "c1", pending.step_order, pending.step_labels, pending.card_steps
+    )
+
+    lines = [
+        line
+        for step in ("debt", "debt_history")
+        for line in await translated(translator, _progress_event(step, "Preparing the dataset"))
+    ]
+
+    assert [line.plan_step_id for line in lines] == ["debt", None]
 
 
 async def test_a_replan_run_in_the_same_segment_opens_new_lines_for_its_steps() -> None:
@@ -2447,9 +2514,9 @@ def test_land_component_stamps_land_on_the_matching_record() -> None:
         )
     )
 
-    recorder.land_component(component)
+    recorder.land_component(component, plan_step="sum")
 
-    assert recorder._records.items[0].land is True
+    assert (recorder._records.items[0].land, recorder._records.items[0].plan_step) == (True, "sum")
 
 
 def test_land_component_is_a_silent_no_op_with_no_matching_record() -> None:
@@ -2466,7 +2533,10 @@ async def test_a_card_on_a_plan_steps_frame_names_the_plan_and_the_step() -> Non
     the turn's state, so a card drawn on one names both, from a translator on
     another instance too. A card on any other frame names neither, and so
     does a card on the frame of a run whose version the turn gave no card,
-    as a run carried on from an earlier turn has."""
+    as a run carried on from an earlier turn has. A card `make_charts` drew
+    on the plan's frame as a fetch registered it, with no plan step, names
+    neither, since a frame's id names its content alone, and so does one drawn
+    on it as registered from a step the turn's map does not hold for it."""
     current_conversation_id.set("c1")
     conversation = ConversationState(conversation_id="c1")
     conversation.plan_version_ids = {1: "plan_a"}
@@ -2509,7 +2579,13 @@ async def test_a_card_on_a_plan_steps_frame_names_the_plan_and_the_step() -> Non
     studio_store._apply_delta(reloaded, studio_store._serialize_durable(conversation))
     recorder = _RecordingExecutor(_dummy_executor, store=unconnected_store())
     second = _Translator(conversation=reloaded, recorder=recorder)
-    for name, ref in (("total", total), ("fetched", fetched), ("carried", carried)):
+    for name, ref, step in (
+        ("total", total, "sum"),
+        ("fetched", fetched, "fetch"),
+        ("carried", carried, "sum"),
+        ("refetched", total, None),
+        ("elsewhere", total, "fetch"),
+    ):
         recorder._records.append(
             _ExecutorRecord(
                 tool="write_component",
@@ -2517,6 +2593,7 @@ async def test_a_card_on_a_plan_steps_frame_names_the_plan_and_the_step() -> Non
                 result={"outcome": "ok", "component": _written_component(f"cmp_{name}")},
                 duration_ms=1,
                 conversation="c1",
+                plan_step=step,
             )
         )
 
@@ -2531,6 +2608,8 @@ async def test_a_card_on_a_plan_steps_frame_names_the_plan_and_the_step() -> Non
         "cmp_total": {"plan_version_id": "plan_a", "plan_step_id": "sum"},
         "cmp_fetched": {},
         "cmp_carried": {},
+        "cmp_refetched": {},
+        "cmp_elsewhere": {},
     }
 
 

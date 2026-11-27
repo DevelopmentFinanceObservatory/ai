@@ -11511,6 +11511,10 @@ async def test_a_plan_paused_on_one_instance_is_approved_and_continued_on_anothe
         assert app_b.state.studio.surface_recorder.step_labels(f"{PRINCIPAL}/{CONVERSATION}") == {
             step["id"]: step["label"] for step in plan["steps"]
         }
+        # and links each line to the card step it runs for.
+        assert app_b.state.studio.surface_recorder._card_steps[f"{PRINCIPAL}/{CONVERSATION}"] == {
+            step["id"]: step["id"] for step in plan["steps"]
+        }
         lines = [frame["label"] for frame in resumed if frame["event"] == "activity.step"]
         assert plan["steps"][0]["label"] in lines
 

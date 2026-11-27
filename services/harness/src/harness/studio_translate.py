@@ -493,6 +493,10 @@ class _ExecutorRecord:
     # The lineage of the frame a drawn card rests on, taken off its result
     # with the write token, which the card's write commits with the card.
     card_lineage: CardLineage | None = None
+    # Stamped with `land`: the plan step whose result the frame the card
+    # draws was registered as, None for a frame registered outside a plan's
+    # hand-back or one two steps gave (`harness.graph.state.frame_plan_step`).
+    plan_step: str | None = None
 
 
 class _Records:
@@ -585,17 +589,20 @@ class _RecordingExecutor:
     def store(self) -> StudioStore:
         return self._store
 
-    def land_component(self, component: dict[str, Any]) -> None:
+    def land_component(self, component: dict[str, Any], *, plan_step: str | None = None) -> None:
         """The synchronous stamping capability `make_charts` calls right after
         `write_component` returns, with no `await` in between. Stamps `land`
         onto this call's own recorded write (matched by identity: the record
         whose result carries this exact `component` object) so
-        `_component_frames` can perform the landing later, at drain time.
+        `_component_frames` can perform the landing later, at drain time,
+        and `plan_step`, the plan step the card's frame was registered from
+        (`harness.graph.state.frame_plan_step`), beside it.
         Never touches the conversation itself; a component with no matching
         record (this capability called directly, not through `__call__`
         first) leaves nothing to stamp and is silently a no-op."""
         if (record := self._record_for(component)) is not None:
             record.land = True
+            record.plan_step = plan_step
 
     def _record_for(self, component: dict[str, Any]) -> _ExecutorRecord | None:
         """The latest record whose result carries this exact `component`
@@ -824,6 +831,9 @@ class _RecordingSurface:
         # The same plan's label for each step, by conversation: the Activity
         # feed names a plan step's line with it.
         self._step_labels: dict[str, dict[str, str]] = {}
+        # The plan card's step each workflow step runs for, by conversation
+        # (`plan_display.card_steps`): an Activity line names it as its plan step.
+        self._card_steps: dict[str, dict[str, str]] = {}
         # When each plan step's call in flight started, by (conversation,
         # step id). A call that returns or fails takes its entry with it
         # (`_record`); a cancelled one leaves it for `mark_step_failed`.
@@ -1097,6 +1107,7 @@ class _RecordingSurface:
         conversation: str,
         order: Sequence[str],
         labels: Mapping[str, str] | None = None,
+        card_steps: Mapping[str, str] | None = None,
     ) -> None:
         """Remember `conversation`'s latest approved plan's workflow step order.
 
@@ -1105,10 +1116,12 @@ class _RecordingSurface:
         waves (`executor.run._Run.execute`), so two independent steps can
         finish, and get recorded, in the opposite order the plan lists
         them; `step_order` lets `_drain_recorder` put them back. `labels`
-        are the plan's own label for each step, by step id.
+        are the plan's own label for each step, by step id, and `card_steps`
+        the card step each workflow step runs for (`card_step`).
         """
         self._step_order[conversation] = list(order)
         self._step_labels[conversation] = dict(labels or {})
+        self._card_steps[conversation] = dict(card_steps or {})
 
     def step_order(self, conversation: str) -> list[str]:
         """`conversation`'s latest plan step order, or `[]` if none was set."""
@@ -1117,6 +1130,16 @@ class _RecordingSurface:
     def step_labels(self, conversation: str) -> dict[str, str]:
         """`conversation`'s latest plan step labels by step id, or `{}`."""
         return self._step_labels.get(conversation, {})
+
+    def card_step(self, conversation: str, step: str) -> str | None:
+        """The step of `conversation`'s latest plan card that workflow step
+        `step` runs for (`plan_display.card_steps`), or None for a step the
+        card shows in no row. A plan whose card steps were not kept names
+        the steps it holds labels for, the card's own."""
+        card_steps = self._card_steps.get(conversation)
+        if card_steps:
+            return card_steps.get(step)
+        return step if step in self.step_labels(conversation) else None
 
 
 # ---------------------------------------------------------------------------
@@ -2009,27 +2032,36 @@ class _Translator:
     def _plan_of(self, record: _ExecutorRecord) -> PlanLink | None:
         """The plan step whose frame the card `record` wrote draws: the one
         the turn's map of plan frames holds for the write's `intent.frame_ref`,
-        or `None` for a card on any other frame."""
+        when it is the step the frame was registered from as `make_charts`
+        drew it (`_ExecutorRecord.plan_step`), and `None` otherwise. A frame
+        id names the frame's content, so the map alone cannot tell a plan's
+        frame from the same frame fetched outside the plan, or say which of
+        two steps that gave it the card draws."""
         if record.tool != "write_component":
             return None
         intent = record.args.get("intent")
         ref = intent.get("frame_ref") if isinstance(intent, dict) else None
         if not isinstance(ref, dict):
             return None
-        return self._conversation.turn_plan_frames.get(frame_id_for(ref))
+        link = self._conversation.turn_plan_frames.get(frame_id_for(ref))
+        return link if link is not None and link["plan_step_id"] == record.plan_step else None
 
     def _plan_step(self, step: str | None) -> dict[str, str]:
         """The members of an `activity.step` line running plan step `step`:
-        the step's id and the wire id of the plan running it, the turn's
-        latest card, since every run follows the approval of the card the
-        turn showed last. Empty for a line outside a plan, and for one whose
-        plan the conversation gave no card."""
+        the card step it runs for (`_RecordingSurface.card_step`) and the
+        wire id of the plan running it, the turn's latest card, since every
+        run follows the approval of the card the turn showed last. Empty for
+        a line outside a plan, for one whose plan the conversation gave no
+        card, and for a step the card shows in no row."""
         plan_version_id = self._conversation.plan_version_ids.get(
             self._conversation.latest_plan_version
         )
-        if step is None or plan_version_id is None:
+        if step is None or plan_version_id is None or self._surface_recorder is None:
             return {}
-        return {"plan_version_id": plan_version_id, "plan_step_id": step}
+        card_step = self._surface_recorder.card_step(current_conversation_id.get(), step)
+        if card_step is None:
+            return {}
+        return {"plan_version_id": plan_version_id, "plan_step_id": card_step}
 
     def _planner_call_status(self, name: str) -> list[ActivityStep]:
         """The status line for one of the planner's own calls. A
@@ -2614,9 +2646,10 @@ class _Translator:
                 else [step.id for step in steps]
             )
             step_labels = {step.id: step.label for step in steps}
+            card_steps = plan_display.card_steps(plan)
             if self._surface_recorder is not None:
                 self._surface_recorder.set_step_order(
-                    current_conversation_id.get(), step_order, step_labels
+                    current_conversation_id.get(), step_order, step_labels, card_steps
                 )
             # A requirement cites only the card's rows: a caveat it cites
             # reaches the card as a caveat alone.
@@ -2724,6 +2757,7 @@ class _Translator:
                 plan_revision=revision,
                 step_order=tuple(step_order),
                 step_labels=step_labels,
+                card_steps=card_steps,
                 choices=choices,
                 card=card,
                 frames=tuple(frames),

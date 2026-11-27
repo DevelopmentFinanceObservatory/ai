@@ -3,7 +3,8 @@
 `step_rows`, `requirement_rows`, `operation_rows` and `ask_rows` are pure
 functions from `planner.plan.Plan` to plain dicts, `shown_decisions` the
 decisions the card and the plan record list, `decision_steps` the card
-steps each of them applies to, `with_source_names` a
+steps each of them applies to, `card_steps` the card step each workflow
+step runs for, `with_source_names` a
 decision's text with each spec_id in it named in words, `shown_plan` the plan
 as the model wrote it with the compiled parts folded to match, and
 `answer_scopes` how many figures each answering requirement's result gives,
@@ -1944,6 +1945,37 @@ def decision_steps(plan: Plan) -> dict[str, list[str]]:
             if reads or requirement_of.get(step.operation_id) in citing[slot]:
                 reached.add(step.id)
         steps[slot] = [step_id for step_id in card if step_id in reached]
+    return steps
+
+
+def card_steps(plan: Plan) -> dict[str, str]:
+    """The plan card's step (`card_rows`) each workflow step of `plan` runs for, by step id.
+
+    A step the card shows runs for itself, and a step carrying out a rolling
+    copy (`Plan.rolling_copies`) for the step carrying out the requirement it
+    copies. A step the card shows no row for, and whose origin it shows none
+    for either, has no entry. Requires a compiled plan, as `card_rows` does.
+    """
+    assert plan.translation is not None, "card_steps needs a plan carrying a translation"
+    assert plan.workflow is not None, "card_steps needs a plan carrying a workflow"
+    shown = shown_plan(plan).workflow
+    card = {step.id for step in shown.steps} if shown is not None else set()
+    requirement_of = {
+        operation.id: operation.requirement_id for operation in plan.translation.operations
+    }
+    step_of = {
+        requirement_of[step.operation_id]: step.id
+        for step in plan.workflow.steps
+        if step.id in card and step.operation_id in requirement_of
+    }
+    origins = copy_origins(plan.rolling_copies)
+    steps: dict[str, str] = {}
+    for step in plan.workflow.steps:
+        origin = origins.get(requirement_of.get(step.operation_id, ""))
+        if step.id in card:
+            steps[step.id] = step.id
+        elif origin is not None and origin in step_of:
+            steps[step.id] = step_of[origin]
     return steps
 
 
