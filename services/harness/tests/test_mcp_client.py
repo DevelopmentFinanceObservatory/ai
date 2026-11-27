@@ -555,11 +555,14 @@ async def test_the_executor_stores_a_retrievals_stat_var_list_the_result_left_ou
     store = ProvenanceStore()
     executor = McpExecutor(settings=Settings(), provenance=store)
 
-    outcome = await executor(tool="get_data", args={"spec_id": frame_ref["spec_id"]})
+    # A retrieval over a scope is served under another spec than it asked for.
+    asked = "spec_" + "9" * 32
+    outcome = await executor(tool="get_data", args={"spec_id": asked})
 
     assert outcome["outcome"] == "ok"
     lineage = store.get(conversation=current_conversation_id.get(), **frame_ref)
     assert lineage is not None
+    assert lineage[0].requested_spec_id == asked
     stored = lineage[0].manifest
     listed = stored["trace"].get("resolved_stat_vars")
     assert (None if listed is None else [entry["ref"] for entry in listed]) == stored_refs

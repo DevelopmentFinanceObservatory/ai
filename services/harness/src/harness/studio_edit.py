@@ -50,16 +50,21 @@ from harness.card_unit import (
     CARD_UNIT_KEY,
     UNIT_GONE_NOTE,
     ChangeMove,
+    ConversationBlocks,
+    ScopeYears,
     UnitCard,
     UnitMove,
+    bound_facets,
     card_changes,
     card_unit_change,
-    chosen_places,
+    drawn_places,
     encoded,
     joined_words,
-    known_blocks,
     place_labels,
     retitled,
+    scope_needs_years,
+    stored_block,
+    strayed_facets,
     unit_card,
     unit_pattern,
 )
@@ -90,7 +95,7 @@ from harness.studio_translate import (
 from harness.tool_contracts import HarnessCode, harness_refusal, resolver_digest
 from harness.turn_records import TURN_CARD_RUNS, held_back_line
 from harness.unit_offer import served_unit, unit_words
-from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit
+from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit, scope_years
 from harness.wire import (
     ActivityStep,
     ComponentCreated,
@@ -380,6 +385,9 @@ _UNIT_UNCHANGED = "The card is unchanged."
 # The step and closing sentence of a retrieval that holds no figures for the
 # years or places asked.
 _NO_DATA = "The data holds no figures for that choice."
+# The closing sentence of a redraw whose data counts another source, method or
+# unit than the card did, which binding the card's facets rules out.
+_OTHER_BASIS = "The data for that choice is counted another way."
 
 
 @dataclass(frozen=True)
@@ -415,6 +423,7 @@ async def _read_change(surface: ToolSurface, move: UnitMove | ChangeMove) -> _Re
         block=move.block,
         unit=move.unit.model_dump(mode="json", exclude_none=True),
         label=move.title,
+        facets=move.card.facets,
     )
     if isinstance(resubmitted, UnitRefused):
         return resubmitted
@@ -442,8 +451,10 @@ def _redrawn_intent(
     (`_changed_meta`). A change of years drops the intent's `window`, a
     period pinned on the old frame or a count of latest periods that would
     override the new years. A change of places keeps it, since the years do
-    not change, and names the new places in each `select` entry that named
-    the role's old ones (`_reselected`)."""
+    not change, and names the new places in the role's own `select` entry
+    where it named the role's old ones (`_reselected`); an entry of another
+    role keeps its places, even one naming the same place, since the new
+    frame keeps that role's places."""
     intent = {**stored, "frame_ref": frame_ref}
     title = stored.get("title")
     match move:
@@ -470,7 +481,8 @@ def _redrawn_intent(
             select = intent.get("select")
             if isinstance(select, Mapping):
                 intent["select"] = {
-                    key: _reselected(value, old, change.entities) for key, value in select.items()
+                    key: _reselected(value, old, change.entities) if key == change.role else value
+                    for key, value in select.items()
                 }
             intent["title"] = _changed_title(title, move)
             rewrite = functools.partial(
@@ -557,7 +569,7 @@ def _changed_title(title: Any, move: ChangeMove) -> str:
     of places renames the places in the title where it can
     (`_renamed_places`), else builds the title from the Search block's
     facts (`_composed_title`) with the period the title ended on, or the
-    card's years where it ended on none. A title whose subject cannot be
+    card's years where it ended on none (its offer's, else the ones it draws). A title whose subject cannot be
     read, or a card with no title, is built from the block's facts too."""
     text = title if isinstance(title, str) else ""
     card = replace(move.card, scope=move.scope)
@@ -576,6 +588,8 @@ def _changed_title(title: Any, move: ChangeMove) -> str:
         period = tail.group(0).removeprefix(",").strip()
     elif window is not None:
         period = period_words(window.start_year, window.end_year)
+    elif move.drawn is not None:
+        period = period_words(*move.drawn)
     else:
         period = None
     return _composed_title(move.block, card, period)
@@ -670,7 +684,7 @@ def _places_words(
     count does not fit, or where a place has no name, since a title never
     shows a place by its ref."""
     labels = {**place_labels(block), **(card.labels or {})}
-    shown = {role: refs for role, refs in chosen_places(card, block).items() if refs}
+    shown = {role: refs for role, refs in drawn_places(card, block).items() if refs}
     if any(not labels.get(ref) for refs in shown.values() for ref in refs):
         return None
     named = {role: [labels[ref] for ref in refs] for role, refs in shown.items()}
@@ -745,7 +759,18 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
             yield event
         return
     label = f"Read the data {read.phrase}"
-    fetched = await recorder(tool="get_data", args=move.card.fetch_args(read.spec_id, read.scope))
+    # A unit change binds the card's other facets on the spec Search answered
+    # (`resubmit_unit`); a change of years or places binds them all on the
+    # fetch, so the data API elects none of them again.
+    card = _changed_card(move, read)
+    facets = (
+        bound_facets(card, stored_block(conversation.turn_specs, conversation.turns, card.spec_id))
+        if isinstance(move, ChangeMove)
+        else None
+    )
+    fetched = await recorder(
+        tool="get_data", args=card.fetch_args(read.spec_id, read.scope, facets=facets)
+    )
     frame_refs = fetched.get("frame_refs") or []
     if fetched.get("outcome") != "ok" or not frame_refs:
         for event in _refused("u2", label, _UNIT_UNCHANGED, fetched):
@@ -756,6 +781,7 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         for event in _close(f"{_UNIT_UNCHANGED} {_NO_DATA}"):
             yield event
         return
+    card = await _with_years(surface, conversation, card, read)
     yield _step("u2", label)
 
     # The card left the canvas while its data was read. The change is
@@ -773,15 +799,20 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         for event in _refused("u3", "Redraw the card", _UNIT_UNCHANGED, written):
             yield event
         return
+    if strayed_facets(card, written["component"].get("fact_summary")):
+        yield _step("u3", "Redraw the card", failed=_OTHER_BASIS)
+        for event in _close(f"{_UNIT_UNCHANGED} {_OTHER_BASIS}"):
+            yield event
+        return
     shown = read.phrase.removeprefix("in ").removeprefix("for ")
-    card = replace(move.card, spec_id=read.spec_id, scope=read.scope)
     # A change of years or places names the scope the card now shows, so the
     # next turn's model fetches what the card draws.
     record_line = (
         f"Changed {move.title} to {shown} ({read.spec_id})."
         if read.scope is None
         else f"Changed {move.title} to {shown} "
-        f"(get_data {json.dumps(card.fetch_args(read.spec_id, read.scope), sort_keys=True)})."
+        "(get_data "
+        f"{json.dumps(card.fetch_args(read.spec_id, read.scope, facets=facets), sort_keys=True)})."
     )
     display_line = f"Change {move.title} to {shown}."
 
@@ -809,6 +840,53 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         gone=gone,
         card=card,
         intent=intent,
+    )
+
+
+def _changed_card(move: UnitMove | ChangeMove, read: _Read) -> UnitCard:
+    """The card `move` redraws, reading `read`'s spec over its scope. A unit
+    change drops the unit the card was drawn in from its bound facets, which
+    the new card's own drawn facets replace (`encoded`)."""
+    facets = move.card.facets
+    if isinstance(move, UnitMove) and facets:
+        facets = {axis: ref for axis, ref in facets.items() if axis != "unit"} or None
+    return replace(move.card, spec_id=read.spec_id, scope=read.scope, facets=facets)
+
+
+async def _with_years(
+    surface: ToolSurface, conversation: ConversationState, card: UnitCard, read: _Read
+) -> UnitCard:
+    """`card` with the years its spec holds over the places its scope names,
+    read from Search (`harness.unit_switch.scope_years`) when its scope names
+    other places than the spec's block and the card holds none for them: one
+    Search read, made only after a change that leaves the card on other
+    places than its block's. A read that fails leaves the card with no years,
+    and it offers none (`harness.card_unit.card_changes`)."""
+    block = read.specs.get(read.spec_id) or stored_block(
+        conversation.turn_specs, conversation.turns, read.spec_id
+    )
+    if block is None:
+        return card
+    entities = scope_needs_years(card, block)
+    if entities is None:
+        return replace(card, years=None)
+    held = card.years
+    if (
+        held is not None
+        and held.spec_id == card.spec_id
+        and {r: sorted(v) for r, v in held.entities.items()}
+        == {r: sorted(v) for r, v in entities.items()}
+    ):
+        return card
+    years = await scope_years(surface, block=block, entities=entities)
+    if years is None:
+        return replace(card, years=None)
+    first, last, gaps = years
+    return replace(
+        card,
+        years=ScopeYears(
+            spec_id=card.spec_id, entities=entities, first=first, last=last, gaps=gaps
+        ),
     )
 
 
@@ -1055,7 +1133,7 @@ def _swapped(
     created = component_created(component, step_id=step_id, plan=plan)
     token = recorder.write_token(component)
     lineage = recorder.card_lineage(component)
-    blocks = {**known_blocks(conversation.turn_specs, conversation.turns), **(specs or {})}
+    blocks = ConversationBlocks(conversation.turn_specs, conversation.turns, specs)
     drawn = unit_card(component, lineage, blocks)
     card = card if card is not None and drawn is not None else drawn
     if card is not None:
@@ -1065,6 +1143,9 @@ def _swapped(
         created.card_changes = card_changes(
             card, block, fact_summary=component.get("fact_summary"), places=places
         )
+    # The facets a later fetch of the card binds, which the next turn's model
+    # reads with the rest of its `get_data` arguments.
+    fetched_facets = bound_facets(card, blocks.get(card.spec_id)) if card is not None else None
     changes = created.unit_change is not None or created.card_changes is not None
     kept = card.as_json() if card is not None and changes else None
     runs = card_runs(component, lineage)
@@ -1087,7 +1168,7 @@ def _swapped(
         if kept is not None:
             entry[CARD_UNIT_KEY] = kept
         if card is not None and card.scope:
-            entry[FETCHED_KEY] = card.fetch_args(card.spec_id, card.scope)
+            entry[FETCHED_KEY] = card.fetch_args(card.spec_id, card.scope, facets=fetched_facets)
         if plan is not None:
             entry[PLAN_LINK_KEY] = plan
         work.components[created.component_id] = entry

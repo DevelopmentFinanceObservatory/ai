@@ -106,11 +106,16 @@ BOTH_SIDES_VERBS: Mapping[str, BothSidesVerb] = {
 
 @dataclass(frozen=True, slots=True)
 class ProvenanceInput:
-    """One retrieval a frame rests on: its frame key and its mint manifest."""
+    """One retrieval a frame rests on: its frame key, its mint manifest, and
+    the spec_id its `get_data` call asked for (`requested_spec_id`), which a
+    retrieval over a `scope` is served under another spec than; `None` when
+    unknown, as for a retrieval restored from a run's record or stored
+    before it was kept."""
 
     spec_id: str | None
     content_version: str | None
     manifest: dict[str, Any]
+    requested_spec_id: str | None = None
 
     @property
     def served_ref(self) -> dict[str, str | None]:
@@ -187,6 +192,11 @@ def lineage_json(lineage: Lineage) -> list[dict[str, Any]]:
             "spec_id": member.spec_id,
             "content_version": member.content_version,
             "manifest": member.manifest,
+            **(
+                {"requested_spec_id": member.requested_spec_id}
+                if member.requested_spec_id is not None
+                else {}
+            ),
         }
         for member in lineage
     ]
@@ -207,7 +217,14 @@ def lineage_from_json(members: Any) -> Lineage:
         raise CardLineageDecodeError("stored lineage members are not a non-empty list")
     try:
         return tuple(
-            ProvenanceInput(member["spec_id"], member["content_version"], dict(member["manifest"]))
+            ProvenanceInput(
+                member["spec_id"],
+                member["content_version"],
+                dict(member["manifest"]),
+                requested
+                if isinstance(requested := member.get("requested_spec_id"), str)
+                else None,
+            )
             for member in members
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -268,10 +285,15 @@ class ProvenanceStore:
         )
 
     def put_retrieval(
-        self, *, conversation: str, manifest: dict[str, Any]
+        self,
+        *,
+        conversation: str,
+        manifest: dict[str, Any],
+        requested_spec_id: str | None = None,
     ) -> dict[str, str | None]:
         """Store a successful `get_data` result's manifest as the lineage of its
-        frame, and return the pair the frame is described and drawn by
+        frame, with the spec_id the call asked for (`requested_spec_id`), and
+        return the pair the frame is described and drawn by
         (`ProvenanceInput.served_ref`).
 
         The lineage is keyed by `retrieval_frame_ref`, the pair later steps name
@@ -280,7 +302,9 @@ class ProvenanceStore:
         Both keys hold the one retrieval.
         """
         frame = retrieval_frame_ref(manifest)
-        retrieval = ProvenanceInput(frame["spec_id"], frame["content_version"], manifest)
+        retrieval = ProvenanceInput(
+            frame["spec_id"], frame["content_version"], manifest, requested_spec_id
+        )
         served = retrieval.served_ref
         entry = _Entry((retrieval,))
         for key in dict.fromkeys(

@@ -1289,7 +1289,9 @@ class McpExecutor:
         # apis under the pair `put_retrieval` returns. The materialisation
         # store holds it under the pair the result states as its `frame_ref`.
         ref = self._provenance.put_retrieval(
-            conversation=current_conversation_id.get(), manifest=manifest
+            conversation=current_conversation_id.get(),
+            manifest=manifest,
+            requested_spec_id=_requested_spec(args),
         )
         store_ref = retrieval_frame_ref(manifest)
         coverage = manifest.get("coverage") or {}
@@ -1619,6 +1621,12 @@ def _envelope_title(envelope: dict[str, Any]) -> str | None:
     carries no title (a note, a source card)."""
     title = envelope["component"].get("title")
     return title.get("text") if isinstance(title, dict) else None
+
+
+def _requested_spec(args: Mapping[str, Any]) -> str | None:
+    """The spec_id a `get_data` call's `args` ask for, `None` when they name none."""
+    spec_id = args.get("spec_id")
+    return spec_id if isinstance(spec_id, str) and spec_id else None
 
 
 def _refusal_outcome(

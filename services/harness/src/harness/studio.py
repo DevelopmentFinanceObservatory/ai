@@ -88,6 +88,7 @@ from harness.card_unit import (
     UnitMove,
     change_move,
     changeable,
+    effective_identity,
     stored_card_changes,
     stored_unit_change,
     unit_move,
@@ -4105,8 +4106,10 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
     ) -> Response:
         """The places role `role` of card `component_id` can change to
         (`harness.wire.PlacesOptions`), read from Search's places door
-        (`harness.place_options.read_role_places`) for the identity of the
-        card's Search block, read with no lock and no lease, as `/state` reads.
+        (`harness.place_options.read_role_places`) for the identity the card
+        reads now, its Search block's with the places and years its scope names
+        (`harness.card_unit.effective_identity`), read with no lock and no
+        lease, as `/state` reads.
 
         An unknown conversation answers 404 `not_found`; a card off the
         canvas or offering no change 422 `scope_choice_stale`, pointer
@@ -4128,7 +4131,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         if len(held) == 2:
             constraint, detail = held
             return _places_refusal(constraint, detail, pointer="/component_id")
-        _, block, offer, _ = held
+        card, block, offer, _ = held
         if not any(p.role == role for p in offer.places or ()):
             return _places_refusal(
                 "change_not_offered",
@@ -4138,7 +4141,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         try:
             listed = await read_role_places(
                 reader,
-                identity=(block.get("definition") or {}).get("identity") or {},
+                identity=effective_identity(card, block),
                 role=role,
                 conversation_id=conversation_id,
                 component_id=component_id,

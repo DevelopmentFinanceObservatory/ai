@@ -80,11 +80,11 @@ from submission.service import SEARCH_DEFAULT_RATIONALE
 
 from harness import plan_display
 from harness.card_unit import (
+    ConversationBlocks,
     UnitCard,
     card_changes,
     card_unit_change,
     encoded,
-    known_blocks,
     unit_card,
 )
 from harness.conversation import current_conversation_id, current_conversation_key
@@ -878,7 +878,7 @@ class _RecordingSurface:
         if self._provenance is not None and tool.name == "get_data" and not result.is_error:
             manifest = await manifest_with_stat_vars(dict(result.structured_content or {}))
             result = result.model_copy(update={"structured_content": manifest})
-            self._remember_manifest(manifest)
+            self._remember_manifest(manifest, requested_spec_id=arguments.get("spec_id"))
         self._record(
             tool.name, arguments, _surface_call_outcome(tool.name, result), started=started
         )
@@ -903,8 +903,11 @@ class _RecordingSurface:
             )
         )
 
-    def _remember_manifest(self, manifest: dict[str, Any]) -> None:
-        """Write a successful `get_data` step's manifest into `provenance`.
+    def _remember_manifest(
+        self, manifest: dict[str, Any], *, requested_spec_id: Any = None
+    ) -> None:
+        """Write a successful `get_data` step's manifest into `provenance`,
+        with the spec_id the step asked for when it is known.
 
         Through `ProvenanceStore.put_retrieval`, as `harness.mcp_client.McpExecutor
         ._get_data` writes it, so the two writers agree on where a manifest lives
@@ -912,7 +915,9 @@ class _RecordingSurface:
         """
         assert self._provenance is not None  # guarded by the caller
         self._provenance.put_retrieval(
-            conversation=current_conversation_id.get(), manifest=manifest
+            conversation=current_conversation_id.get(),
+            manifest=manifest,
+            requested_spec_id=requested_spec_id if isinstance(requested_spec_id, str) else None,
         )
 
     async def restore_retrievals(self, results: Sequence[Mapping[str, Any]]) -> None:
@@ -2413,7 +2418,7 @@ class _Translator:
         places (`harness.card_unit`). The encoding is the one `intent`, the
         card's written intent, fixes (`harness.card_unit.encoded`)."""
         c = self._conversation
-        blocks = known_blocks(c.turn_specs, c.turns)
+        blocks = ConversationBlocks(c.turn_specs, c.turns)
         card = unit_card(component, lineage, blocks)
         if card is None:
             return None

@@ -14,7 +14,7 @@ from common.live_apis import LiveApisError
 from data_mcp.get_data_tool import _SUM_STAT_VARS_GROUPBY, Breakdown
 from harness import card_unit, place_options
 from harness.card_unit import frame_arguments, retitled, unit_card
-from harness.provenance import CardLineage, ProvenanceInput
+from harness.provenance import CardLineage, ProvenanceInput, lineage_from_json, lineage_json
 from harness.studio import _read_card_change
 from harness.wire import (
     CardChanges,
@@ -285,6 +285,85 @@ def test_a_card_on_a_scoped_retrieval_reads_its_block_with_the_scope(
 
     assert card is not None
     assert (card.spec_id, card.scope) == (spec_id, scope)
+
+
+_OTHER_BASE = "spec_" + "c" * 32
+
+
+@pytest.mark.parametrize("reversed_blocks", [False, True], ids=["in-order", "reversed"])
+@pytest.mark.parametrize(
+    ("requested", "spec_id"),
+    [(_OTHER_BASE, _OTHER_BASE), (_BASE, _BASE), (None, _SPEC)],
+    ids=["asked-for-the-second", "asked-for-the-first", "unrecorded-and-ambiguous"],
+)
+def test_a_scoped_retrieval_reads_the_spec_it_asked_for(
+    requested: str | None, spec_id: str, reversed_blocks: bool
+) -> None:
+    """Two blocks match the served identity outside its places. The card reads
+    the one its retrieval asked for, in whatever order the conversation keeps
+    them; a retrieval that recorded none reads its own spec and offers no
+    change, since either block could be the one."""
+    lineage = _lineage((_SPEC, _CV))
+    (member,) = lineage.lineage
+    member.manifest["definition"]["identity"] = {
+        **_BASE_IDENTITY,
+        "entities": {"destination": ["country/TGO"], "origin": ["country/FRA"]},
+    }
+    lineage = CardLineage(
+        component_id="cmp_1",
+        frame=lineage.frame,
+        lineage=(ProvenanceInput(_SPEC, _CV, member.manifest, requested),),
+    )
+    blocks = {
+        _BASE: {"definition": {"spec_id": _BASE, "identity": _BASE_IDENTITY}},
+        _OTHER_BASE: {
+            "definition": {
+                "spec_id": _OTHER_BASE,
+                "identity": {**_BASE_IDENTITY, "entities": {"destination": ["country/UGA"]}},
+            }
+        },
+    }
+    if reversed_blocks:
+        blocks = dict(reversed(blocks.items()))
+
+    card = unit_card(_component(), lineage, blocks)
+
+    assert card is not None
+    assert card.spec_id == spec_id
+    assert (card.scope is None) is (requested is None)
+
+
+def test_a_lineage_keeps_the_spec_its_retrieval_asked_for() -> None:
+    lineage = (ProvenanceInput(_SPEC, _CV, {"definition": {"spec_id": _SPEC}}, _BASE),)
+
+    assert lineage_from_json(json.loads(json.dumps(lineage_json(lineage)))) == lineage
+
+
+def test_a_card_offers_the_places_it_draws_of_its_frame() -> None:
+    """The frame holds Kenya and Uganda and the chart draws Kenya: Kenya is
+    the place shown, and adding Uganda is a change."""
+    block = _france_kenya_block()
+    scoped = card_unit.UnitCard(
+        spec_id=block["spec_id"],
+        args={},
+        scope={"entities": {"destination": ["dcid:country/KEN", "dcid:country/UGA"]}},
+        labels={"country/KEN": "Kenya", "country/UGA": "Uganda"},
+    )
+    intent = {"type": "line_chart", "select": {"destination": "dcid:country/KEN"}}
+    card = card_unit.encoded(scoped, block, intent=intent)
+
+    offer = card_unit.card_changes(
+        card_unit.UnitCard.from_json(card.as_json()) or card,
+        block,
+        fact_summary=_FETCHED_2016_2024,
+        places=True,
+    )
+
+    assert offer is not None
+    (destination,) = [p for p in offer.places or () if p.role == "destination"]
+    assert [o.id for o in destination.chosen] == ["country/KEN"]
+    both = PlacesChange(kind="places", role="destination", entities=["country/KEN", "country/UGA"])
+    assert card_unit._places_refusal(offer, both) is None
 
 
 class _Door:
