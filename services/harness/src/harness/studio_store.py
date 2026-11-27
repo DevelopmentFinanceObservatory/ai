@@ -858,7 +858,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_PROJECTION_ASKED: state.turn_projection_asked,
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
-        _KEY_TURN_CARD_CHANGE: state.turn_card_change,
+        _KEY_TURN_CARD_CHANGE: _card_change_stamped(state),
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
         # The approved plans' added members are stored beside them
         # (`_approved_apart`), as a pause's are.
@@ -896,6 +896,7 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
     """Merge `delta` (a subset of `_serialize_durable`'s keys) onto `state`
     in place. A key this release does not know (one a later release wrote
     into `turn_state`) is logged and ignored."""
+    turn_before = state.turn_index
     for key, value in delta.items():
         if key == _KEY_TURN_INDEX:
             state.turn_index = value
@@ -942,7 +943,7 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
         elif key == _KEY_TURN_APPLIED_CHOICE:
             state.turn_applied_choice = dict(value) if value else None
         elif key == _KEY_TURN_CARD_CHANGE:
-            state.turn_card_change = dict(value) if value else None
+            pass  # after the loop, against the turn index this delta leaves
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
         elif key == _KEY_TURN_APPROVED or key in _APPROVED_LAYER_KEYS:
@@ -972,6 +973,15 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             list(delta.get(_KEY_TURN_APPROVED, approved) or ()),
             {**added, **_layers(delta, _KEY_TURN_APPROVED)},
         )
+    if _KEY_TURN_CARD_CHANGE in delta:
+        state.turn_card_change = _card_change_back(
+            delta[_KEY_TURN_CARD_CHANGE], turn_index=state.turn_index
+        )
+    elif state.turn_index != turn_before:
+        # A release that does not know the mark moved the turn on and left
+        # the stored mark as it was, so the mark held here is an earlier
+        # turn's.
+        state.turn_card_change = None
     if _KEY_TURN_USAGE in delta:
         state.turn_usage = _turn_usage(delta[_KEY_TURN_USAGE], trace_id=state.trace_id)
     elif state.turn_usage.trace_id != (state.trace_id or None):
@@ -979,6 +989,27 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
         # trace id alone, leaves the turn an empty usage of its own, which
         # `take_identity` and `note_spec_use` can fill and a save keeps.
         state.turn_usage = TurnUsage(trace_id=state.trace_id or None)
+
+
+def _card_change_stamped(state: ConversationState) -> dict[str, Any] | None:
+    """The stored form of the open turn's card change mark: `{"turn_index",
+    "mark"}`, the mark stamped with the turn it belongs to, or `None` for
+    none."""
+    if not state.turn_card_change:
+        return None
+    return {"turn_index": state.turn_index, "mark": state.turn_card_change}
+
+
+def _card_change_back(value: Any, *, turn_index: int) -> dict[str, Any] | None:
+    """The card change mark a stored `turn_card_change` holds for turn
+    `turn_index`. A release that does not know the mark merges only the
+    keys it knows into the stored state, so a mark stamped for another turn
+    is an earlier turn's left in place, and reads as none, as does an
+    unstamped one."""
+    if not isinstance(value, dict) or value.get("turn_index") != turn_index:
+        return None
+    mark = value.get("mark")
+    return dict(mark) if isinstance(mark, dict) and mark else None
 
 
 def _turn_usage(value: Any, *, trace_id: str | None) -> TurnUsage:

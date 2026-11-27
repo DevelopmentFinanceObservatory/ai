@@ -2447,15 +2447,16 @@ async def _held_removal(engine: AsyncEngine) -> tuple[StudioStore, _Translator, 
     return store, translator, frames
 
 
-@pytest.mark.parametrize("ending", ["draws", "answers", "done", "pause", "error"])
+@pytest.mark.parametrize("ending", ["draws", "draws-none", "answers", "done", "pause", "error"])
 async def test_a_removal_shows_beside_the_next_drawing_line_or_as_the_segment_ends(
     pg_engine: AsyncEngine, ending: str
 ) -> None:
     """The canvas update of a removal waits through the removal's answer, so
     the removed cards stay on screen until the cards replacing them are
     announced. It goes out right after the next response's `make_charts`
-    line. A response that only answers in text streams it delta by delta
-    and leaves the update held. When the segment ends with it held, on
+    line that announces a card. A `make_charts` call that announces none,
+    and a response that only answers in text, streamed delta by delta,
+    leave the update held. When the segment ends with it held, on
     `done`, a pause or a failure, the translator gives it, once, to the
     stream's owner to send before the ending frame (`release_removal`,
     which the work's `owed` hands over)."""
@@ -2463,6 +2464,8 @@ async def test_a_removal_shows_beside_the_next_drawing_line_or_as_the_segment_en
     match ending:
         case "draws":
             frames = await translated(translator, _DRAWING)
+        case "draws-none":
+            frames = await translated(translator, _call("make_charts", {"charts": []}))
         case "answers":
             frames = [
                 *await translated(translator, TextDelta("Do")),
@@ -4842,3 +4845,60 @@ def test_an_execute_output_whose_frames_and_steps_differ_in_length_names_no_plan
 
     assert translator._conversation.turn_plan_frames == {}
     assert "frame steps" in caplog.text
+
+
+async def test_a_chart_batch_reads_its_cards_sums_together_under_one_deadline(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drain lands three cards, each of which may rest on a sum whose
+    recipe is read before the batch goes out (`read_summed_frame`). The
+    reads run together: the first two finish only once both have started.
+    The third never answers, and at the shared deadline its card goes out
+    read as resting on no sum, so it offers no change."""
+    current_conversation_id.set("c1")
+    store, conversation = await _stored_conversation(pg_engine)
+    drawn = [_written_component(f"cmp_{index}") for index in range(3)]
+
+    async def executor(*, tool: str, args: dict[str, object], on_progress=None) -> dict[str, Any]:
+        del tool, args, on_progress
+        return {"outcome": "ok", "component": drawn.pop(0)}
+
+    recorder = _RecordingExecutor(executor, store=store)
+    translator = _Translator(conversation=conversation, recorder=recorder)
+    started = 0
+    both = asyncio.Event()
+    summed = object()
+
+    async def read(lineage: Any) -> Any:
+        nonlocal started
+        started += 1
+        if started > 2:
+            await asyncio.Event().wait()
+        if started == 2:
+            both.set()
+        await both.wait()
+        return summed
+
+    totals: list[Any] = []
+
+    def changeable(component: Any, lineage: Any, *, total: Any, **kwargs: Any) -> None:
+        totals.append(total)
+
+    monkeypatch.setattr(studio_translate_module, "read_summed_frame", read)
+    monkeypatch.setattr(studio_translate_module, "SUMMED_READ_DEADLINE_S", 0.2, raising=False)
+    monkeypatch.setattr(translator, "_changeable_card", changeable)
+    for _ in range(3):
+        written = await recorder(tool="write_component", args={})
+        recorder.land_component(written["component"])
+    answer = types.FunctionResponse(id="m", name="make_charts", response={"charts": []})
+
+    frames = await asyncio.wait_for(
+        translated(translator, ToolsAnswered(answers=(answer,), state={})), timeout=3
+    )
+
+    assert [f.component_id for f in frames if f.event == "component.created"] == [
+        "cmp_0",
+        "cmp_1",
+        "cmp_2",
+    ]
+    assert totals == [summed, summed, None]

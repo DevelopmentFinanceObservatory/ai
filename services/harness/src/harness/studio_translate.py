@@ -191,6 +191,14 @@ from harness.wire import (
 
 logger = logging.getLogger(__name__)
 
+# How long a drain waits, in all, for the recipes of the sums its landing
+# cards rest on (`read_summed_frame`), read together. A recorded read of a
+# derived frame's manifest took 0.14 to 0.95 s. A card whose read misses it
+# is stored and sent as resting on no sum, with no `UnitCard`, so it offers
+# no years, places or unit change for as long as it stays on the canvas: no
+# later read builds one.
+SUMMED_READ_DEADLINE_S = 4.0
+
 # The bound on a recorded refusal's `message` and on a running line's detail.
 # Large enough to hold a real over_ceiling/member_cardinality refusal whole,
 # including the advice sentence at the end that says scope cannot narrow it.
@@ -2358,6 +2366,7 @@ class _Translator:
             record.land and isinstance(record.result.get("component"), dict) for record in records
         ):
             frames.extend(self._release_removal())
+        totals = await self._summed_frames(records)
         for record in records:
             if self._unshown(record):
                 continue
@@ -2427,7 +2436,7 @@ class _Translator:
                         intent=record.args.get("intent"),
                         # A card on a sum of one retrieval changes as one on
                         # the retrieval's frame does (`harness.card_unit`).
-                        total=await read_summed_frame(record.card_lineage),
+                        total=totals.get(id(record)),
                     )
                     if lands
                     else None
@@ -2445,6 +2454,36 @@ class _Translator:
                     )
                 )
         return frames
+
+    async def _summed_frames(
+        self, records: Sequence[_ExecutorRecord]
+    ) -> dict[int, SummedFrame | None]:
+        """The sum each card of `records` that lands a block rests on, by the
+        record's `id`, read together within `SUMMED_READ_DEADLINE_S`. A read
+        that misses the deadline is cancelled and its card reads as resting
+        on no sum (`read_summed_frame` answers `None` for most cards at once)."""
+        if not self._conversation.auto_add:
+            return {}
+        reads = {
+            id(record): asyncio.ensure_future(read_summed_frame(record.card_lineage))
+            for record in records
+            if record.land and isinstance(record.result.get("component"), dict)
+        }
+        if not reads:
+            return {}
+        _, late = await asyncio.wait(reads.values(), timeout=SUMMED_READ_DEADLINE_S)
+        for read in late:
+            read.cancel()
+        if late:
+            await asyncio.gather(*late, return_exceptions=True)
+            logger.info(
+                "studio stream: %d of %d sum reads missed the %.1f s deadline, so "
+                "their cards offer no change",
+                len(late),
+                len(reads),
+                SUMMED_READ_DEADLINE_S,
+            )
+        return {key: None if read in late else read.result() for key, read in reads.items()}
 
     def _changeable_card(
         self,
@@ -3102,9 +3141,12 @@ class _Translator:
             frames.append(frame)
             if name == "make_charts":
                 frame.coming = self._announce(call.id, frame.step_id, args) or None
-                # The held removal goes out beside the first line that draws
-                # the cards replacing the removed ones.
-                frames.extend(self._release_removal())
+                # The held removal goes out beside the first line that
+                # announces a card to replace the removed ones. A line that
+                # announces none leaves it held, since no placeholder would
+                # fill the gap.
+                if frame.coming:
+                    frames.extend(self._release_removal())
         # A response that draws nothing releases nothing. The held removal waits
         # for a later drawing line or the segment's end (`release_removal`).
         return frames

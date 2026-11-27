@@ -3679,3 +3679,42 @@ async def test_a_sum_keeps_the_source_its_retrieval_was_counted_in(
         created["component_id"]
     ]
     assert entry["summed_with"] == {"tool": "aggregate", "arguments": _SUM_PARAMETERS}
+
+
+async def test_a_card_change_mark_reads_only_on_the_turn_it_was_written_for(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A card change marks its turn. A release that does not know the mark
+    then runs an ordinary turn: it merges only the keys it knows into the
+    stored state, so the turn index moves on and the mark stays as written.
+    The state read reports no card change on that later turn, and the
+    change's own turn keeps it."""
+    app = _changes_app(pg_engine)
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = _Changer()
+        await _stream(client, "/api/studio/turn", _years_step(_frame(frames, "component.created")))
+
+        async def read() -> dict[str, Any]:
+            app.state.studio.store.evict(PRINCIPAL, CONVERSATION)
+            response = await client.get(
+                "/api/studio/state",
+                params={"conversation_id": CONVERSATION, "since": 0},
+                headers=AUTH,
+            )
+            return response.json()
+
+        changed = await read()
+        async with pg_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE conversations SET turn_state = turn_state || "
+                    "jsonb_build_object('turn_index', (turn_state ->> 'turn_index')::int + 1)"
+                )
+            )
+        later = await read()
+
+    assert changed["turn"]["index"] == 2
+    assert changed["turn"]["card_change"]["kind"] == "window"
+    assert later["turn"]["index"] == 3
+    assert "card_change" not in later["turn"]
