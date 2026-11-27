@@ -1479,7 +1479,7 @@ async def test_a_change_of_places_reads_the_new_places_years_while_it_fetches(
 ) -> None:
     """A change of places reads the years Search holds for the new places
     alongside the data, so both start before either ends. A fetch that comes
-    back empty ends the change as before, and the card keeps its offer."""
+    back empty ends the change, and the card keeps its offer."""
     overlap = _Overlap()
     search = _OverlappingSearch(overlap)
     app = _app(
@@ -2899,11 +2899,11 @@ _RECORDED_SUM_TITLE = "Total gross ODA disbursements to Kenya for health, 2010 t
 def test_a_changed_sums_title_keeps_its_measure_as_a_plain_cards_does(
     title: str, change: Any, redrawn: str
 ) -> None:
-    """The live sum of health aid to Kenya, changed to 2012 to 2018, then to
-    2014 to 2020, then to Uganda, redrew "Health, Kenya, 2012 to 2018" and
-    the like. A sum's title that counts no members keeps its subject and its
-    measure as a plain card's does: the new period after a change of years,
-    the new place where the title named the old one."""
+    """A sum's title that counts no members keeps its subject and its measure
+    as a plain card's does, with the new period after a change of years and
+    the new place where the title named the old one. The input is the
+    recorded sum of health aid to Kenya, changed to 2012 to 2018, then to
+    2014 to 2020, then to Uganda."""
     assert _REDRAWS["titles"][0] == _RECORDED_SUM_TITLE
     move = _move(title, change)
     move = replace(move, card=replace(move.card, total=_SUMMED_CARD))
@@ -2936,7 +2936,7 @@ def test_a_changed_sums_title_and_labels_count_no_members(change: Any, title: st
     heads its sentence with (here the recorded sum of health aid to Kenya's
     "Gross ODA disbursements"), places and period, and an axis label stating
     a count is dropped, so neither states a count the new sum may not have,
-    and the measure is never a bare sector word."""
+    and the measure is the block's whole heading."""
     block = {**_ENVELOPE["parts"][0]["spec"], "resolved": _REDRAWS["block_labels"]["resolved"]}
     (what,) = [
         part["text"] for part in block["resolved"]["sentence_plan"] if part.get("axis") == "what"
@@ -3068,11 +3068,10 @@ async def test_a_sum_pinned_to_one_unit_binds_it_on_the_new_retrieval(
 
 class _BindingChanger(_SummedChanger):
     """`_SummedChanger` whose platform stores and binds a sum's select as the
-    live one did: the card's stored intent selects the family ref its sum's
+    data API does: the card's stored intent selects the family ref its sum's
     series carry (`dcid:<spec_id>` of the spec its retrieval is served
     under), and a write selecting a `stat_var` the drawn frame does not hold
-    is refused `binding_invalid`, as the live redraws of a changed sum of
-    health aid to Kenya were."""
+    is refused `binding_invalid`."""
 
     def __init__(self, provenance: ProvenanceStore, surface: _SummingSearch) -> None:
         super().__init__(provenance)
@@ -3176,11 +3175,12 @@ _REDRAWS = json.loads(
 def test_a_recorded_sums_redraw_selects_only_what_its_new_frame_holds(
     name: str, change: Any
 ) -> None:
-    """The live sum of health aid to Kenya, changed to 2012 to 2018 and to
+    """The recorded sum of health aid to Kenya, changed to 2012 to 2018 and to
     Uganda. Its stored select names the family ref of the spec its retrieval
-    was served under, which neither new sum frame holds, so the platform
-    refused both redraws. Redrawn with the new retrieval's spec, every value
-    the select names is one the new frame's view holds."""
+    was served under, which each new sum frame lacks, and the platform
+    refuses a select naming a value its frame lacks. Redrawn with the new
+    retrieval's spec, every value the select names is one the new frame's
+    view holds."""
     recorded = _REDRAWS["changes"][name]
     stored = _REDRAWS["stored_intent"]
     old = _REDRAWS["old_served"]

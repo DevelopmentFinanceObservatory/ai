@@ -572,8 +572,8 @@ class _Owner[E, R]:
             )
             if self._task is not None and not self._task.done():
                 await self._stop(self._task)
-            # The transient frame still goes out, so what the work owes goes
-            # ahead of it, unless taking it is the fault.
+            # The transient frame goes out in every case, so what the work owes
+            # goes ahead of it. A failure to take it is logged.
             try:
                 await self._settle()
             except Exception:

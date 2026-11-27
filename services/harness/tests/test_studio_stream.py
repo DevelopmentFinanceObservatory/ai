@@ -1113,7 +1113,7 @@ async def test_a_removal_goes_out_before_the_stream_ends_however_it_ends(
 ) -> None:
     """The drive raises, its turn is abandoned, or another instance takes its
     lease, after the agent removed a card, whether or not the removal's
-    answer was translated: the stream sends the canvas without the card
+    answer was translated. The stream sends the canvas without the card
     once, then the `error` frame. With nothing removed, it sends the error
     alone."""
     current_conversation_id.set(CONVERSATION)
@@ -1137,7 +1137,7 @@ async def test_an_owner_that_fails_still_sends_the_removal_before_its_transient_
     spans: Spans, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The drive raises and the work's fatal frame raises too, a fault in the
-    owner: the stream still sends the removal before the transient frame."""
+    owner. The stream sends the removal before the transient frame."""
     current_conversation_id.set(CONVERSATION)
     conversation = _two_cards()
     work = _RemovingSegment(conversation, answered=False, raises=_RAISED)

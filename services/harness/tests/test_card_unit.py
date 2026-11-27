@@ -1013,8 +1013,8 @@ _RECORDED_SUM = json.loads(
 async def test_the_recorded_sum_of_health_aid_to_kenya_reads_as_one_sum_by_year(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The manifest dfo-apis served for the live sum by year and recipient of
-    health aid to Kenya. Its tree names each node's frame, the root node's
+    """The recorded manifest of the sum by year and recipient of health aid
+    to Kenya. Its tree names each node's frame, the root node's
     among them, and its root is stored under a pair of its own beside the
     pair the data API serves (`dataset`). The card's lineage holds the
     retrieval under the frame key the harness recorded for it
@@ -1057,9 +1057,9 @@ async def test_a_plan_runs_recorded_sum_offers_its_years_and_its_one_recipient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A plan run drew the sum by year of health aid to Kenya. The runner
-    recorded the retrieval it summed under a frame pair of its own, which is
-    neither the lineage's frame key nor the store's, and all three name the
-    pair the data API serves. The card is read as the plan path reads it
+    recorded the retrieval it summed under a frame pair of its own, which
+    differs from the lineage's frame key and from the store's, and all three
+    name the pair the data API serves. The card is read as the plan path reads it
     (`read_summed_frame`, then `_Translator._changeable_card`) and offers
     its years and its one recipient."""
     recorded = _PLAN_SUM_CARD

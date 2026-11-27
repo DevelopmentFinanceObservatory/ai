@@ -225,8 +225,8 @@ async def read_summed_frame(lineage: CardLineage | None) -> SummedFrame | None:
     only for a derived (`ops_`) frame resting on one retrieval, which must be
     the sum's root. The two are matched by the pair the data API serves the
     retrieval under (`SummedFrame.served`), since the runner records the
-    frame it read under a pair of its own, which neither the lineage's frame
-    key nor the store's pair is. `None` for any other card, and when the
+    frame it read under a pair of its own, which differs from the lineage's
+    frame key and from the store's pair. `None` for any other card, and when the
     recipe cannot be read, so such a card offers no change."""
     if lineage is None or len(lineage.lineage) != 1:
         return None

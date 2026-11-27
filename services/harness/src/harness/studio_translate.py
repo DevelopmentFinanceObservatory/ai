@@ -2578,9 +2578,9 @@ class _Translator:
         the one this translator holds and one the conversation marked that no
         drain took yet (`ConversationState.take_unreported_removal`), as when
         the drive raised or its lease went before the removal's answer was
-        translated; none when neither is owed. The work's `owed` hands it to
-        the stream's owner (`harness.studio_stream.Work.owed`), and taking it
-        clears both, so no later stream of the turn sends it again."""
+        translated. Nothing is returned when neither is owed. The work's `owed`
+        hands it to the stream's owner (`harness.studio_stream.Work.owed`), and
+        taking it clears both, so no later stream of the turn sends it again."""
         if self._conversation.take_unreported_removal():
             self._removal_held = True
         return self._release_removal()
