@@ -2676,6 +2676,10 @@ class _SummingSearch(_Search):
         super().__init__()
         self.summed: list[dict[str, Any]] = []
         self.refuse = refuse
+        # The family ref each sum's series carry, by the sum's spec_id: the
+        # `dcid:<spec_id>` apis writes on a summed retrieval's series, for
+        # the spec the retrieval is served under.
+        self.families: dict[str, str] = {}
 
     async def call_tool(
         self, *, tool: ToolId, arguments: Any, on_progress: ProgressCallback | None = None
@@ -2689,6 +2693,7 @@ class _SummingSearch(_Search):
                 structured_content={"code": "unit_heterogeneous", "message": "two units"},
             )
         digest = hashlib.sha1(json.dumps(arguments, sort_keys=True).encode()).hexdigest()
+        self.families["ops_" + digest[:32]] = f"dcid:{arguments['frame_ref']['spec_id']}"
         return ToolCallResult(
             is_error=False,
             structured_content={
@@ -3004,6 +3009,147 @@ async def test_a_sum_pinned_to_one_unit_binds_it_on_the_new_retrieval(
     (summed,) = surface.summed
     assert summed["unit"] == pinned["unit"]
     assert _frame(frames, "component.created")["replaces"] == "cmp_01unit0001"
+
+
+class _BindingChanger(_SummedChanger):
+    """`_SummedChanger` whose platform stores and binds a sum's select as the
+    live one did: the card's stored intent selects the family ref its sum's
+    series carry (`dcid:<spec_id>` of the spec its retrieval is served
+    under), and a write selecting a `stat_var` the drawn frame does not hold
+    is refused `binding_invalid`, as the live redraws of a changed sum of
+    health aid to Kenya were."""
+
+    def __init__(self, provenance: ProvenanceStore, surface: _SummingSearch) -> None:
+        super().__init__(provenance)
+        self.surface = surface
+        self.card_frame = dict(_SUM_OPS)
+        self.written: list[dict[str, Any]] = []
+
+    def family(self, spec_id: str) -> str | None:
+        return {_SUM_OPS["spec_id"]: f"dcid:{_SPEC}", **self.surface.families}.get(spec_id)
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        if tool == "describe_component":
+            self.calls.append({"tool": tool, "args": args})
+            stored = _described(args["component_id"], self.card_frame, self.title)
+            intent = stored["component_body"]["stored_intent"]
+            intent["select"] = {"stat_var": self.family(self.card_frame["spec_id"])}
+            return stored
+        if tool == "write_component":
+            intent = args["intent"]
+            held = self.family(intent["frame_ref"]["spec_id"])
+            named = intent["select"].get("stat_var")
+            missing = [v for v in (named if isinstance(named, list) else [named]) if v != held]
+            if missing:
+                self.calls.append({"tool": tool, "args": args})
+                return {
+                    "outcome": "refusal",
+                    "refusal": {
+                        "code": "binding_invalid",
+                        "retry_mode": "correct_and_retry",
+                        "fix": None,
+                        "message": f"'stat_var' does not hold value(s) {missing}",
+                    },
+                }
+            self.written.append(intent)
+            self.card_frame = dict(intent["frame_ref"])
+        return await super().__call__(tool=tool, args=args, **kw)
+
+
+@pytest.mark.parametrize(
+    ("change", "then"), [(_YEARS, _UGANDA), (_UGANDA, _YEARS)], ids=["years", "places"]
+)
+async def test_a_changed_sum_selects_the_family_its_new_retrieval_is_summed_under(
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    change: dict[str, Any],
+    then: dict[str, Any],
+) -> None:
+    """A sum's series carry its family ref, `dcid:` and the spec its
+    retrieval is served under, and the card's select names it. A change
+    fetches a retrieval served under another spec, so the redraw selects
+    that spec's ref, and the platform binds it. The redrawn card offers its
+    changes again, keeps the `aggregate` step on its canvas entry, and a
+    second change on it sums and redraws as the first did."""
+    surface = _SummingSearch()
+    app, provenance = _summed_app(pg_engine, monkeypatch, surface)
+    app.state.studio.place_options = _Places()
+    changer = _BindingChanger(provenance, surface)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, change)
+        )
+        created = _frame(frames, "component.created")
+        again = await _stream(
+            client, "/api/studio/turn", _change_body(created["component_id"], _SPEC, then)
+        )
+
+    assert len(changer.fetched()) == 2
+    assert [intent["select"] for intent in changer.written] == [
+        {"stat_var": f"dcid:{summed['frame_ref']['spec_id']}"} for summed in surface.summed
+    ]
+    assert changer.written[0]["select"] != {"stat_var": f"dcid:{_SPEC}"}
+    assert created["replaces"] == "cmp_01unit0001"
+    entry = app.state.studio.store.current(PRINCIPAL, CONVERSATION).components[
+        created["component_id"]
+    ]
+    assert entry["summed_with"] == {"tool": "aggregate", "arguments": _SUM_PARAMETERS}
+    offer = created["card_changes"]
+    assert "window" in offer
+    if change is _UGANDA:
+        (places,) = [p for p in offer["places"] if p["role"] == "destination"]
+        assert [o["id"] for o in places["chosen"]] == change["entities"]
+    redrawn = _frame(again, "component.created")
+    assert redrawn["replaces"] == created["component_id"]
+
+
+_REDRAWS = json.loads(
+    (Path(__file__).parent / "fixtures" / "recorded_changed_sum_redraws.json").read_text()
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "change"),
+    [
+        ("years", WindowChange(kind="window", start_year=2012, end_year=2018)),
+        ("places", PlacesChange(kind="places", role="destination", entities=["country/UGA"])),
+    ],
+    ids=["years", "places"],
+)
+def test_a_recorded_sums_redraw_selects_only_what_its_new_frame_holds(
+    name: str, change: Any
+) -> None:
+    """The live sum of health aid to Kenya, changed to 2012 to 2018 and to
+    Uganda. Its stored select names the family ref of the spec its retrieval
+    was served under, which neither new sum frame holds, so the platform
+    refused both redraws. Redrawn with the new retrieval's spec, every value
+    the select names is one the new frame's view holds."""
+    recorded = _REDRAWS["changes"][name]
+    stored = _REDRAWS["stored_intent"]
+    old = _REDRAWS["old_served"]
+    held = {dim["name"]: dim["values"] for dim in recorded["view"]["dimensions"]}
+    assert stored["select"]["stat_var"] == f"dcid:{old['spec_id']}"
+    assert stored["select"]["stat_var"] not in held["stat_var"]
+    manifest = recorded["derived_manifest"]
+    move = _move(stored["title"], change)
+    total = card_unit.SummedFrame(
+        frame=(stored["frame_ref"]["spec_id"], stored["frame_ref"]["content_version"]),
+        root=(old["spec_id"], old["content_version"]),
+        served=(old["spec_id"], old["content_version"]),
+        parameters=manifest["recipe"]["tree"]["op_spec"]["parameters"],
+    )
+    move = replace(move, card=replace(move.card, total=total))
+    frame_ref = {"spec_id": manifest["spec_id"], "content_version": manifest["content_version"]}
+
+    intent, _ = _redrawn_intent(
+        stored, frame_ref, move, family=(old["spec_id"], recorded["served"]["spec_id"])
+    )
+
+    for column, value in intent["select"].items():
+        assert set(value if isinstance(value, list) else [value]) <= set(held[column])
+    assert intent["frame_ref"] == frame_ref
 
 
 def _ending(frames: list[dict[str, Any]]) -> list[tuple[str, ...]]:

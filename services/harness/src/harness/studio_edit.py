@@ -468,10 +468,20 @@ async def _read_change(surface: ToolSurface, move: UnitMove | ChangeMove) -> _Re
 
 
 def _redrawn_intent(
-    stored: Mapping[str, Any], frame_ref: Any, move: UnitMove | ChangeMove
+    stored: Mapping[str, Any],
+    frame_ref: Any,
+    move: UnitMove | ChangeMove,
+    *,
+    family: tuple[Any, Any] | None = None,
 ) -> tuple[dict[str, Any], Callable[[str, str], str | None]]:
     """The intent `move` redraws its card from, on `frame_ref`, and how it
     rewrites each word of the card's meta, by name (`None` drops it).
+
+    `family` is the spec the old retrieval was served under and the spec the
+    new one is. apis names a summed retrieval's series by its family ref,
+    `dcid:<spec_id>` of that spec (`data_mcp.frame_materialisation
+    .holds_family_ref`), so a `stat_var` entry naming the old one names the
+    new one, which the new frame holds in its place.
 
     Every change drops the `order`'s period, since the new frame can hold
     values at other periods. A unit change names the new unit in the title
@@ -487,6 +497,13 @@ def _redrawn_intent(
     role keeps its places, even one naming the same place, since the new
     frame keeps that role's places."""
     intent = {**stored, "frame_ref": frame_ref}
+    select = intent.get("select")
+    old_spec, new_spec = family or (None, None)
+    if isinstance(select, Mapping) and isinstance(old_spec, str) and isinstance(new_spec, str):
+        named = select.get("stat_var")
+        if named is not None:
+            reselected = _reselected(named, {old_spec}, [new_spec])
+            intent["select"] = {**select, "stat_var": reselected}
     title = stored.get("title")
     match move:
         case UnitMove():
@@ -860,6 +877,14 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
                 yield event
             return
         frame_ref = frame_refs[0]
+        # The spec each retrieval is served under, whose family ref a summed
+        # retrieval's series carry (`_redrawn_intent`).
+        family = (
+            move.card.total.served[0]
+            if move.card.total is not None
+            else (stored.get("frame_ref") or {}).get("spec_id"),
+            frame_ref.get("spec_id"),
+        )
         if card.total is not None:
             # The new retrieval is summed only when its series share the unit,
             # source and method the card's sum was drawn with, since `aggregate`
@@ -894,7 +919,7 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
             yield event
         return
 
-    intent, retitle = _redrawn_intent(stored, frame_ref, move)
+    intent, retitle = _redrawn_intent(stored, frame_ref, move, family=family)
     written = await recorder(tool="write_component", args={"intent": intent})
     if written.get("outcome") != "ok" or not written.get("component"):
         for event in _refused("u3", "Redraw the card", _UNIT_UNCHANGED, written):
