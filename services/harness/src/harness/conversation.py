@@ -18,6 +18,15 @@ is built, so each turn gets clients of its own
 for a task several requests join, names the Studio surface in their place,
 and detaches it from the turn's trace.
 
+`current_history` holds the turn's history arm and how it was chosen, fixed
+as the turn began (`harness.studio_state.TurnUsage.history`), which every
+model span of the turn names (`harness.gemini_wire.surface_attributes`).
+
+`current_model_usage` is the sink each model call attempt of the turn reports
+its model, role and token usage to (`note_model_usage`), which writes it as
+one `harness.studio_state.MODEL_CALL_LOG_EVENT` line
+(`harness.studio_store.write_model_call_line`).
+
 `current_user_message` holds the user's own message for the turn, which the
 orchestrator's `search` sends Search to read intent and explicit scope from.
 `harness.studio` sets it at the start of a turn and again on each resume,
@@ -26,13 +35,22 @@ when an amendment or an answer to a question has been added to it.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from contextvars import Context, ContextVar
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from common import caller as common_caller
 from common.caller import conversation_caller
 from compiler.caller_clients import CallerTurn
 from compiler.surface import current_spec_uses
+from google.genai import types
 from opentelemetry import context as otel_context
+
+if TYPE_CHECKING:
+    from harness.settings import StudioHistory
+
+logger = logging.getLogger(__name__)
 
 NO_CONVERSATION = "no-conversation"
 
@@ -63,6 +81,57 @@ current_conversation_key: ContextVar[tuple[str, str] | None] = ContextVar(
 # The current Studio turn's wire trace id (`ConversationState.trace_id`), set
 # beside `current_conversation_id`; `None` outside a Studio turn.
 current_turn_id: ContextVar[str | None] = ContextVar("studio_turn_id", default=None)
+
+
+class TurnHistory(NamedTuple):
+    """A Studio turn's history arm, `digest` or `full`, and its `mode`: `split`
+    for the arm stored with the conversation, `forced` for the one
+    `STUDIO_HISTORY` named, `None` for a turn that began before turns kept it."""
+
+    arm: StudioHistory
+    mode: Literal["split", "forced"] | None
+
+
+# The current Studio turn's history arm, `None` outside a Studio turn.
+current_history: ContextVar[TurnHistory | None] = ContextVar("studio_history", default=None)
+
+
+# The agent a model call serves: the orchestrator, the planner, or the Edit
+# Card (`harness.generative.GeminiEdit`).
+type ModelRole = Literal["orchestrator", "planner", "edit"]
+
+
+class ModelCall(NamedTuple):
+    """One model call attempt that reported usage: the agent it served, the
+    model it was sent to, and the usage Gemini reported for it."""
+
+    role: ModelRole
+    model: str
+    usage: types.GenerateContentResponseUsageMetadata
+
+
+# Where the current Studio turn hears each model call it makes, set by
+# `harness.studio` for each request that runs a turn. It is `None` outside one,
+# where nothing is heard.
+current_model_usage: ContextVar[Callable[[ModelCall], None] | None] = ContextVar(
+    "studio_model_usage", default=None
+)
+
+
+def note_model_usage(
+    usage: types.GenerateContentResponseUsageMetadata | None, *, model: str, role: ModelRole
+) -> None:
+    """Tell the current turn a model call attempt to `model`, serving `role`,
+    spent `usage` (`current_model_usage`). A no-op outside a turn and for an
+    attempt that reported none. Never raises, so a turn's cost record cannot
+    fail the call it records."""
+    sink = current_model_usage.get()
+    if sink is None or usage is None:
+        return
+    try:
+        sink(ModelCall(role=role, model=model, usage=usage))
+    except Exception:
+        logger.warning("recording a model call's usage failed", exc_info=True)
 
 
 # The user's words for the current turn as `ConversationState.turn_user_words`
@@ -112,12 +181,15 @@ def shared_work_context() -> Context:
     empty OpenTelemetry context too, so the task records on no turn's trace
     and its MCP calls carry no turn's Langfuse session, user or tags
     (`common.telemetry.turn_call_meta`), as work outside any turn does. It
-    reports its fetches to no turn's spec-use sink (`current_spec_uses`).
+    reports its fetches to no turn's spec-use sink (`current_spec_uses`) and its
+    model calls to no turn's usage sink (`current_model_usage`).
     """
     context = common_caller.shared_work_context(surface=common_caller.STUDIO_SURFACE)
     context.run(current_conversation_id.set, NO_CONVERSATION)
     context.run(current_conversation_key.set, None)
     context.run(current_turn_id.set, None)
+    context.run(current_history.set, None)
+    context.run(current_model_usage.set, None)
     context.run(current_spec_uses.set, None)
     # The attach lives in the copy and dies with it.
     context.run(otel_context.attach, otel_context.Context())
@@ -126,11 +198,17 @@ def shared_work_context() -> Context:
 
 __all__ = [
     "NO_CONVERSATION",
+    "ModelCall",
+    "ModelRole",
+    "TurnHistory",
     "current_caller_turn",
     "current_conversation_caller",
     "current_conversation_id",
     "current_conversation_key",
+    "current_history",
+    "current_model_usage",
     "current_turn_id",
     "current_user_message",
+    "note_model_usage",
     "shared_work_context",
 ]

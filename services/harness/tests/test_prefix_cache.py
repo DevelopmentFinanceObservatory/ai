@@ -141,7 +141,12 @@ class _Clock:
 
 def _stream(cache: PrefixCache, client: _FakeClient) -> GeminiStream:
     return GeminiStream(
-        client=client, budget=None, prefix_cache=cache, before_request=None, after_response=None
+        client=client,
+        budget=None,
+        prefix_cache=cache,
+        before_request=None,
+        after_response=None,
+        role="planner",
     )
 
 

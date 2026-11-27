@@ -10,6 +10,7 @@ the action as the next node's input, or `answered` when the agent replied.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import (
     Callable,
     Collection,
@@ -18,7 +19,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from compiler.surface import ToolSurface
 from orchestrator.agent import Orchestrator
@@ -31,12 +32,15 @@ from orchestrator.run import (
     run_orchestrator,
 )
 from planner.plan import SessionState
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import Model
 
 from harness.gemini_agent import RecordingState
 from harness.graph.events import AgentStatus, GraphEvent
 from harness.graph.state import (
+    ORCHESTRATOR_CARRIES_KEY,
+    ORCHESTRATOR_CHAIN_RESET_KEY,
     ORCHESTRATOR_GIVEN_BACK_ASKS_KEY,
     ORCHESTRATOR_HISTORY_KEY,
     ORCHESTRATOR_PENDING_KEY,
@@ -44,6 +48,7 @@ from harness.graph.state import (
     ORCHESTRATOR_SPECS_KEY,
     AskOption,
     AskQuestion,
+    CarriedRef,
     PendingAsk,
     TurnInput,
     UnitAsk,
@@ -68,6 +73,8 @@ from harness.turn_records import SearchReading
 from harness.unit_offer import served_unit, unit_phrase
 from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit
 from harness.wire import UnitChoice, UnitOffer
+
+logger = logging.getLogger(__name__)
 
 
 class AgentHandBack(BaseModel):
@@ -116,10 +123,33 @@ def turn_id(key: TurnKey) -> str:
 HAND_OFF_EDGES = {"plan": "plan", "ask_user": "ask"}
 
 
-def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) -> Node[GraphEvent]:
+class CarriedSource(Protocol):
+    """Where the `orchestrate` node of a `full` turn reads the conversation
+    it extends, and records that it opened from the whole digest instead
+    (`harness.studio_state.make_carried_history`)."""
+
+    def history(self, key: TurnKey) -> Mapping[str, Any] | None:
+        """The conversation's stored carried conversation
+        (`harness.studio_state.ConversationState.carried_history`), for the
+        turn `key` names: an empty mapping when it holds none, and None when
+        the instance holds no state for the conversation."""
+        ...
+
+    def reset(self, key: TurnKey, reason: str) -> None:
+        """Record on the turn `key` names, while it is open, that its
+        orchestrator opened from the whole digest for `reason`, as its
+        `history_chain`, before any model call, so a turn whose first call
+        fails logs the opening it sent."""
+        ...
+
+
+def orchestrate_node(
+    *, orchestrator: Orchestrator, model: Callable[[], Model], carried: CarriedSource
+) -> Node[GraphEvent]:
     """The `orchestrate` node, running `orchestrator` on the model `model`
     builds for each run (`orchestrator.model.orchestrator_model`, on the
-    turn's budget)."""
+    turn's budget). A `full` turn reads the conversation it extends from
+    `carried`."""
 
     async def orchestrate(ctx: NodeCtx[GraphEvent], node_input: Any) -> Next:
         """One run of the agent. Reached from `seed` with nothing or a seed
@@ -131,7 +161,13 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
         the date and the digests (`TurnInput`), with a seed hand-back after
         the message; a later run resumes the conversation the last one
         handed off with (`ORCHESTRATOR_HISTORY_KEY`), its waiting call
-        answered by the hand-back. The run's first `ToolsAnswered` carries
+        answered by the hand-back. A turn of the `full` history arm
+        (`TurnInput.history`) may open on the previous turn's conversation
+        (`TurnInput.carried_from`, read from `carried`, `_carried_opening`),
+        and its run that closes on the reply hands its own on as the
+        `answered` edge's output (`carried_record`), which reaches Studio
+        once the write that closes the turn commits and is never stored in
+        the turn's state. The run's first `ToolsAnswered` carries
         that answer, so the node emits nothing else for it. Every event of
         the run is emitted as it comes.
 
@@ -156,14 +192,25 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
         opening: Opening | None = None
         history: StoredHistory | None = None
         resumed: HandBack | None = None
+        inputs = TurnInput.model_validate(ctx.inputs)
+        run_model = model()
         if hand_back is None or hand_back.answers is None:
-            inputs = TurnInput.model_validate(ctx.inputs)
+            carried_history = (
+                _carried_opening(ctx, inputs.carried_from, carried, model_name=run_model.model_name)
+                if inputs.carried_from is not None
+                else None
+            )
             opening = Opening(
                 question=inputs.message,
                 today=datetime.now(UTC).date(),
                 canvas_digest=inputs.canvas_digest,
-                conversation_digest=inputs.conversation_digest,
+                conversation_digest=(
+                    inputs.conversation_tail
+                    if carried_history is not None
+                    else inputs.conversation_digest
+                ),
                 seeded=hand_back.text if hand_back is not None else None,
+                carried=carried_history,
             )
         else:
             stored = ctx.state.pop(ORCHESTRATOR_HISTORY_KEY, None)
@@ -179,7 +226,7 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
             orchestrator,
             state=ctx.state,
             turn_id=turn_id(ctx.key),
-            model=model(),
+            model=run_model,
             opening=opening,
             history=history,
             hand_back=resumed,
@@ -189,11 +236,78 @@ def orchestrate_node(*, orchestrator: Orchestrator, model: Callable[[], Model]) 
             if isinstance(event, HandedOff):
                 return _handed_off(ctx, event)
             if isinstance(event, Answered):
+                if event.history is not None and inputs.history == "full":
+                    ctx.state[ORCHESTRATOR_CARRIES_KEY] = True
+                    return Next(
+                        "answered",
+                        carried_record(event.history, model_name=run_model.model_name),
+                    )
                 return Next("answered")
             ctx.emit(event)
         raise RuntimeError("the orchestrator's run ended without its reply or a hand-off")
 
     return Node(run=orchestrate)
+
+
+def _carried_opening(
+    ctx: NodeCtx[GraphEvent], ref: CarriedRef, carried: CarriedSource, *, model_name: str
+) -> StoredHistory | None:
+    """The conversation `ref` names, read from `carried`, for a run on the
+    model `model_name`, or None when this instance holds no state for the
+    conversation (`not_in_process`), when another model wrote it
+    (`model_changed`), as when a turn claimed on one instance runs on
+    another whose model differs, since its thought signatures are that
+    model's, or when the stored one is another conversation or does not load
+    as a `StoredHistory` (`unloadable`). Then the turn opens from the whole
+    digest, and the reset is recorded on the turn (`CarriedSource.reset`) and
+    in its state (`ORCHESTRATOR_CHAIN_RESET_KEY`), which carries it to a
+    pause's line and to a segment resumed on another instance."""
+    stored = carried.history(ctx.key)
+    reason = "not_in_process"
+    if stored is not None:
+        reason = "unloadable"
+        text = ref.history_in(stored)
+        if text is not None and stored.get("model") != model_name:
+            reason = "model_changed"
+        elif text is not None:
+            try:
+                return StoredHistory.model_validate_json(text)
+            except ValidationError:
+                pass
+    logger.info(
+        "studio history: chain reset conversation_id=%s turn=%d reason=%s",
+        ctx.key.conversation_id,
+        ctx.key.turn_index,
+        reason,
+    )
+    carried.reset(ctx.key, reason)
+    ctx.state[ORCHESTRATOR_CHAIN_RESET_KEY] = reason
+    return None
+
+
+def carried_record(history: StoredHistory, *, model_name: str) -> dict[str, Any]:
+    """`history`, written by `model_name`, as the conversation keeps it for
+    the next turn (`harness.studio_state.ConversationState.turn_carried`):
+    the `StoredHistory` JSON text, so a JSONB column cannot reorder its keys,
+    the model's name, and as `tokens` the largest input plus output tokens any
+    of its responses reported, which the next turn holds to
+    `harness.studio_state.CARRIED_HISTORY_TOKEN_CAP`. A request holds every
+    message before it, so the largest call is the size of the conversation as
+    last sent. A final response the harness wrote, such as a bound's closing
+    sentence, reports none, so it does not count. `tokens`
+    is None when no response reported any, which the next turn reads as a
+    conversation it cannot size (`ConversationState.carried_opening`)."""
+    reported = [
+        message.usage.input_tokens + message.usage.output_tokens
+        for message in history.conversation.messages
+        if isinstance(message, ModelResponse)
+    ]
+    tokens = max(reported, default=0)
+    return {
+        "history": history.model_dump_json(),
+        "tokens": tokens or None,
+        "model": model_name,
+    }
 
 
 def _handed_off(ctx: NodeCtx[GraphEvent], handed: HandedOff) -> Next:

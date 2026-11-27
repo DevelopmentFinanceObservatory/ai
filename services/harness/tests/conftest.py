@@ -14,6 +14,10 @@ literal in every test would repeat those pairings.
 
 The autouse fixtures run every test with the studio shared secret unset, and
 reset `common.auth`'s process-wide bearer-token policy after every test.
+Every test runs with `STUDIO_HISTORY=digest` unless it sets the variable
+itself, so the recorded request fixtures, whose conversations would otherwise
+take an arm from a hash of their ids under the code default `split`, pin the
+digest opening.
 A developer who has set `STUDIO_API_TOKEN` in the shell would otherwise have
 every test request's bearer token refused. A blank value is the setting unset.
 No `.env` file reaches `Settings`, since the root conftest's `_isolate_dotenv`
@@ -94,6 +98,7 @@ from harness.conversation import (
     NO_CONVERSATION,
     current_conversation_id,
     current_conversation_key,
+    current_history,
     current_turn_id,
 )
 from harness.db.migrate import apply_pending
@@ -152,6 +157,14 @@ def runner(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
 def _no_shared_secret_from_the_developer_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run every test with `STUDIO_API_TOKEN` unset."""
     monkeypatch.setenv("STUDIO_API_TOKEN", "")
+
+
+@pytest.fixture(autouse=True)
+def _digest_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test on the `digest` history arm unless it sets
+    `STUDIO_HISTORY` itself (`harness.settings.HistorySettings`)."""
+    monkeypatch.setenv("STUDIO_HISTORY", "digest")
+    monkeypatch.delenv("STUDIO_HISTORY_FULL_SHARE", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -297,6 +310,7 @@ def _reset_conversation_identity() -> Any:
     current_conversation_id.set(NO_CONVERSATION)
     current_conversation_key.set(None)
     current_turn_id.set(None)
+    current_history.set(None)
     set_supplied_caller(None)
     set_supplied_turn(None)
 

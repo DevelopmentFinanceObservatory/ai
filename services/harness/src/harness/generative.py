@@ -24,6 +24,7 @@ from typing import Any
 from google.genai import Client, types
 from opentelemetry import trace
 
+from harness.conversation import note_model_usage
 from harness.gemini_wire import record_usage, surface_attributes
 from harness.settings import DEFAULT_EDIT_THINKING_LEVEL, ThinkingLevelName
 from harness.usage import log_usage
@@ -117,6 +118,7 @@ class _ModelCall:
                 span.set_attribute("dfo.model.error", type(exc).__name__)
                 raise
             _record_response(span, response, model_name=self.model_name)
+        note_model_usage(response.usage_metadata, model=self.model_name, role="edit")
         log_usage(type(self).__name__, response.usage_metadata)
         return json.loads(response.text or "{}")
 

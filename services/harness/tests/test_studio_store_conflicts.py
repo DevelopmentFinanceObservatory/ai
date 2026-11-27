@@ -10,6 +10,7 @@ none retries or is refused. Two claims on one turn state still conflict.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
@@ -17,8 +18,14 @@ import pytest
 from executor.ledger import PlanApproval, SourcePolicy, Start, idempotency_key, new_run
 from harness.conversation import current_conversation_key
 from harness.run_ledger import StudioRunLedger
-from harness.studio_state import ConversationState, _next_manifest
-from harness.studio_store import ConversationStale, Renewal, StudioStore
+from harness.studio_state import ConversationState, TurnUsage, _next_manifest
+from harness.studio_store import (
+    ConversationStale,
+    Renewal,
+    StudioStore,
+    _assign_changed,
+    _shallow_copy,
+)
 from harness.wire import ComponentType, CompositionActor, CompositionBlock, CompositionManifest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -206,3 +213,41 @@ async def test_a_claim_racing_a_live_owners_renewal_is_refused(
 
     with pytest.raises(ConversationStale):
         await taker.save(PRINCIPAL, CONVERSATION)
+
+
+def test_a_canvas_write_keeps_the_spec_uses_its_turn_noted_meanwhile() -> None:
+    """A canvas write commits its copy's turn usage. A spec use the live state
+    noted while the copy was out is kept beside the copy's own."""
+    live = ConversationState(conversation_id="conv-usage")
+    live.turn_usage = TurnUsage(trace_id="tr_1", fetched_specs=["spec_a"])
+    work, base = _shallow_copy(live), _shallow_copy(live)
+    live.note_spec_use("fetched", "spec_b")
+    live.note_spec_use("drawn", "spec_c")
+    work.note_spec_use("fetched", "spec_d")
+    work.turn_usage = dataclasses.replace(work.turn_usage, carried_tokens=7)
+
+    _assign_changed(live, work, base)
+
+    assert live.turn_usage.carried_tokens == 7
+    assert live.turn_usage.fetched_specs == ["spec_a", "spec_d", "spec_b"]
+    assert live.turn_usage.drawn_specs == ["spec_c"]
+
+
+def test_a_canvas_write_keeps_the_chain_reset_its_turn_noted_meanwhile() -> None:
+    """A canvas write whose copy was taken before the turn's orchestrator
+    reset the chain (`CarriedHistory.reset`) keeps the reset, so the turn's
+    line names the opening its request sent."""
+    live = ConversationState(conversation_id="conv-reset")
+    live.turn_usage = TurnUsage(trace_id="tr_1", history_chain="extended", carried_tokens=9040)
+    work, base = _shallow_copy(live), _shallow_copy(live)
+    live.turn_usage.history_chain = "reset:model_changed"
+    live.turn_usage.carried_tokens = None
+    work.note_spec_use("fetched", "spec_a")
+
+    _assign_changed(live, work, base)
+
+    assert live.turn_usage.fetched_specs == ["spec_a"]
+    assert (live.turn_usage.history_chain, live.turn_usage.carried_tokens) == (
+        "reset:model_changed",
+        None,
+    )

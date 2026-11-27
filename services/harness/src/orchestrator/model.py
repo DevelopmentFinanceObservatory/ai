@@ -47,6 +47,7 @@ def orchestrator_model(
         prefix_cache=prefix_cache,
         before_request=None,
         after_response=None,
+        role="orchestrator",
         passes_text=True,
     )
     provider = GoogleProvider(client=wrapped_client(client, stream))

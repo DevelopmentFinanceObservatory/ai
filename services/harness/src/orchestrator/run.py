@@ -12,8 +12,11 @@ they happen:
 - `HandedOff`: the run ended on a `plan` or `ask_user` call, which waits on a
   hand-back. It carries the hand-off's record and the history to store with
   the turn until the hand-back arrives.
-- `Answered`: the run ended on the reply. Nothing is stored, and the next
-  turn opens from the digests.
+- `Answered`: the run ended on the reply. It carries the run's conversation
+  when the agent's run closed on that reply, which a turn of the `full`
+  history arm stores for the next turn to open from (`Opening.carried`). On
+  the `digest` arm nothing is stored, and the next turn opens from the
+  digests.
 
 A response with neither answer text nor a function call
 (`harness.gemini_agent.holds_no_answer`) is not sent back for another try.
@@ -39,7 +42,7 @@ from __future__ import annotations
 import copy
 import logging
 from collections.abc import AsyncGenerator, Mapping, MutableMapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any, Literal
 
@@ -155,13 +158,18 @@ class Opening:
     """What a turn's first run starts from: the user's `question`, the UTC
     date `today`, the canvas and conversation digests as JSON, and the seed
     hand-back (`seeded`), the datasets the user brought from Search, when the
-    turn opened with one."""
+    turn opened with one.
+
+    `carried` is the previous turn's conversation on the `full` history arm
+    (`Answered.history`), which the opening extends whole. The conversation
+    digest is then the digest's tail without its `turns`."""
 
     question: str
     today: date
     canvas_digest: str | None = None
     conversation_digest: str | None = None
     seeded: str | None = None
+    carried: StoredHistory | None = None
 
 
 @dataclass(frozen=True)
@@ -219,9 +227,14 @@ class HandedOff:
 
 @dataclass(frozen=True)
 class Answered:
-    """The run ended on the reply `text`, a bound's closing sentence included."""
+    """The run ended on the reply `text`, a bound's closing sentence included.
+    `history` is the run's conversation, its final response last, when the
+    agent's run closed on the reply. A run that ended on the harness's own
+    reply (a lone removal, an empty response after drawn cards) has none.
+    Two events are equal on their text alone."""
 
     text: str
+    history: StoredHistory | None = field(default=None, compare=False)
 
 
 type OrchestratorEvent = TextDelta | ModelResponded | ToolsAnswered | HandedOff | Answered
@@ -401,7 +414,7 @@ async def run_orchestrator(
             history=StoredHistory(conversation=result.conversation),
         )
         return
-    yield Answered(text=output)
+    yield Answered(text=output, history=StoredHistory(conversation=result.conversation))
 
 
 def run_drew_a_card(
@@ -426,7 +439,11 @@ def _opening(opening: Opening) -> tuple[str, list[ModelMessage]]:
     """The prompt and the history before it that open a turn: the date and the
     digests as one request (`_DIGESTS_INSTRUCTIONS`), then the user's message
     as the prompt, or as a request of its own (`QUESTION_INSTRUCTIONS`)
-    ahead of the seed hand-back as the prompt."""
+    ahead of the seed hand-back as the prompt.
+
+    With a carried conversation (`Opening.carried`), its messages come first,
+    exactly as stored, so the first request's contents extend the previous
+    turn's last request and its final response whole."""
     lines = [f"Today's date (UTC): {opening.today.isoformat()}"]
     lines += [
         f"{label}: {digest}"
@@ -437,7 +454,10 @@ def _opening(opening: Opening) -> tuple[str, list[ModelMessage]]:
         if digest
     ]
     messages: list[ModelMessage] = [
-        ModelRequest(parts=[UserPromptPart("\n\n".join(lines))], instructions=_DIGESTS_INSTRUCTIONS)
+        *(opening.carried.conversation.messages if opening.carried is not None else ()),
+        ModelRequest(
+            parts=[UserPromptPart("\n\n".join(lines))], instructions=_DIGESTS_INSTRUCTIONS
+        ),
     ]
     if not opening.seeded:
         return opening.question, messages

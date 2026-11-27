@@ -39,11 +39,12 @@ from planner.plan import Plan as PlannerPlan
 from pydantic import BaseModel, BeforeValidator, Field, TypeAdapter, ValidationError
 from submission.prices_choice import UNIT_SLOT_PREFIX, measure_key, plan_unit
 
+from harness.settings import StudioHistory
 from harness.tool_contracts import (
     reading_facts,
 )
 from harness.turn.events import APPROVE_UNIT_OFFERS_KEY
-from harness.turn.store import SPECS_KEY, FrameKey, FrameKeys
+from harness.turn.store import SPECS_KEY, WAITING_HISTORY_KEY, FrameKey, FrameKeys
 from harness.turn_records import Origin, PricesForm, SearchReading, open_prices, prices_form
 from harness.unit_offer import offered_unit_refusal, unit_offer
 from harness.wire import UnitChoice, UnitOffer
@@ -121,8 +122,23 @@ ORCHESTRATOR_UNIT_REREAD_KEY = "orchestrator:unit_reread"
 ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
 # The orchestrator's conversation while its run waits on a hand-back, as
 # `orchestrator.run.StoredHistory` JSON, written and taken by the
-# `orchestrate` node.
-ORCHESTRATOR_HISTORY_KEY = "orchestrator:history"
+# `orchestrate` node. The write that closes the turn drops it.
+ORCHESTRATOR_HISTORY_KEY = WAITING_HISTORY_KEY
+# On a `full` turn whose orchestrator could not open on the conversation
+# its inputs name (`TurnInput.carried_from`), the reason it opened from the
+# whole digest instead: `unloadable`, `model_changed` when another model wrote
+# it, or `not_in_process` when the instance running it holds no state for the
+# conversation (`harness.graph.orchestrate._carried_opening`). The node also
+# records it on the turn before any model call (`CarriedSource.reset`); this
+# key carries it to a pause's line and to a segment resumed on another
+# instance, and `harness.studio_store.keep_turn_records` records it as the
+# turn's `history_chain`.
+ORCHESTRATOR_CHAIN_RESET_KEY = "orchestrator:chain_reset"
+# True on a `full` turn whose orchestrator answered with a conversation to
+# carry (the `answered` edge's output), so a turn whose closing write failed
+# is told apart from one that had nothing to carry
+# (`harness.studio_store.record_closed_turn`).
+ORCHESTRATOR_CARRIES_KEY = "orchestrator:carries"
 # spec_id -> the refusal message of a fetch or a plan step that read it and
 # was refused `capability_unavailable` this turn; `fetch` refuses it again
 # without a call.
@@ -196,6 +212,30 @@ ORCHESTRATOR_PLAN_FAILED_STATUS = "Reading why no plan was made"
 ORCHESTRATOR_PLAN_RAN_STATUS = "Reading the plan's results"
 
 
+class CarriedRef(BaseModel):
+    """The previous turn's conversation a `full` turn opens on, as the
+    conversation stores it (`harness.studio_state.ConversationState.
+    carried_history`): the number of turns recorded when it was stored, and
+    the sha256 of its `StoredHistory` JSON text, in hex."""
+
+    turn: int
+    sha256: str
+
+    @classmethod
+    def of(cls, *, turn: int, history: str) -> CarriedRef:
+        """The reference to `history`, stored as turn `turn` closed."""
+        return cls(turn=turn, sha256=hashlib.sha256(history.encode()).hexdigest())
+
+    def history_in(self, carried: Mapping[str, Any] | None) -> str | None:
+        """The `StoredHistory` JSON text of `carried`, a stored carried
+        conversation, when it is the one this names: the same turn and the
+        same text. None otherwise."""
+        history = carried.get("history") if carried is not None else None
+        if carried is None or carried.get("turn") != self.turn or not isinstance(history, str):
+            return None
+        return history if CarriedRef.of(turn=self.turn, history=history) == self else None
+
+
 class TurnInput(BaseModel):
     """What a turn opens with, fixed for the turn: the user's `message`, the
     canvas and conversation digests, as the JSON text the conversation wrote
@@ -203,12 +243,28 @@ class TurnInput(BaseModel):
     Studio" action handed over (each seed as `harness.seeds.seeds_slot`
     keeps it, or the one reference `harness.wire.TurnRequest.seed_spec` also
     takes). The rest of what a turn opens with, which the orchestrator's
-    tools also read, is opening state (`turn_budgets`)."""
+    tools also read, is opening state (`turn_budgets`).
+
+    `history` is the turn's history arm (`harness.studio_state.TurnUsage.history`),
+    fixed as the turn began, so a turn resumed on another process, or after
+    `STUDIO_HISTORY` changed, keeps it. A `full` turn's orchestrator hands on
+    its conversation once its run closes on the reply
+    (`harness.graph.orchestrate.carried_record`). A `full` turn that extends
+    the previous turn's conversation names it as `carried_from`, the
+    conversation's one stored copy (`harness.studio_state.ConversationState.
+    carried_history`) by reference, and holds the conversation digest's tail
+    without its `turns` as `conversation_tail`, which the orchestrator reads
+    in place of `conversation_digest`; the planner reads the digest.
+    `history` is absent from the dumped inputs when `digest`, and the other
+    two when unset."""
 
     message: str
     canvas_digest: str | None = None
     conversation_digest: str | None = None
     seeds: list[Any] | dict[str, Any] | None = None
+    history: StudioHistory = Field(default="digest", exclude_if=lambda value: value == "digest")
+    carried_from: CarriedRef | None = Field(default=None, exclude_if=lambda value: value is None)
+    conversation_tail: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class AskOption(BaseModel):

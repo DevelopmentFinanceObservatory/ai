@@ -325,7 +325,8 @@ def scripted_client(answer: ScriptedAnswer) -> Client:
     """A google-genai client whose every streamed call answers with `answer(request)`.
 
     The answer streams as one chunk, a model turn of that one part finished with
-    `STOP` and no usage. Everything else a model class reads off a client is a
+    `STOP` and the usage of `SCRIPTED_USAGE`, as every real Gemini call reports
+    one (a `full`-arm chain whose calls report none resets). Everything else a model class reads off a client is a
     real `Client`'s, so the planner takes it as `harness.planner_adapter.PlannerAdapter`'s
     `client`, and the orchestrator's model as its genai client
     (`orchestrator.model.orchestrator_model`), each driven by one script over
@@ -354,6 +355,13 @@ def scripted_client(answer: ScriptedAnswer) -> Client:
     return client
 
 
+# The usage every scripted call reports: a plausible small prompt, far under
+# `CARRIED_HISTORY_TOKEN_CAP`.
+SCRIPTED_USAGE = types.GenerateContentResponseUsageMetadata(
+    prompt_token_count=1_000, candidates_token_count=20, total_token_count=1_020
+)
+
+
 async def _one_chunk(part: types.Part) -> AsyncIterator[types.GenerateContentResponse]:
     yield types.GenerateContentResponse(
         candidates=[
@@ -361,7 +369,8 @@ async def _one_chunk(part: types.Part) -> AsyncIterator[types.GenerateContentRes
                 content=types.Content(role="model", parts=[part]),
                 finish_reason=types.FinishReason.STOP,
             )
-        ]
+        ],
+        usage_metadata=SCRIPTED_USAGE,
     )
 
 
