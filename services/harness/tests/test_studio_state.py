@@ -31,6 +31,7 @@ import json
 import logging
 import ssl
 import time
+import typing
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -88,6 +89,7 @@ from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.unit_offer import whole_unit_options, whole_units
 from harness.wire import (
+    STUDIO_FRAME_ADAPTER,
     AddOp,
     ClientFeature,
     ComponentType,
@@ -100,12 +102,14 @@ from harness.wire import (
     MessageComplete,
     MutationOp,
     OptionAnswer,
+    PlanApproved,
     PlanLink,
     PlanProposed,
     UnitOffer,
 )
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
+from pydantic import BaseModel
 from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
@@ -2001,6 +2005,127 @@ def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_fr
     stored = [entry["card"], *entry["frames"]]
     assert all("unit" not in d for frame in stored for d in frame.get("decisions") or ())
     assert (restored.card, restored.frames) == (card, (note, card))
+
+
+# The members each model of a stored pause or approved plan has on the release
+# `feat/studio-prototype` (`git show origin/feat/studio-prototype:services/harness/
+# src/harness/wire.py`, each model's `model_fields`), which refuses any other: what a
+# release rolled back to that one loads.
+_ROLLBACK_MEMBERS: dict[str, frozenset[str]] = {
+    name: frozenset(members.split())
+    for name, members in {
+        "PlanProposed": "actions asks caveats decisions event interrupt_id moved new_plan"
+        " operations plan_version_id requirements revision seq steps summary switch_failed"
+        " title version",
+        "PlanStep": "args description gives_answer id label",
+        "PlanDecision": "active_option_id alternatives choice_id chosen id options question"
+        " reason resolved_by unit",
+        "PlanDecisionOption": "label option_id reason status years",
+        "UnitOffer": "currencies presets start",
+        "UnitCurrency": "base_year_max base_year_min code name prices",
+        "UnitChoice": "base_year currency prices",
+        "PlanRequirement": "decision_ids id kind sentence",
+        "PlanOperation": "id kind requirement_id sentence",
+        "PlanAsk": "answered_by ask declined not_computed",
+        "PlanMoved": "choice_id from_label reason to_label",
+        "PlanSwitchFailed": "choice_id code option_id reason retryable",
+        "PlanApproved": "caveats choices event plan_version_id revision seq steps summary"
+        " title version",
+        "PlanApprovedStep": "gives_answer label",
+        "PlanApprovedChoice": "changed_from choice_id chosen question",
+        "MessageComplete": "event seq text",
+    }.items()
+}
+
+
+def _rollback_refusals(model: type[BaseModel], stored: Any, where: str = "") -> list[str]:
+    """Each member of `stored`, a value of `model` as stored, that `model` lacks on
+    the release `_ROLLBACK_MEMBERS` lists, by its path. Nested models are found
+    through this release's field types."""
+    known = _ROLLBACK_MEMBERS[model.__name__]
+    refused = [f"{where}/{member}" for member in stored if member not in known]
+    for name, value in stored.items():
+        annotation = model.model_fields[name].annotation if name in known else None
+        nested = [
+            kind
+            for kind in _annotation_types(annotation)
+            if isinstance(kind, type) and issubclass(kind, BaseModel)
+        ]
+        if not nested:
+            continue
+        (kind,) = nested
+        for index, item in enumerate(value if isinstance(value, list) else [value]):
+            if isinstance(item, dict):
+                refused += _rollback_refusals(kind, item, f"{where}/{name}/{index}")
+    return refused
+
+
+def _annotation_types(annotation: Any) -> list[Any]:
+    """`annotation` and every type its arguments name, at any depth."""
+    found = [annotation]
+    for argument in typing.get_args(annotation):
+        found += _annotation_types(argument)
+    return found
+
+
+def test_a_pause_and_an_approved_plan_are_stored_as_a_rolled_back_release_reads_them() -> None:
+    """A plan card's `decisions[].step_ids` and a `plan.approved`'s `steps[].id` and
+    `choices[].step_ids` are members a rolled-back release refuses, so the pause's
+    card and frames, the turn's approved plans and the turn record holding them are
+    stored without them, the members beside them, and restored on load."""
+    fixtures = Path(__file__).parent / "wire_fixtures" / "studio"
+    proposed = PlanProposed.model_validate(
+        json.loads((fixtures / "event-03-plan-proposed.json").read_text())
+    )
+    raw_unit = json.loads((fixtures / "event-22-plan-proposed-unit.json").read_text())
+    unit_card = PlanProposed.model_validate(
+        {**raw_unit, "decisions": [{**d, "step_ids": ["s1"]} for d in raw_unit["decisions"]]}
+    )
+    approved = PlanApproved.model_validate(
+        json.loads((fixtures / "event-16-plan-approved.json").read_text())
+    )
+    assert approved.steps[0].id and approved.choices and approved.choices[0].step_ids
+    note = MessageComplete(event="message.complete", seq=8, text="Version 1 is still there.")
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.pending["int_1"] = _PendingInterrupt(
+        adk_id="adk_1", kind="plan", card=unit_card, frames=(note, proposed, unit_card)
+    )
+    state.record_approved(approved)
+    state.turns = [{"user": "q", "approved": list(state.turn_approved)}]
+
+    stored = json.loads(json.dumps(studio_store._serialize_durable(state)))
+    reloaded = ConversationState(conversation_id=CONVERSATION)
+    studio_store._apply_delta(reloaded, stored)
+
+    entry = stored["pending"]["int_1"]
+    kept = [
+        (PlanProposed, entry["card"]),
+        *((STUDIO_FRAME_ADAPTER.validate_python(f).__class__, f) for f in entry["frames"]),
+        *((PlanApproved, frame) for frame in stored["turn_approved"]),
+        *((PlanApproved, frame) for frame in stored["turn:0"]["approved"]),
+    ]
+    assert [where for model, frame in kept for where in _rollback_refusals(model, frame)] == []
+    (pause,) = reloaded.pending.values()
+    assert (pause.card, pause.frames) == (unit_card, (note, proposed, unit_card))
+    assert reloaded.turn_approved == state.turn_approved
+    assert reloaded.turns == state.turns
+    # A save that changes only the members kept beside the approved plans carries
+    # those alone, and the load puts them back on the plans it holds.
+    first = state.turn_approved[0]
+    state.turn_approved = [
+        {**first, "steps": [{**step, "id": f"x{n}"} for n, step in enumerate(first["steps"])]}
+    ]
+    changed = studio_store._changed_since(
+        json.loads(json.dumps(studio_store._serialize_durable(state))), stored
+    )
+    studio_store._apply_delta(reloaded, changed)
+    assert reloaded.turn_approved == state.turn_approved
+    # A rolled-back release that approves another plan rewrites the approved
+    # plans and leaves the members kept beside them, which stay off its plan.
+    other = {**stored["turn_approved"][0], "revision": "rev_other"}
+    after_rollback = ConversationState(conversation_id=CONVERSATION)
+    studio_store._apply_delta(after_rollback, {**stored, "turn_approved": [other]})
+    assert after_rollback.turn_approved == [other]
 
 
 def test_a_stored_unit_question_is_kept_in_its_whole_units_form() -> None:

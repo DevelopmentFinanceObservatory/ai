@@ -1150,6 +1150,17 @@ async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> Non
         second = await _stream(
             client, "/api/studio/interrupt", _interrupt_body(plan["interrupt_id"], "approve")
         )
+        # A page that missed the stream reads the card and the approved plan
+        # back, linked by the plan's version and step as the stream links them.
+        read = await client.get(
+            "/api/studio/state",
+            params={"conversation_id": CONVERSATION, "since": 0},
+            headers=AUTH,
+        )
+
+    (closed,) = read.json()["closed_since"]
+    (recovered,) = closed["cards"]
+    (recovered_plan,) = closed["approved"]
 
     events = _events(second)
     assert events[-1] == "done"
@@ -1178,6 +1189,11 @@ async def test_plan_proposed_pauses_and_approve_resumes_on_a_new_stream() -> Non
     answering = next(step["id"] for step in plan["steps"] if step.get("gives_answer"))
     assert created["created_from"]["plan_version_id"] == plan["plan_version_id"]
     assert created["created_from"]["plan_step_id"] == answering
+    assert (recovered["plan_version_id"], recovered["plan_step_id"]) == (
+        recovered_plan["plan_version_id"],
+        answering,
+    )
+    assert answering in [step["id"] for step in recovered_plan["steps"]]
     updated = _frame(second, "composition.updated")
     assert updated["manifest"]["counts"] == {
         "all": 1,
