@@ -88,8 +88,11 @@ class ApisPlaceOptions:
     Build it once for the process and close it at shutdown (`aclose`).
 
     Each answer is kept for `PLACE_OPTIONS_TTL_S` by the identity's canonical
-    JSON and the role, read by `clock`. A door apis does not serve stops the
-    offers for `PLACE_OPTIONS_TTL_S` (`offering`)."""
+    JSON and the role, read by `clock`. Reads of one key while its lookup runs
+    wait on that lookup, so concurrent reads make one call; a lookup that
+    fails is kept for no one and raises its failure in every read waiting on
+    it. A door apis does not serve stops the offers for `PLACE_OPTIONS_TTL_S`
+    (`offering`)."""
 
     def __init__(
         self,
@@ -110,17 +113,45 @@ class ApisPlaceOptions:
         self._kept: dict[
             tuple[str, str], tuple[float, tuple[tuple[tuple[str, str], ...], bool]]
         ] = {}
+        # The lookup running for each key, which every read of the key awaits.
+        self._running: dict[
+            tuple[str, str], asyncio.Task[tuple[tuple[tuple[str, str], ...], bool]]
+        ] = {}
 
     async def __call__(
         self, *, identity: Mapping[str, Any], role: str
     ) -> tuple[tuple[tuple[str, str], ...], bool]:
         key = (json.dumps(identity, sort_keys=True, default=str), role)
-        now = self._clock()
         kept = self._kept.get(key)
-        if kept is not None and now < kept[0]:
+        if kept is not None and self._clock() < kept[0]:
             return kept[1]
         if not self.offering():
             raise PlacesNotServedError(role)
+        running = self._running.get(key)
+        if running is None:
+            running = asyncio.ensure_future(self._lookup(key, identity=identity, role=role))
+            self._running[key] = running
+            running.add_done_callback(lambda done: self._landed(key, done))
+        # A read that gives up, at its deadline say, leaves the lookup to the
+        # reads still waiting on it.
+        return await asyncio.shield(running)
+
+    def _landed(
+        self, key: tuple[str, str], done: asyncio.Task[tuple[tuple[tuple[str, str], ...], bool]]
+    ) -> None:
+        """Forget `done`, the lookup of `key`, once it ends. Its failure is
+        read here too, so one no read waits on any longer is not reported as
+        never retrieved."""
+        if self._running.get(key) is done:
+            del self._running[key]
+        if not done.cancelled():
+            done.exception()
+
+    async def _lookup(
+        self, key: tuple[str, str], *, identity: Mapping[str, Any], role: str
+    ) -> tuple[tuple[tuple[str, str], ...], bool]:
+        """Read `role`'s places of `identity` from apis and keep them under `key`."""
+        now = self._clock()
         try:
             answer = await self._client.read_entity_options(identity=identity, role=role)
         except LiveApisError as exc:

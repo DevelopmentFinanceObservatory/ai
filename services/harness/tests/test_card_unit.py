@@ -422,12 +422,16 @@ class _Client:
         self.doors = doors
         self.fails: BaseException | None = None
         self.asked = 0
+        # Set, a read waits for it before it answers.
+        self.held: asyncio.Event | None = None
 
     async def read_entity_options(
         self, *, identity: Mapping[str, Any], role: str
     ) -> tuple[tuple[tuple[str, str], ...], bool]:
         del identity, role
         self.asked += 1
+        if self.held is not None:
+            await self.held.wait()
         if self.fails is not None:
             raise self.fails
         return (("country/UGA", "Uganda"),), False
@@ -532,6 +536,60 @@ def test_a_roles_places_are_read_once_a_minute() -> None:
     asyncio.run(reads())
 
     assert client.asked == 3
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["answers", "fails"])
+async def test_concurrent_reads_of_one_role_make_one_call(fails: bool) -> None:
+    """Twenty reads of one role while its lookup runs wait on that lookup. A
+    failed lookup raises in every one of them and is kept for none, so the
+    next read asks again."""
+    client = _Client()
+    client.held = asyncio.Event()
+    client.fails = _NOT_FOUND if fails else None
+    client.doors = frozenset({"options"})
+    reader = _reader(client, [0.0])
+
+    reads = [
+        asyncio.create_task(reader(identity=_BASE_IDENTITY, role="destination")) for _ in range(20)
+    ]
+    await asyncio.sleep(0)
+    client.held.set()
+    answers = await asyncio.gather(*reads, return_exceptions=True)
+
+    assert client.asked == 1
+    if fails:
+        assert all(isinstance(a, LiveApisError) for a in answers)
+        client.fails = None
+        await reader(identity=_BASE_IDENTITY, role="destination")
+        assert client.asked == 2
+    else:
+        assert answers == [((("country/UGA", "Uganda"),), False)] * 20
+
+
+@pytest.mark.parametrize(
+    ("noun", "nouns"),
+    [
+        (
+            {"singular": "debtor", "plural": "debtors"},
+            {"singular": "debtor", "plural": "debtors"},
+        ),
+        ({"singular": "debtor", "plural": ""}, {"singular": "debtor"}),
+        ("debtor", None),
+        (None, None),
+    ],
+    ids=["both", "one-form", "not-a-mapping", "none"],
+)
+def test_a_roles_noun_is_the_one_its_coverage_states(noun: object, nouns: object) -> None:
+    """The forms a coverage entry's noun states, under its axis and its own
+    label; a role whose entry states none has no noun."""
+    entry: dict[str, object] = {"label": "debtorCountry", "count": 3, "axis": "destination"}
+    if noun is not None:
+        entry["noun"] = noun
+    found = card_unit.role_nouns({"coverage": {"dimensions": [entry, {"label": "years"}]}})
+
+    assert found == ({"debtorCountry": nouns, "destination": nouns} if nouns else None)
+    card = card_unit.UnitCard(spec_id="spec_x", args={}, nouns=found)
+    assert card_unit.UnitCard.from_json(card.as_json()) == card
 
 
 def test_a_slot_that_is_no_mapping_reads_as_any_other_slot() -> None:

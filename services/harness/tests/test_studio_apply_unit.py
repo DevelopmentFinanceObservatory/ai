@@ -26,6 +26,7 @@ from common.mcp_telemetry import WRITE_TOKEN_KEY
 from compiler.surface import ProgressCallback, ToolCallResult, ToolId
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
 from harness.card_unit import UNIT_GONE_NOTE, ChangeMove, UnitCard
+from harness.chart_binding import LINE_CHART_MAX_VALUES
 from harness.graph.state import frame_id_for
 from harness.place_options import ApisPlaceOptions
 from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceInput
@@ -97,6 +98,16 @@ def _component(
     return component
 
 
+# The coverage entries of a France to Kenya retrieval.
+_RECIPIENTS = {
+    "label": "financingRecipient",
+    "count": 1,
+    "axis": "destination",
+    "noun": {"singular": "recipient country", "plural": "recipient countries"},
+}
+_PROVIDERS = {"label": "financingProvider", "count": 1, "axis": "origin"}
+
+
 def _written(
     component_id: str,
     ref: Mapping[str, str],
@@ -107,7 +118,8 @@ def _written(
 ) -> dict[str, Any]:
     """A `write_component` outcome for that card, with the lineage of the one
     `get_data` retrieval it draws, which summed the spec's StatVars and
-    served `identity` when given."""
+    served `identity` when given. Its coverage names the recipients' noun
+    and no provider's."""
     definition: dict[str, Any] = {"spec_id": ref["spec_id"]}
     if identity is not None:
         definition["identity"] = dict(identity)
@@ -116,6 +128,7 @@ def _written(
         "definition": definition,
         "content_version": ref["content_version"],
         "artifacts": [{"rendering": _SUMMED}],
+        "coverage": {"dimensions": [_RECIPIENTS, _PROVIDERS]},
     }
     lineage = CardLineage(
         component_id=component_id,
@@ -1283,13 +1296,21 @@ async def test_a_card_offers_its_places_and_a_change_swaps_one(pg_engine: AsyncE
 
     assert drawn == []
     assert places.asked == ["destination"]
+    # A line chart draws at most `LINE_CHART_MAX_VALUES` series.
     assert _frame(first, "component.created")["card_changes"]["places"] == [
         {
             "role": "destination",
             "multiple": True,
             "chosen": [{"id": "country/KEN", "label": "Kenya"}],
+            "max": LINE_CHART_MAX_VALUES,
+            "label": _RECIPIENTS["noun"],
         },
-        {"role": "origin", "multiple": True, "chosen": [{"id": "country/FRA", "label": "France"}]},
+        {
+            "role": "origin",
+            "multiple": True,
+            "chosen": [{"id": "country/FRA", "label": "France"}],
+            "max": LINE_CHART_MAX_VALUES,
+        },
     ]
     (fetched,) = changer.fetched()
     assert fetched["scope"] == {
@@ -1657,6 +1678,9 @@ async def test_a_change_of_places_whose_door_cannot_be_read_is_refused(
 
 
 async def test_a_card_offers_no_places_with_the_door_off(pg_engine: AsyncEngine) -> None:
+    """With the places door off by the deployment's setting, a card offers no
+    places, and a change of places answers as the picker does, 503
+    `capability_unavailable`."""
     app = _changes_app(pg_engine)
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
@@ -1665,19 +1689,26 @@ async def test_a_card_offers_no_places_with_the_door_off(pg_engine: AsyncEngine)
         )
 
     assert "places" not in _frame(first, "component.created")["card_changes"]
-    assert response.json()["constraint_id"] == "change_not_offered"
+    assert (response.status_code, response.json()["error"]) == (503, "capability_unavailable")
 
 
 @pytest.mark.parametrize(
-    "entities",
-    [["country/TZA"], ["country/KEN"]],
-    ids=["unlisted", "the-place-it-shows"],
+    ("entities", "read"),
+    [
+        (["country/TZA"], ["destination"]),
+        (["country/KEN"], []),
+        ([f"country/C{n}" for n in range(LINE_CHART_MAX_VALUES + 1)], []),
+    ],
+    ids=["unlisted", "the-place-it-shows", "more-than-the-chart-draws"],
 )
 async def test_a_change_of_places_outside_the_offer_is_refused(
-    pg_engine: AsyncEngine, entities: list[str]
+    pg_engine: AsyncEngine, entities: list[str], read: list[str]
 ) -> None:
+    """A place Search does not list is refused once its list is read; the
+    places the card shows, and more than its chart draws, before any read."""
     app = _changes_app(pg_engine)
-    app.state.studio.place_options = _Places()
+    places = _Places()
+    app.state.studio.place_options = places
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
         response = await client.post(
@@ -1691,6 +1722,7 @@ async def test_a_change_of_places_outside_the_offer_is_refused(
         "change_not_offered",
         "/apply_change",
     )
+    assert places.asked == read
 
 
 @pytest.mark.parametrize(
@@ -1713,12 +1745,6 @@ async def test_a_change_of_places_outside_the_offer_is_refused(
         (
             "cmp_01unit0001",
             _SPEC,
-            {"kind": "places", "role": "destination", "entities": ["country/UGA"]},
-            "change_not_offered",
-        ),
-        (
-            "cmp_01unit0001",
-            _SPEC,
             {"kind": "window", "start_year": 1990, "end_year": 1992},
             "change_no_data",
         ),
@@ -1728,7 +1754,6 @@ async def test_a_change_of_places_outside_the_offer_is_refused(
         "other-spec",
         "years-outside",
         "years-it-shows",
-        "places-unlisted",
         "no-data",
     ],
 )

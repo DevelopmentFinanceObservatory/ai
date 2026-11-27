@@ -40,6 +40,7 @@ from common.materialisation.frame_name import KIND_COLUMNS, WITHOUT_PARTY_TOTALS
 from common.materialisation.rendering import DEFAULT_MINT_OPTIONS
 from data_mcp.frame_materialisation import complete_rendering
 
+from harness.chart_binding import chart_draws
 from harness.place_options import (
     PlaceOptionsReader,
     PlacesNotServedError,
@@ -57,6 +58,7 @@ from harness.wire import (
     PlaceOption,
     PlacesChange,
     PlacesOffer,
+    RoleLabel,
     UnitChange,
     UnitChoice,
     UnitOffer,
@@ -91,8 +93,9 @@ class UnitCard:
     shows one value per series, so its years change one at a time, and the
     one year such a card draws, as the platform's drawn payload states it;
     the roles whose places it can change, each with whether it takes
-    several; the places each role draws, by ref, which can be fewer than its
-    frame holds (`drawn_places`); the facet each of `FACET_AXES` the drawn
+    several, and the most places each can draw (`most`, the chart's own
+    limit, `harness.chart_binding.chart_draws`); the places each role
+    draws, by ref, which can be fewer than its frame holds (`drawn_places`); the facet each of `FACET_AXES` the drawn
     series share, by axis, which a change of years or places binds so the
     data API elects none again (`drawn_facets`); and whether its members are
     the largest ones `make_charts` ranked at one period, so neither its years
@@ -106,7 +109,11 @@ class UnitCard:
     read from Search after a change of places (`ScopeYears`). The Search
     block states the years of its own places only, so a card whose scope
     names other places offers years only from `years`, and only while they
-    describe its spec and places."""
+    describe its spec and places.
+
+    `nouns` is what the card's served data calls each role's places, by
+    role: `singular`, `plural` or both, as its retrieval's coverage states
+    them (`role_nouns`); `None` where it states none."""
 
     spec_id: str
     args: dict[str, Any]
@@ -119,6 +126,8 @@ class UnitCard:
     shown: dict[str, list[str]] | None = None
     facets: dict[str, str] | None = None
     years: ScopeYears | None = None
+    most: dict[str, int] | None = None
+    nouns: dict[str, dict[str, str]] | None = None
 
     def as_json(self) -> dict[str, Any]:
         stored: dict[str, Any] = {"spec_id": self.spec_id, "args": dict(self.args)}
@@ -140,6 +149,10 @@ class UnitCard:
             stored["facets"] = dict(self.facets)
         if self.years is not None:
             stored["years"] = self.years.as_json()
+        if self.most is not None:
+            stored["most"] = dict(self.most)
+        if self.nouns:
+            stored["nouns"] = {role: dict(forms) for role, forms in self.nouns.items()}
         return stored
 
     @classmethod
@@ -151,7 +164,7 @@ class UnitCard:
         if not isinstance(spec_id, str) or not spec_id or not isinstance(args, Mapping):
             return None
         scope, labels, roles = stored.get("scope"), stored.get("labels"), stored.get("roles")
-        shown, facets = stored.get("shown"), stored.get("facets")
+        shown, facets, most = stored.get("shown"), stored.get("facets"), stored.get("most")
         return cls(
             spec_id=spec_id,
             args=dict(args),
@@ -176,6 +189,10 @@ class UnitCard:
             if isinstance(facets, Mapping) and facets
             else None,
             years=ScopeYears.from_json(stored.get("years")),
+            most={str(k): v for k, v in most.items() if type(v) is int and v >= 1}
+            if isinstance(most, Mapping)
+            else None,
+            nouns=_read_nouns(stored.get("nouns")),
         )
 
     def fetch_args(
@@ -427,6 +444,10 @@ def encoded(
         **(card.facets or {}),
         **(drawn_facets(component.get("fact_summary")) if component is not None else {}),
     }
+    most = card.most
+    if intent is not None:
+        draws = chart_draws(type_=str(intent.get("type") or ""), view=_drawn_view(component))
+        most = {role: draws if several else 1 for role, several in roles.items()}
     return replace(
         card,
         single=single,
@@ -435,7 +456,24 @@ def encoded(
         cut=card.cut if cut is None else cut,
         shown=shown if block is not None else card.shown,
         facets=facets or None,
+        most=most,
     )
+
+
+def _drawn_view(component: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The part of a frame view `chart_draws` reads, for the card `component`
+    draws: the first and last period its fact summary states, which a table
+    draws rows at; empty when it states none."""
+    window = ((component or {}).get("fact_summary") or {}).get("window") or {}
+    start, end = window.get("start"), window.get("end")
+    if (
+        isinstance(start, str)
+        and isinstance(end, str)
+        and start[:4].isdigit()
+        and end[:4].isdigit()
+    ):
+        return {"coverage": [start[:4], end[:4]]}
+    return {}
 
 
 def _selected_places(
@@ -554,8 +592,9 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
     args = frame_arguments(rendering) if isinstance(rendering, Mapping) else None
     if args is None:
         return None
+    nouns = role_nouns(member.manifest)
     if blocks is None or blocks.get(spec_id) is not None:
-        return UnitCard(spec_id=spec_id, args=args)
+        return UnitCard(spec_id=spec_id, args=args, nouns=nouns)
     served_identity = (member.manifest.get("definition") or {}).get("identity")
 
     def scope_of(block: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -571,7 +610,7 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
             (base_id, scope) for base_id, block in blocks.items() if (scope := scope_of(block))
         ]
     if len(matched) != 1:
-        return UnitCard(spec_id=spec_id, args=args)
+        return UnitCard(spec_id=spec_id, args=args, nouns=nouns)
     ((base_id, scope),) = matched
     named = member.manifest.get("entity_labels")
     named = named if isinstance(named, Mapping) else {}
@@ -583,7 +622,47 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
     labels = {
         ref: str(named[ref]) for ref in scoped if isinstance(named.get(ref), str) and named[ref]
     }
-    return UnitCard(spec_id=base_id, args=args, scope=scope, labels=labels or None)
+    return UnitCard(spec_id=base_id, args=args, scope=scope, labels=labels or None, nouns=nouns)
+
+
+def role_nouns(manifest: Mapping[str, Any]) -> dict[str, dict[str, str]] | None:
+    """What a retrieval's served data calls each role's places, by role, from
+    its manifest's `coverage.dimensions`: each entry's `noun`, keyed by the
+    flow axis it sits on (`axis`, `origin` or `destination`, the role a
+    block names) and by its own `label`, keeping the forms it states as
+    non-empty strings. `None` where no entry states one."""
+    nouns: dict[str, dict[str, str]] = {}
+    for dimension in (manifest.get("coverage") or {}).get("dimensions") or ():
+        if not isinstance(dimension, Mapping):
+            continue
+        forms = _read_forms(dimension.get("noun"))
+        if forms is None:
+            continue
+        for key in (dimension.get("label"), dimension.get("axis")):
+            if isinstance(key, str) and key:
+                nouns[key] = forms
+    return nouns or None
+
+
+def _read_forms(noun: Any) -> dict[str, str] | None:
+    """The `singular` and `plural` of `noun` that are non-empty strings, `None`
+    for neither."""
+    if not isinstance(noun, Mapping):
+        return None
+    forms = {
+        form: noun[form]
+        for form in ("singular", "plural")
+        if isinstance(noun.get(form), str) and noun[form].strip()
+    }
+    return forms or None
+
+
+def _read_nouns(stored: Any) -> dict[str, dict[str, str]] | None:
+    """The `UnitCard.nouns` `as_json` wrote, `None` for anything else."""
+    if not isinstance(stored, Mapping):
+        return None
+    nouns = {str(role): forms for role, noun in stored.items() if (forms := _read_forms(noun))}
+    return nouns or None
 
 
 def _scope_over(base: Any, served: Any) -> dict[str, Any] | None:
@@ -874,6 +953,8 @@ def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer
             role=role,
             multiple=several,
             chosen=[PlaceOption(id=ref, label=labels[ref]) for ref in shown[role]],
+            max=(card.most or {}).get(role),
+            label=RoleLabel(**forms) if (forms := (card.nouns or {}).get(role)) else None,
         )
         for role, several in roles.items()
         if shown.get(role) and all(labels.get(ref) for ref in shown[role])
@@ -1153,13 +1234,16 @@ def _window_move(
 
 def _places_refusal(offer: CardChanges, change: PlacesChange) -> tuple[str, str] | None:
     """Why `change` is refused before Search is read: a role the card does not
-    offer, a count its `multiple` does not allow, or the places it shows."""
+    offer, a count its `multiple` or `max` does not allow, or the places it
+    shows."""
     places = next((p for p in offer.places or () if p.role == change.role), None)
     if places is None:
         return "change_not_offered", "The places of this card cannot change there."
     picked = list(dict.fromkeys(change.entities))
     if not places.multiple and len(picked) != 1:
         return "change_not_offered", "This card shows one place at a time."
+    if places.max is not None and len(picked) > places.max:
+        return "change_not_offered", f"This card can show at most {places.max} places there."
     if set(picked) == {o.id for o in places.chosen}:
         return "change_not_offered", "The card already shows those places."
     return None

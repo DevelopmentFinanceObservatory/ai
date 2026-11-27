@@ -996,17 +996,43 @@ class PlaceOption(_WireModel):
     label: str
 
 
+class RoleLabel(_WireModel):
+    """What the served data calls one and several of a role's places, such
+    as `debtor` and `debtors`, in the data's own words and case. The data
+    may name one form only, so either member may be absent, never both."""
+
+    singular: str | None = Field(default=None, min_length=1)
+    plural: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _names_one_form(self) -> RoleLabel:
+        if self.singular is None and self.plural is None:
+            raise ValueError("a role label names its singular, its plural or both")
+        return self
+
+
 class PlacesOffer(_WireModel):
     """A role of a card whose places can change: the role (`role`, as the
     card's spec names it, such as `observationAbout`, `origin` or
     `destination`), the places it shows now (`chosen`), and whether it takes
     several at once (`multiple`, true where the role's places are the card's
     series; false where the card shows one place and a change swaps it). The
-    places it can change to are read on demand (`PlacesOptions`)."""
+    places it can change to are read on demand (`PlacesOptions`).
+
+    `max` is the most places the card can draw for the role, from the
+    chart's own limit (`harness.chart_binding.chart_draws`): 1 where
+    `multiple` is false. A change naming more is refused before any fetch.
+    A card stored before it was kept has none.
+
+    `label` is what the card's served data calls the role's places
+    (`RoleLabel`), read from its retrieval's coverage; absent where the data
+    names none."""
 
     role: str = Field(min_length=1)
     multiple: bool
     chosen: list[PlaceOption] = Field(min_length=1)
+    max: int | None = Field(default=None, ge=1)
+    label: RoleLabel | None = None
 
 
 class PlacesOptions(_WireModel):

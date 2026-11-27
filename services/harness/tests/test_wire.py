@@ -410,6 +410,19 @@ def test_an_unknown_frame_member_is_refused() -> None:
         STUDIO_FRAME_ADAPTER.validate_python(raw)
 
 
+@pytest.mark.parametrize(
+    "offer",
+    [{"label": {}}, {"label": {"singular": ""}}, {"max": 0}],
+    ids=["label-naming-no-form", "label-empty-form", "max-below-one"],
+)
+def test_a_places_offer_with_an_empty_label_or_max_is_refused(offer: dict[str, Any]) -> None:
+    raw = _load("event-23-component-card-changes.json")
+    raw["card_changes"]["places"][0].update(offer)
+
+    with pytest.raises(ValidationError):
+        STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+
 _PER_HEAD = {"stat_var": "dcid:Count_Person", "label": "Total population"}
 _CONSTANT_USD = {"currency": "USD", "prices": "constant", "base_year": 2023}
 _DONOR_USD = {**_CONSTANT_USD, "deflation_basis": "donor"}

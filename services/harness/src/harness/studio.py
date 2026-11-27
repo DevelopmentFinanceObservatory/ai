@@ -672,9 +672,9 @@ async def _card_move(
     it 503 `transient_unavailable`, `place_options_unavailable`, to retry;
     an apis that serves no places door refuses it 503 `capability_unavailable`,
     as `/places` does. Any change of places is refused the same way while
-    `places_gated` says the deployment learnt apis serves none and stopped
-    the offers (`harness.place_options.places_offered`). `detail` is copy the
-    client shows."""
+    `places_gated` says cards offer no places, by the deployment's setting or
+    because it learnt apis serves none (`harness.place_options.places_offered`).
+    `detail` is copy the client shows."""
     if body.apply_unit is not None:
         move: UnitMove | ChangeMove | tuple[str, str] = unit_move(conversation, body.apply_unit)
     elif body.apply_change is not None:
@@ -1840,9 +1840,11 @@ def _offering(studio: StudioRunner) -> PlaceOptionsReader | None:
 
 
 def _places_gated(studio: StudioRunner) -> bool:
-    """Whether the deployment offers places but has stopped the offers, having
-    learnt apis serves no places door (`places_offered`)."""
-    return studio.place_options is not None and not places_offered(studio.place_options)
+    """Whether cards offer no change of places: the deployment turned them off
+    (`STUDIO_PLACE_OPTIONS=false`), or stopped the offers on learning apis
+    serves no places door (`places_offered`). A change of places then answers
+    as `/places` does."""
+    return not places_offered(studio.place_options)
 
 
 def _places_not_served_response() -> JSONResponse:
