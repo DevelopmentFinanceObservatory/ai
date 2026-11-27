@@ -317,8 +317,9 @@ def _assign_changed(
 
 def _with_specs_noted_meanwhile(usage: TurnUsage, live: TurnUsage) -> TurnUsage:
     """`usage` with the spec uses `live` holds added to its own, once each,
-    when both are the same turn's. Spec uses only grow, so the union is right
-    whichever side noted a use first."""
+    and `live`'s chain reset (`_keep_chain_reset`), when both are the same
+    turn's. Spec uses only grow, so the union is right whichever side noted
+    a use first."""
     if not usage.trace_id or usage.trace_id != live.trace_id:
         return usage
     merged = usage.copy()
@@ -327,7 +328,20 @@ def _with_specs_noted_meanwhile(usage: TurnUsage, live: TurnUsage) -> TurnUsage:
         (merged.drawn_specs, live.drawn_specs),
     ):
         mine.extend(spec_id for spec_id in theirs if spec_id not in mine)
+    _keep_chain_reset(merged, live)
     return merged
+
+
+def _keep_chain_reset(usage: TurnUsage, noted: TurnUsage) -> None:
+    """Give `usage` the chain reset `noted`, the same turn's usage, holds
+    when `usage` holds none: the reset the turn's orchestrator recorded on
+    the live state as it opened (`harness.studio_state.CarriedHistory.reset`),
+    which a copy taken or a row stored before it lacks."""
+    if (noted.history_chain or "").startswith("reset:") and not (
+        usage.history_chain or ""
+    ).startswith("reset:"):
+        usage.history_chain = noted.history_chain
+        usage.carried_tokens = noted.carried_tokens
 
 
 def _shallow_copy(state: ConversationState) -> ConversationState:
@@ -2193,6 +2207,8 @@ class StudioStore:
                 entry.state.note_spec_use("fetched", spec_id)
             for spec_id in held.drawn_specs:
                 entry.state.note_spec_use("drawn", spec_id)
+            # So is a chain reset its orchestrator recorded as it opened.
+            _keep_chain_reset(entry.state.turn_usage, held)
         segment = entry.state.segment
         if segment is None or segment.id != entry.held:
             entry.held = None

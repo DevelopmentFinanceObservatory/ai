@@ -70,6 +70,7 @@ from .studio_routes import (
     studio_client,
     turn_body,
 )
+from .test_studio_resume import _leave_once, _resume_body
 
 pytestmark = pytest.mark.usefixtures("hydrogen_studio")
 
@@ -288,15 +289,45 @@ async def test_no_closed_cursor_holds_a_carried_conversation_and_none_is_rewritt
     assert after[:3] == before[:3]
 
 
+_REFUSED = Reply(open_error=ValueError("refused"))
+
+
 @pytest.mark.usefixtures("full_history")
+@pytest.mark.parametrize(
+    ("first_call", "reload"),
+    [
+        pytest.param("answers", False, id="answers"),
+        # The node's state is dropped with the failed call, so only the turn
+        # the reset was recorded on carries it to the line.
+        pytest.param("fails", False, id="first-call-fails"),
+        # Another request reloads the conversation before the turn closes.
+        pytest.param("fails", True, id="reloaded-then-fails"),
+    ],
+)
 async def test_a_follow_up_whose_carried_conversation_changed_since_its_claim_opens_from_the_digest(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    pg_engine: AsyncEngine,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    first_call: str,
+    reload: bool,
 ) -> None:
     """The claim names the stored conversation by its hash. One the
     orchestrator reads under another hash, as one stored after the claim,
-    resets the chain `unloadable` and the turn opens from the digest."""
+    resets the chain `unloadable` and the turn opens from the digest. Its
+    line logs the reset, with no carried tokens, whether its first call
+    answers or fails."""
+    store = StudioStore(pg_engine)
+
+    async def reload_then_refuse(_request: Request) -> Reply:
+        await store.load(_PRINCIPAL, CONVERSATION)
+        return _REFUSED
+
+    follow_up = {"answers": _UGANDA, "fails": reload_then_refuse if reload else _REFUSED}
     app, model = orchestrator_app(
-        *_TURN_1, _UGANDA, resolver=CannedSearch(definite_envelope()), engine=pg_engine
+        *_TURN_1,
+        follow_up[first_call],
+        resolver=CannedSearch(definite_envelope()),
+        store=store,
     )
     await _turns(app, "Life expectancy in Kenya?")
 
@@ -314,7 +345,9 @@ async def test_a_follow_up_whose_carried_conversation_changed_since_its_claim_op
     request = model.requests[-1]
     assert len(_contents(request)) == 2
     assert '"turns": [' in _opening_texts(request, 2)[0]
-    assert [line["history_chain"] for line in _turn_lines(caplog)] == ["reset:unloadable"]
+    assert [
+        (line["history_chain"], line.get("carried_tokens")) for line in _turn_lines(caplog)
+    ] == [("reset:unloadable", None)]
 
 
 @pytest.mark.usefixtures("full_history")
@@ -871,10 +904,16 @@ def test_an_orchestrator_that_cannot_read_the_named_conversation_records_why(
     ctx = SimpleNamespace(key=key, state={})
     ref = CarriedRef.of(turn=1, history="{}")
 
-    opened = _carried_opening(ctx, ref, lambda _key: stored)  # type: ignore[arg-type]
+    resets: list[tuple[TurnKey, str]] = []
+    source = SimpleNamespace(
+        history=lambda _key: stored, reset=lambda key, why: resets.append((key, why))
+    )
+
+    opened = _carried_opening(ctx, ref, source, model_name=MODEL)  # type: ignore[arg-type]
 
     assert opened is None
     assert ctx.state == {ORCHESTRATOR_CHAIN_RESET_KEY: reason}
+    assert resets == [(key, reason)]
 
 
 async def test_the_carried_source_tells_a_conversation_out_of_process_from_one_storing_none(
@@ -883,11 +922,11 @@ async def test_the_carried_source_tells_a_conversation_out_of_process_from_one_s
     store = StudioStore(pg_engine)
     source = make_carried_history(store)
     key = TurnKey(principal=_PRINCIPAL, conversation_id=_FULL_ID, turn_index=1)
-    assert source(key) is None
+    assert source.history(key) is None
 
     await store.create(_PRINCIPAL, _FULL_ID)
 
-    assert source(key) == {}
+    assert source.history(key) == {}
 
 
 def _response(input_tokens: int, output_tokens: int) -> ModelResponse:
@@ -1129,3 +1168,48 @@ def test_only_a_turn_that_answered_with_a_carry_is_recorded_as_close_failed(
     record_closed_turn(conversation, cursor)
 
     assert (conversation.carried_history == {"turn": 1, "reset": "close_failed"}) is marked
+
+
+@pytest.mark.parametrize("first_call", ["answers", "fails"])
+async def test_a_follow_up_resumed_on_an_instance_with_another_model_opens_from_the_digest(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, first_call: str
+) -> None:
+    """Turn 2 is claimed on instance A, whose model wrote turn 1's
+    conversation, so the claim names it, and its client leaves during the
+    first call. `/resume` runs the turn on instance B, whose model differs:
+    B's orchestrator opens from the whole digest, since the conversation's
+    thought signatures are A's model's, and the turn's line logs
+    `model_changed` with no carried tokens, whether B's first call answers
+    or fails."""
+    entered = asyncio.Event()
+
+    async def hang(_request: Request) -> Reply:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    full = HistorySettings(studio_history="full")
+    first, _ = orchestrator_app(
+        *_TURN_1, hang, resolver=CannedSearch(definite_envelope()), engine=pg_engine, history=full
+    )
+    second, second_model = orchestrator_app(
+        _UGANDA if first_call == "answers" else _REFUSED,
+        engine=pg_engine,
+        history=full,
+        model_name="gemini-other",
+    )
+    await _turns(first, "Life expectancy in Kenya?")
+    await _leave_once(first, "/api/studio/turn", turn_body("And Uganda?"), entered)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        async with studio_client(second) as client:
+            frames = await stream(client, "/api/studio/resume", _resume_body(2))
+
+    assert frames[-1]["event"] == ("done" if first_call == "answers" else "error")
+    (request,) = second_model.requests
+    assert len(_contents(request)) == 2
+    assert '"turns": [' in _opening_texts(request, 2)[0]
+    assert [
+        (line["turn"], line["history_chain"], line.get("carried_tokens"))
+        for line in _turn_lines(caplog)
+    ] == [(2, "reset:model_changed", None)]

@@ -70,15 +70,16 @@ class ScriptLlm(ScriptedGenai):
     entry of `script` and recording the request (`requests`). A part is
     answered as one chunk. Once the script runs out it answers "done" in
     plain text, so a turn with no script is a plain-text answer.
-    `model` builds the orchestrator's model on it."""
+    `model` builds the orchestrator's model, `model_name`, on it."""
 
-    def __init__(self, script: Sequence[ScriptEntry] = ()) -> None:
+    def __init__(self, script: Sequence[ScriptEntry] = (), *, model_name: str = MODEL) -> None:
         super().__init__([])
         self.script: list[ScriptEntry] = list(script)
+        self.model_name = model_name
 
     def model(self, *, budget: TurnBudget | None = None) -> GoogleModel:
         """The orchestrator's model (`orchestrator.model.orchestrator_model`) on this client."""
-        return orchestrator_model(MODEL, client=self.client, budget=budget)
+        return orchestrator_model(self.model_name, client=self.client, budget=budget)
 
     async def _open(self, *, model: str, contents: Any, config: Any = None) -> Any:
         request = Request(
@@ -121,6 +122,7 @@ def orchestrator_app(
     heartbeat_seconds: float | None = None,
     provenance: ProvenanceStore | None = None,
     history: HistorySettings | None = None,
+    model_name: str = MODEL,
 ) -> tuple[FastAPI, ScriptLlm]:
     """The studio routes on the turn graph, and the agent's model client.
 
@@ -149,14 +151,15 @@ def orchestrator_app(
     by default. `stated_scope` reads the user's words for the turn's licence
     and admission, none by default. Every turn begins under `history`, read
     from the environment as the app is built by default, as the server reads
-    it at startup.
+    it at startup. The orchestrator runs the model `model_name`, `MODEL` by
+    default.
     """
     if store is None:
         if engine is None:
             raise TypeError("orchestrator_app needs a store, or the engine to build one on")
         store = StudioStore(engine)
     resolved_settings = settings or Settings()
-    model = ScriptLlm(script)
+    model = ScriptLlm(script, model_name=model_name)
     resolver = resolver or no_resolver
     planner_model = handing_back_planner_failures(planner or ScriptedPlannerModel())
     ledger = (
@@ -210,7 +213,7 @@ def orchestrator_app(
         run_ledger=ledger if isinstance(ledger, StudioRunLedger) else None,
         **({"heartbeat_seconds": heartbeat_seconds} if heartbeat_seconds is not None else {}),
         history=history if history is not None else HistorySettings(),
-        model_name=MODEL,
+        model_name=model_name,
     )
     app = FastAPI()
     app.state.studio = studio

@@ -122,9 +122,13 @@ ORCHESTRATOR_PRIOR_LEDGER_KEY = "orchestrator:prior_ledger"
 ORCHESTRATOR_HISTORY_KEY = WAITING_HISTORY_KEY
 # On a `full` turn whose orchestrator could not open on the conversation
 # its inputs name (`TurnInput.carried_from`), the reason it opened from the
-# whole digest instead: `unloadable`, or `not_in_process` when the instance
-# running it holds no state for the conversation; `harness.studio_store.keep_turn_records`
-# records it as the turn's `history_chain`.
+# whole digest instead: `unloadable`, `model_changed` when another model wrote
+# it, or `not_in_process` when the instance running it holds no state for the
+# conversation (`harness.graph.orchestrate._carried_opening`). The node also
+# records it on the turn before any model call (`CarriedSource.reset`); this
+# key carries it to a pause's line and to a segment resumed on another
+# instance, and `harness.studio_store.keep_turn_records` records it as the
+# turn's `history_chain`.
 ORCHESTRATOR_CHAIN_RESET_KEY = "orchestrator:chain_reset"
 # True on a `full` turn whose orchestrator answered with a conversation to
 # carry (the `answered` edge's output), so a turn whose closing write failed

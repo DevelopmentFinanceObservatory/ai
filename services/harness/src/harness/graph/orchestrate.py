@@ -19,7 +19,7 @@ from collections.abc import (
 )
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from compiler.surface import ToolSurface
 from orchestrator.agent import Orchestrator
@@ -122,11 +122,25 @@ def turn_id(key: TurnKey) -> str:
 # The edge each hand-off takes, by the tool whose call handed off.
 HAND_OFF_EDGES = {"plan": "plan", "ask_user": "ask"}
 
-# The conversation's stored carried conversation
-# (`harness.studio_state.ConversationState.carried_history`), for the turn
-# `TurnKey` names: an empty mapping when it holds none, and None when the
-# instance holds no state for the conversation.
-type CarriedSource = Callable[[TurnKey], Mapping[str, Any] | None]
+
+class CarriedSource(Protocol):
+    """Where the `orchestrate` node of a `full` turn reads the conversation
+    it extends, and records that it opened from the whole digest instead
+    (`harness.studio_state.make_carried_history`)."""
+
+    def history(self, key: TurnKey) -> Mapping[str, Any] | None:
+        """The conversation's stored carried conversation
+        (`harness.studio_state.ConversationState.carried_history`), for the
+        turn `key` names: an empty mapping when it holds none, and None when
+        the instance holds no state for the conversation."""
+        ...
+
+    def reset(self, key: TurnKey, reason: str) -> None:
+        """Record on the turn `key` names, while it is open, that its
+        orchestrator opened from the whole digest for `reason`, as its
+        `history_chain`, before any model call, so a turn whose first call
+        fails logs the opening it sent."""
+        ...
 
 
 def orchestrate_node(
@@ -179,9 +193,10 @@ def orchestrate_node(
         history: StoredHistory | None = None
         resumed: HandBack | None = None
         inputs = TurnInput.model_validate(ctx.inputs)
+        run_model = model()
         if hand_back is None or hand_back.answers is None:
             carried_history = (
-                _carried_opening(ctx, inputs.carried_from, carried)
+                _carried_opening(ctx, inputs.carried_from, carried, model_name=run_model.model_name)
                 if inputs.carried_from is not None
                 else None
             )
@@ -207,7 +222,6 @@ def orchestrate_node(
                 result=hand_back.response(),
                 written=tuple(hand_back.written),
             )
-        run_model = model()
         run = run_orchestrator(
             orchestrator,
             state=ctx.state,
@@ -236,19 +250,26 @@ def orchestrate_node(
 
 
 def _carried_opening(
-    ctx: NodeCtx[GraphEvent], ref: CarriedRef, carried: CarriedSource
+    ctx: NodeCtx[GraphEvent], ref: CarriedRef, carried: CarriedSource, *, model_name: str
 ) -> StoredHistory | None:
-    """The conversation `ref` names, read from `carried`, or None when this
-    instance holds no state for the conversation (`not_in_process`) or the
-    stored one is another conversation or does not load as a `StoredHistory`
-    (`unloadable`). Then the turn opens from the whole digest, and its state
-    records the reset (`ORCHESTRATOR_CHAIN_RESET_KEY`)."""
-    stored = carried(ctx.key)
+    """The conversation `ref` names, read from `carried`, for a run on the
+    model `model_name`, or None when this instance holds no state for the
+    conversation (`not_in_process`), when another model wrote it
+    (`model_changed`), as when a turn claimed on one instance runs on
+    another whose model differs, since its thought signatures are that
+    model's, or when the stored one is another conversation or does not load
+    as a `StoredHistory` (`unloadable`). Then the turn opens from the whole
+    digest, and the reset is recorded on the turn (`CarriedSource.reset`) and
+    in its state (`ORCHESTRATOR_CHAIN_RESET_KEY`), which carries it to a
+    pause's line and to a segment resumed on another instance."""
+    stored = carried.history(ctx.key)
     reason = "not_in_process"
     if stored is not None:
         reason = "unloadable"
         text = ref.history_in(stored)
-        if text is not None:
+        if text is not None and stored.get("model") != model_name:
+            reason = "model_changed"
+        elif text is not None:
             try:
                 return StoredHistory.model_validate_json(text)
             except ValidationError:
@@ -259,6 +280,7 @@ def _carried_opening(
         ctx.key.turn_index,
         reason,
     )
+    carried.reset(ctx.key, reason)
     ctx.state[ORCHESTRATOR_CHAIN_RESET_KEY] = reason
     return None
 

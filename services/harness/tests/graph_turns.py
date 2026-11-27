@@ -57,9 +57,18 @@ def given(
     return Node(run=run)
 
 
-def no_carried(_key: TurnKey) -> None:
+class _NoCarried:
     """A carried source for an instance that holds no state for the
     conversation, for graphs whose turns open on the digest."""
+
+    def history(self, key: TurnKey) -> None:
+        return None
+
+    def reset(self, key: TurnKey, reason: str) -> None:
+        return None
+
+
+no_carried = _NoCarried()
 
 
 def opening_nodes(

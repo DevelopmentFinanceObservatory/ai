@@ -231,3 +231,23 @@ def test_a_canvas_write_keeps_the_spec_uses_its_turn_noted_meanwhile() -> None:
     assert live.turn_usage.carried_tokens == 7
     assert live.turn_usage.fetched_specs == ["spec_a", "spec_d", "spec_b"]
     assert live.turn_usage.drawn_specs == ["spec_c"]
+
+
+def test_a_canvas_write_keeps_the_chain_reset_its_turn_noted_meanwhile() -> None:
+    """A canvas write whose copy was taken before the turn's orchestrator
+    reset the chain (`CarriedHistory.reset`) keeps the reset, so the turn's
+    line names the opening its request sent."""
+    live = ConversationState(conversation_id="conv-reset")
+    live.turn_usage = TurnUsage(trace_id="tr_1", history_chain="extended", carried_tokens=9040)
+    work, base = _shallow_copy(live), _shallow_copy(live)
+    live.turn_usage.history_chain = "reset:model_changed"
+    live.turn_usage.carried_tokens = None
+    work.note_spec_use("fetched", "spec_a")
+
+    _assign_changed(live, work, base)
+
+    assert live.turn_usage.fetched_specs == ["spec_a"]
+    assert (live.turn_usage.history_chain, live.turn_usage.carried_tokens) == (
+        "reset:model_changed",
+        None,
+    )

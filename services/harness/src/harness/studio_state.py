@@ -1033,7 +1033,11 @@ class ConversationState:
         tokens (`token_cap`), or when it no longer loads as a
         `StoredHistory` (`unloadable`), as after a deploy that changed the
         message schema. The outcome is kept on the turn's usage as
-        `history_chain`, and the carried tokens as `carried_tokens`."""
+        `history_chain`, and the carried tokens as `carried_tokens`. The
+        `orchestrate` node checks the conversation again as it opens, on the
+        model it runs, which differs from `model_name` when another instance
+        resumes the turn, and records its own reset over this outcome
+        (`harness.graph.orchestrate._carried_opening`)."""
         if not self.turns:
             self.turn_usage.history_chain = "fresh"
             return None
@@ -1672,21 +1676,47 @@ def make_recall_part(store: StudioStore) -> Any:
     return recall_part
 
 
-def make_carried_history(store: StudioStore) -> Any:
-    """The callable the `orchestrate` node reads a `full` turn's carried
-    conversation through (`harness.graph.orchestrate.CarriedSource`): the
-    stored `ConversationState.carried_history` of the conversation the turn's
-    key names, as this instance holds it, with no database access. It returns
-    an empty mapping when the conversation stores none, and None when this
-    instance holds no state for it."""
+def make_carried_history(store: StudioStore) -> CarriedHistory:
+    """The source the `orchestrate` node reads a `full` turn's carried
+    conversation through and records its chain reset on
+    (`harness.graph.orchestrate.CarriedSource`), on the conversations this
+    instance holds, with no database access."""
+    return CarriedHistory(store)
 
-    def carried_history(key: TurnKey) -> dict[str, Any] | None:
-        conversation = store.current(key.principal, key.conversation_id)
+
+@dataclass
+class CarriedHistory:
+    """`make_carried_history`'s source, on `store`'s live conversations."""
+
+    store: StudioStore
+
+    def history(self, key: TurnKey) -> dict[str, Any] | None:
+        """The stored `ConversationState.carried_history` of the conversation
+        `key` names: an empty mapping when it stores none, and None when this
+        instance holds no state for it."""
+        conversation = self.store.current(key.principal, key.conversation_id)
         if conversation is None:
             return None
         return conversation.carried_history or {}
 
-    return carried_history
+    def reset(self, key: TurnKey, reason: str) -> None:
+        """Record on the turn `key` names that its orchestrator opened from
+        the whole digest for `reason`, as its `history_chain`, with no
+        carried tokens, where the claim's check (`ConversationState.
+        carried_opening`) may have said `extended`. The turn's record, which
+        its line is written from, then holds the opening the request sent,
+        even when the first model call fails and the node's state is
+        dropped. Nothing is recorded once the conversation holds another turn
+        or the turn is recorded (`ConversationState.turn_recorded`)."""
+        conversation = self.store.current(key.principal, key.conversation_id)
+        if (
+            conversation is None
+            or conversation.turn_index != key.turn_index
+            or conversation.turn_recorded
+        ):
+            return
+        conversation.turn_usage.history_chain = f"reset:{reason}"
+        conversation.turn_usage.carried_tokens = None
 
 
 def make_canvas_series(store: StudioStore) -> Any:
