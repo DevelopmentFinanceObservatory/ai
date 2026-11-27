@@ -301,7 +301,14 @@ class UnitCard:
     (`drawn_facets`). A card on the retrieval's own frame then offers no
     change of years or places, since nothing would keep a change on those
     facets. A card on a sum reads them from its retrieval's frame when it
-    changes (`harness.studio_edit`)."""
+    changes (`harness.studio_edit`).
+
+    `continued` marks a card whose retrieval the data API continued with its
+    source's estimates (`continues_estimates`). Such a series is counted
+    under the method it continues, and a fetch binding that method stops
+    the continuation, so a change binds every drawn facet but the method
+    (`bindable_facets`) and holds the redraw to it all the same
+    (`strayed_facets`)."""
 
     spec_id: str
     args: dict[str, Any]
@@ -318,6 +325,17 @@ class UnitCard:
     nouns: dict[str, dict[str, str]] | None = None
     total: SummedFrame | None = None
     facets_unread: bool = False
+    continued: bool = False
+
+    @property
+    def bindable_facets(self) -> dict[str, str] | None:
+        """The drawn facets a change binds: all of them, but the method of a
+        card whose series the data API continued (`continued`)."""
+        if not self.facets or not self.continued:
+            return self.facets
+        return {
+            axis: ref for axis, ref in self.facets.items() if axis != "measurementMethod"
+        } or None
 
     def as_json(self) -> dict[str, Any]:
         stored: dict[str, Any] = {"spec_id": self.spec_id, "args": dict(self.args)}
@@ -345,6 +363,8 @@ class UnitCard:
             stored["nouns"] = {role: dict(forms) for role, forms in self.nouns.items()}
         if self.facets_unread:
             stored["facets_unread"] = True
+        if self.continued:
+            stored["continued"] = True
         if self.total is not None:
             stored["summed"] = {"args": stored.pop("args"), **self.total.as_json()}
         return stored
@@ -393,6 +413,7 @@ class UnitCard:
             nouns=_read_nouns(stored.get("nouns")),
             total=total,
             facets_unread=stored.get("facets_unread") is True,
+            continued=stored.get("continued") is True,
         )
 
     def fetch_args(
@@ -480,7 +501,7 @@ def bound_facets(card: UnitCard, block: Mapping[str, Any] | None) -> dict[str, A
         if not isinstance(ref, str) or set(binding) - {"state", "ref"}:
             return None
         own[str(axis)] = ref
-    refs = {**(card.facets or {}), **own}
+    refs = {**(card.bindable_facets or {}), **own}
     return {axis: {"ref": ref} for axis, ref in refs.items()} or None
 
 
@@ -953,8 +974,9 @@ def _retrieval_card(
     if args is None:
         return None
     nouns = role_nouns(member.manifest)
+    continued = continues_estimates(member.manifest)
     if blocks is None or blocks.get(spec_id) is not None:
-        return UnitCard(spec_id=spec_id, args=args, nouns=nouns)
+        return UnitCard(spec_id=spec_id, args=args, nouns=nouns, continued=continued)
     served_identity = (member.manifest.get("definition") or {}).get("identity")
 
     def scope_of(block: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -970,7 +992,7 @@ def _retrieval_card(
             (base_id, scope) for base_id, block in blocks.items() if (scope := scope_of(block))
         ]
     if len(matched) != 1:
-        return UnitCard(spec_id=spec_id, args=args, nouns=nouns)
+        return UnitCard(spec_id=spec_id, args=args, nouns=nouns, continued=continued)
     ((base_id, scope),) = matched
     named = member.manifest.get("entity_labels")
     named = named if isinstance(named, Mapping) else {}
@@ -982,7 +1004,29 @@ def _retrieval_card(
     labels = {
         ref: str(named[ref]) for ref in scoped if isinstance(named.get(ref), str) and named[ref]
     }
-    return UnitCard(spec_id=base_id, args=args, scope=scope, labels=labels or None, nouns=nouns)
+    return UnitCard(
+        spec_id=base_id,
+        args=args,
+        scope=scope,
+        labels=labels or None,
+        nouns=nouns,
+        continued=continued,
+    )
+
+
+def continues_estimates(manifest: Mapping[str, Any]) -> bool:
+    """Whether the retrieval `manifest` describes continues a series with its
+    source's estimates: a dataset version's `trace.continuations`, or the
+    `continuations` a computed version holds, names a method
+    (dfo-data-tools' `materialise.continued_series`)."""
+    trace = manifest.get("trace")
+    entries = trace.get("continuations") if isinstance(trace, Mapping) else None
+    if entries is None:
+        entries = manifest.get("continuations")
+    return isinstance(entries, list) and any(
+        isinstance(entry, Mapping) and isinstance(entry.get("method"), str) and entry["method"]
+        for entry in entries
+    )
 
 
 def role_nouns(manifest: Mapping[str, Any]) -> dict[str, dict[str, str]] | None:
@@ -1694,6 +1738,21 @@ def _places_move(
         **(card.scope or {}),
         "entities": {role: [f"dcid:{ref}" for ref in refs] for role, refs in entities.items()},
     }
+    window = offer.window
+    if window is not None and window.single:
+        # A card showing one value per series draws the latest year its
+        # frame holds, so the new places are fetched at the year it shows
+        # and its title keeps: a place with none there holds no figures.
+        held = scope.get("window") or {}
+        include = (
+            {"include": held["include"]} if isinstance(held, Mapping) and "include" in held else {}
+        )
+        scope["window"] = {
+            "kind": "range",
+            "start_year": window.start_year,
+            "end_year": window.start_year,
+            **include,
+        }
     new = tuple(labels[ref] for ref in picked)
     return ChangeMove(
         component_id,

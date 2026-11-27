@@ -47,11 +47,13 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    SerializerFunctionWrapHandler,
     TypeAdapter,
     ValidationError,
     ValidationInfo,
     ValidatorFunctionWrapHandler,
     WrapValidator,
+    model_serializer,
     model_validator,
 )
 from pydantic.json_schema import WithJsonSchema
@@ -1047,7 +1049,8 @@ class PlacesOptions(_WireModel):
 
 
 class CardChanges(_WireModel):
-    """Set on a `component.created` frame, and on a stored card, whose card
+    """Set on a `component.created` or `component.revised` frame, and on a
+    stored card, whose card
     draws one retrieval's own frame: the spec the card reads (`spec_id`, the
     one `apply_change` names) and each change it offers besides its unit:
     other years (`window`) and other places, one entry per role (`places`).
@@ -2092,7 +2095,14 @@ def log_unreadable_card(
 class ComponentRevised(_WireModel):
     """Same component_id, incremented revision. `payload` may be omitted when
     only presentation fields changed -- apply `changed` against the revision
-    you hold."""
+    you hold.
+
+    `card_changes` is set on a revise in place through Edit Card: the years
+    and places the revised card offers, in `component.created`'s shape, or
+    `null` when it offers neither, including a revised card that cannot be
+    read as one that offers changes. It is absent on other revises. The
+    frame carries no `unit_change`, since a revise keeps the card's spec, its
+    sum and the Search block its unit offer reads."""
 
     event: Literal["component.revised"]
     seq: int = Field(ge=0)
@@ -2101,6 +2111,16 @@ class ComponentRevised(_WireModel):
     changed: list[str] = Field(min_length=1)
     fact_summary: FactSummary
     payload: dict[str, Any] | None = None
+    card_changes: CardChanges | None = None
+
+    @model_serializer(mode="wrap")
+    def _keeps_no_offers(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # The stream drops `None` members, and a set `card_changes` of `None`
+        # says the revised card offers nothing, which absence does not.
+        dumped = handler(self)
+        if "card_changes" in self.model_fields_set and self.card_changes is None:
+            dumped["card_changes"] = None
+        return dumped
 
 
 def component_revised(

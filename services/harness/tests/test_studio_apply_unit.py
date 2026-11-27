@@ -1545,17 +1545,30 @@ class _FacetedChanger(_Changer):
     ids=["same-facets", "another-method"],
 )
 @pytest.mark.parametrize("change", [_YEARS, _UGANDA], ids=["years", "places"])
+@pytest.mark.parametrize("continued", [False, True], ids=["one-method", "continued"])
 async def test_a_change_keeps_the_facets_the_card_was_drawn_with(
     pg_engine: AsyncEngine,
     change: dict[str, Any],
     redrawn: dict[str, str],
     lands: bool,
+    continued: bool,
 ) -> None:
     """The fetch binds the source, method and unit the card was drawn with, so
     the data API elects none again. A redraw counting another one is refused,
-    and the card stays."""
+    and the card stays. A retrieval whose series the data API continued with
+    its source's estimates (`trace.continuations`) counts each such series
+    under the method it continues, and a bound method stops the continuation,
+    so its fetch leaves the method to the data API, and the redraw is still
+    held to the method the card drew."""
     first_results = _first_results()
     first_results[-1] = _faceted(first_results[-1], _ELECTED)
+    if continued:
+        (member,) = first_results[-1][CARD_LINEAGE_KEY].lineage
+        member.manifest["trace"] = {
+            "continuations": [
+                {"axis": "measurementMethod", "method": "Estimated", "periods": ["2024"]}
+            ]
+        }
     app = _app(
         *_first_turn(),
         resolver=CannedSearch(_ENVELOPE),
@@ -1573,7 +1586,10 @@ async def test_a_change_keeps_the_facets_the_card_was_drawn_with(
         )
 
     (fetched,) = changer.fetched()
-    assert fetched["scope"]["facets"] == {axis: {"ref": ref} for axis, ref in _ELECTED.items()}
+    bound = {axis: {"ref": ref} for axis, ref in _ELECTED.items()}
+    if continued:
+        bound.pop("measurementMethod")
+    assert fetched["scope"]["facets"] == bound
     created = [f for f in frames if f["event"] == "component.created"]
     assert bool(created) is lands
     if not lands:
@@ -2066,6 +2082,44 @@ async def test_a_card_showing_one_year_moves_to_another_year(
     assert (window["start_year"], window["end_year"]) == (2020, 2020)
 
 
+@pytest.mark.parametrize("rows", [12, 0], ids=["held", "no-figures"])
+async def test_a_card_showing_one_year_changes_place_at_that_year(
+    pg_engine: AsyncEngine, rows: int
+) -> None:
+    """A key number for 2023 moved to Uganda fetches Uganda at 2023 alone, so
+    the value drawn is the year its title keeps, whatever Uganda's latest
+    year is. Where Uganda holds no figures for 2023, the change ends as a
+    retrieval with no figures, and the card keeps its slot and offers."""
+    app = _one_year_app(pg_engine, 2023)
+    app.state.studio.place_options = _Places()
+    changer = _Changer(rows=rows)
+    changer.title = "Aid to Kenya, 2023"
+    changer.type = "stat_card"
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)
+        )
+        read = await client.get(
+            "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 0}, headers=AUTH
+        )
+
+    shown = _frame(first, "component.created")["card_changes"]["window"]["start_year"]
+    (fetched,) = changer.fetched()
+    window = {"kind": "range", "start_year": shown, "end_year": shown}
+    assert fetched["scope"]["window"] == window
+    if rows:
+        created = _frame(frames, "component.created")
+        assert created["card_changes"]["window"]["start_year"] == shown
+        assert created["payload"]["component"]["title"]["text"].endswith(str(shown))
+        return
+    assert "write_component" not in [call["tool"] for call in changer.calls]
+    assert _frame(frames, "message.complete")["text"].startswith("The card is unchanged.")
+    (card,) = read.json()["closed_since"][0]["cards"]
+    assert card["card_changes"] == _frame(first, "component.created")["card_changes"]
+
+
 async def test_a_card_showing_one_value_refuses_a_range_and_one_place_too_many(
     pg_engine: AsyncEngine,
 ) -> None:
@@ -2257,6 +2311,89 @@ async def test_an_edit_card_rebuild_keeps_the_places_a_change_set(pg_engine: Asy
     places = {p["role"]: p for p in created["card_changes"]["places"]}
     assert places["destination"]["chosen"] == [{"id": "country/UGA", "label": "Uganda"}]
     assert places["destination"]["multiple"] is True
+
+
+class _ToUganda:
+    """An Edit Card model that narrows the card's recipients to Uganda, in
+    place."""
+
+    async def __call__(self, **_: Any) -> dict[str, Any]:
+        select = {"stat_var": "dcid:Aid", "financingRecipient": ["country/UGA"]}
+        return {"text": "Uganda alone.", "patch": {"select": select}, "recreate": None}
+
+
+async def test_an_edit_card_revise_offers_the_places_the_revised_card_draws(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A card on Kenya and Uganda narrowed to Uganda through Edit Card, in
+    place. Its stored offers follow the revised card: the recipient shows
+    Uganda alone, so a change back to Kenya and Uganda is applied, and a
+    change to Uganda alone is refused as the card already showing it."""
+    app = _app(
+        *_first_turn(),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(_first_results()),
+        tool_surface=_Search(),  # ty: ignore[invalid-argument-type] -- the one tool a change reads
+        engine=pg_engine,
+        edit_model=_ToUganda(),
+    )
+    app.state.studio.place_options = _Places()
+    changer = _Changer()
+    both = {**_UGANDA, "entities": ["country/KEN", "country/UGA"]}
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, both)
+        )
+        changed = _frame(frames, "component.created")
+        drawn = {p["role"]: p for p in changed["card_changes"]["places"]}["destination"]
+        assert [o["id"] for o in drawn["chosen"]] == both["entities"]
+        write = next(c for c in changer.calls if c["tool"] == "write_component")
+        frame_ref = write["args"]["intent"]["frame_ref"]
+
+        async def edit(*, tool: str, args: dict[str, Any], **_: Any) -> dict[str, Any]:
+            if tool == "describe_component":
+                return _described(changed["component_id"], frame_ref, "Aid to Kenya and Uganda")
+            if tool == "write_component":
+                revised = _written(changed["component_id"], frame_ref, "Aid to Uganda")
+                revised["component"]["revision"] = 2
+                revised["component"]["payload"]["revision"] = 2
+                revised["component"]["fact_summary"]["revision"] = 2
+                return revised
+            return {"outcome": "ok", "frame_refs": []}
+
+        app.state.studio.recorder._executor = edit
+        body = _turn_body("only Uganda")
+        body["component_ref"] = {
+            "component_id": changed["component_id"],
+            "revision": 1,
+            "intent": "edit",
+        }
+        revised = await _stream(client, "/api/studio/turn", body)
+        read = await client.get(
+            "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 0}, headers=AUTH
+        )
+        app.state.studio.recorder._executor = changer
+        same = await client.post(
+            "/api/studio/turn",
+            json=_change_body(changed["component_id"], _SPEC, _UGANDA),
+            headers=AUTH,
+        )
+        back = await _stream(
+            client, "/api/studio/turn", _change_body(changed["component_id"], _SPEC, both)
+        )
+
+    assert _frame(revised, "component.revised")["revision"] == 2
+    cards = {c["component_id"]: c for t in read.json()["closed_since"] for c in t["cards"]}
+    offered = {p["role"]: p for p in cards[changed["component_id"]]["card_changes"]["places"]}
+    assert [o["id"] for o in offered["destination"]["chosen"]] == ["country/UGA"]
+    assert (
+        _frame(revised, "component.revised")["card_changes"]
+        == (cards[changed["component_id"]]["card_changes"])
+    )
+    assert (same.status_code, same.json()["constraint_id"]) == (422, "change_not_offered")
+    assert _frame(back, "component.created")["replaces"] == changed["component_id"]
 
 
 async def test_a_bar_chart_over_time_keeps_one_place(pg_engine: AsyncEngine) -> None:

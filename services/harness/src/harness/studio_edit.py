@@ -103,6 +103,7 @@ from harness.unit_offer import served_unit, unit_words
 from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit, scope_years
 from harness.wire import (
     ActivityStep,
+    CardChanges,
     ComponentCreated,
     CompositionActor,
     CompositionUpdated,
@@ -454,7 +455,7 @@ async def _read_change(surface: ToolSurface, move: UnitMove | ChangeMove) -> _Re
         block=move.block,
         unit=move.unit.model_dump(mode="json", exclude_none=True),
         label=move.title,
-        facets=move.card.facets,
+        facets=move.card.bindable_facets,
     )
     if isinstance(resubmitted, UnitRefused):
         return resubmitted
@@ -1221,10 +1222,14 @@ async def _edit_flow(
                 produced=StepProduced(component_id=component_id, revision=revised.revision),
             )
             caught_up = _is_no_op(component, current_revision)
-            frames: list[EditEvent] = [revised]
             title = _block_title(component) if caught_up else patch.get("title")
             lineage = recorder.card_lineage(component)
             runs = card_runs(component, lineage)
+            offered = _revised_card(
+                c, component_id, component, lineage, _merge_patch(stored, patch), places=places
+            )
+            revised = revised.model_copy(update={"card_changes": offered.changes})
+            frames: list[EditEvent] = [revised]
 
             def revise(work: ConversationState) -> bool:
                 if token:
@@ -1237,6 +1242,11 @@ async def _edit_flow(
                     title=title,
                     runs=runs,
                 )
+                entry = work.components[component_id]
+                if offered.card is None:
+                    entry.pop(CARD_UNIT_KEY, None)
+                else:
+                    entry[CARD_UNIT_KEY] = offered.card
                 return _refresh_block(
                     work, component_id=component_id, revision=revised.revision, title=title
                 )
@@ -1623,6 +1633,45 @@ def _merge_patch(stored: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any
         else:
             merged[key] = value
     return merged
+
+
+@dataclass(frozen=True)
+class _RevisedOffers:
+    """The offers of a card revised in place, worked out again from the
+    revision: `card` is the `UnitCard` to store for it, `None` when it offers
+    no change, and `changes` the `card_changes` it offers."""
+
+    card: dict[str, Any] | None
+    changes: CardChanges | None
+
+
+def _revised_card(
+    conversation: ConversationState,
+    component_id: str,
+    component: dict[str, Any],
+    lineage: CardLineage | None,
+    intent: Mapping[str, Any],
+    *,
+    places: bool,
+) -> _RevisedOffers:
+    """The offers of `component_id` after a revise in place drew `component`
+    from `intent`, read as `_swapped` reads a new card: the card the old one
+    was stored as, encoded again from the revised card, so its offers name
+    the places and years the revision draws. A revised card that cannot be
+    read as one that offers changes offers none, since the offers the old
+    card held describe a card the canvas no longer shows."""
+    held = UnitCard.from_json((conversation.components.get(component_id) or {}).get(CARD_UNIT_KEY))
+    blocks = ConversationBlocks(conversation.turn_specs, conversation.turns)
+    drawn = unit_card(component, lineage, blocks, total=held.total if held is not None else None)
+    if drawn is None:
+        return _RevisedOffers(card=None, changes=None)
+    card = held if held is not None else drawn
+    block = blocks.get(card.spec_id)
+    card = encoded(card, block, intent=intent, component=component)
+    changes = card_changes(card, block, fact_summary=component.get("fact_summary"), places=places)
+    if changes is None and card_unit_change(card, block) is None:
+        return _RevisedOffers(card=None, changes=None)
+    return _RevisedOffers(card=card.as_json(), changes=changes)
 
 
 def _record_revision(

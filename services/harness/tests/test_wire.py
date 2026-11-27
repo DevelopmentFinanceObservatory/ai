@@ -34,6 +34,7 @@ from harness.wire import (
     STUDIO_REQUEST_ADAPTER,
     ActivityStep,
     CancelRequest,
+    CardChanges,
     ClientFeature,
     ComponentCreated,
     ComponentRevised,
@@ -549,6 +550,26 @@ def test_component_revised_requires_at_least_one_changed_field() -> None:
 
     with pytest.raises(ValidationError):
         STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+
+@pytest.mark.parametrize("offers", ["absent", "none", "some"])
+def test_a_revised_frame_tells_no_offers_from_offers_it_does_not_carry(offers: str) -> None:
+    """The stream drops `None` members, and a revised card offering nothing
+    reaches the page as `card_changes: null`, while a frame that did not work
+    the offers out again carries no member."""
+    offered = _load("event-23-component-card-changes.json")["card_changes"]
+    frame = STUDIO_FRAME_ADAPTER.validate_python(_load("event-07-component-revised.json"))
+    expected = {"absent": {}, "none": {"card_changes": None}, "some": {"card_changes": offered}}
+    if offers != "absent":
+        frame = frame.model_copy(
+            update={
+                "card_changes": CardChanges.model_validate(offered) if offers == "some" else None
+            }
+        )
+
+    dumped = json.loads(frame.model_dump_json(exclude_none=True))
+
+    assert {k: v for k, v in dumped.items() if k == "card_changes"} == expected[offers]
 
 
 def test_a_mutation_op_missing_its_required_field_is_refused() -> None:
