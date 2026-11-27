@@ -89,7 +89,7 @@ from harness.studio_translate import (
 )
 from harness.tool_contracts import HarnessCode, harness_refusal, resolver_digest
 from harness.turn_records import TURN_CARD_RUNS, held_back_line
-from harness.unit_offer import unit_words
+from harness.unit_offer import served_unit, unit_words
 from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit
 from harness.wire import (
     ActivityStep,
@@ -514,10 +514,15 @@ def period_words(start: int, end: int) -> str:
 
 def _unit_said(move: ChangeMove) -> str | None:
     """The pattern of the phrases that name the unit the card is served in
-    (`harness.card_unit.unit_pattern`), `None` for a card whose unit cannot
-    change, so the year in "constant 2023 US dollars" reads as no period."""
+    (`harness.card_unit.unit_pattern`), so the year in "constant 2023 US
+    dollars" reads as no period: the unit offer's words where the unit can
+    change, else the served unit's (`served_unit`) with its currency by code;
+    `None` where the block states no unit."""
     change = card_unit_change(move.card, move.block)
-    return unit_pattern(change.offer.start, change.offer) if change is not None else None
+    if change is not None:
+        return unit_pattern(change.offer.start, change.offer)
+    served = served_unit(move.block)
+    return unit_pattern(served, None) if served is not None else None
 
 
 def _names_a_year(text: str, unit: str | None) -> bool:
@@ -621,8 +626,11 @@ def _renamed_places(title: str, move: ChangeMove) -> str | None:
 def _composed_title(block: Mapping[str, Any], card: UnitCard, period: str | None) -> str:
     """A title from `block`'s facts: what it measures (`concept_label`, else
     `measure_label`, else its shape's label), the places `card` shows, and
-    `period`, whole and last. Places that would take the title past
-    `_TITLE_CHARS` are listed as far as they fit, closing on "and N others"."""
+    `period`, whole and last, in at most `_TITLE_CHARS`. The places give way
+    before the subject does: listed as far as they fit, then counted ("12
+    places"), then left out, as they are when a place has no name
+    (`_places_words`). The subject is cut, at a word, only when it alone
+    leaves no room for the period."""
     resolved = block.get("resolved") or {}
     measure = (
         resolved.get("concept_label")
@@ -634,40 +642,58 @@ def _composed_title(block: Mapping[str, Any], card: UnitCard, period: str | None
     tail = f", {period}" if period else ""
     room = _TITLE_CHARS - len(tail)
     places = _places_words(card, block, room=room - len(subject) - 2)
-    if places and len(subject) + 2 + len(places) > room:
-        subject = _cut_words(subject, room - 2 - len(places))
-    head = f"{subject}, {places}" if places else _cut_words(subject, room)
+    head = f"{subject}, {places}" if places else _cut_words(subject, room) or subject[:room]
     return head + tail
 
 
-def _fitting(labels: list[str], room: int) -> str:
+def _fitting(labels: list[str], room: int) -> str | None:
     """`labels` as a reader lists them in at most `room` characters: every one
-    where they fit, else the first ones and "and N others", else "N places"."""
+    where they fit, else the first ones and "and N others"; `None` when not
+    even one fits."""
     whole = joined_words(labels)
-    if len(whole) <= room or len(labels) < 2:
+    if len(whole) <= room:
         return whole
     for kept in range(len(labels) - 1, 0, -1):
         rest = len(labels) - kept
         words = joined_words([*labels[:kept], f"{rest} other" + ("s" if rest > 1 else "")])
         if len(words) <= room:
             return words
-    return f"{len(labels)} places"
+    return None
 
 
-def _places_words(card: UnitCard, block: Mapping[str, Any], *, room: int = _TITLE_CHARS) -> str:
+def _places_words(
+    card: UnitCard, block: Mapping[str, Any], *, room: int = _TITLE_CHARS
+) -> str | None:
     """The places `card` shows as a title states them in at most `room`
-    characters (`_fitting`): "France to Kenya" for a flow from one party to
-    another, else every role's places in a list."""
+    characters: "France to Kenya" for a flow from one party to another, else
+    every role's places in a list, each list cut to what fits (`_fitting`);
+    where that does not fit, their count ("12 places"). `None` where even the
+    count does not fit, or where a place has no name, since a title never
+    shows a place by its ref."""
     labels = {**place_labels(block), **(card.labels or {})}
-    shown = {
-        role: [labels.get(ref, ref) for ref in refs]
-        for role, refs in chosen_places(card, block).items()
-        if refs
-    }
-    if set(shown) == {"origin", "destination"}:
-        origin = _fitting(shown["origin"], max((room - 4) // 2, 0))
-        return f"{origin} to {_fitting(shown['destination'], room - 4 - len(origin))}"
-    return _fitting([label for labels_ in shown.values() for label in labels_], room)
+    shown = {role: refs for role, refs in chosen_places(card, block).items() if refs}
+    if any(not labels.get(ref) for refs in shown.values() for ref in refs):
+        return None
+    named = {role: [labels[ref] for ref in refs] for role, refs in shown.items()}
+    words: str | None
+    whole_flow = (
+        f"{joined_words(named.get('origin', []))} to {joined_words(named.get('destination', []))}"
+    )
+    if set(named) == {"origin", "destination"} and len(whole_flow) <= room:
+        words = whole_flow
+    elif set(named) == {"origin", "destination"}:
+        origin = _fitting(named["origin"], max((room - 4) // 2, 0))
+        destination = (
+            _fitting(named["destination"], room - 4 - len(origin)) if origin is not None else None
+        )
+        words = f"{origin} to {destination}" if origin and destination else None
+    else:
+        words = _fitting([label for labels_ in named.values() for label in labels_], room)
+    if words is not None and len(words) <= room:
+        return words
+    count = sum(len(labels_) for labels_ in named.values())
+    counted = f"{count} place" + ("s" if count != 1 else "")
+    return counted if count and len(counted) <= room else None
 
 
 def _shown_labels(move: ChangeMove) -> set[str]:
@@ -1034,7 +1060,7 @@ def _swapped(
     card = card if card is not None and drawn is not None else drawn
     if card is not None:
         block = blocks.get(card.spec_id)
-        card = encoded(card, block, intent=intent)
+        card = encoded(card, block, intent=intent, component=component)
         created.unit_change = card_unit_change(card, block)
         created.card_changes = card_changes(
             card, block, fact_summary=component.get("fact_summary"), places=places

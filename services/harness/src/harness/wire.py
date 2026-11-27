@@ -969,8 +969,9 @@ class WindowOffer(_WireModel):
     (`first_year`, `last_year`), with the years between those two that hold
     no data (`missing_years`, absent when none is missing or the source
     states none). `single` is true on a card that shows one value per series,
-    such as a key number, whose years change one at a time: a change names
-    one year as both bounds. Absent on every other card."""
+    such as a key number, whose years change one at a time: `start_year` and
+    `end_year` both name the one year it draws, and a change names one year
+    as both bounds. Absent on every other card."""
 
     start_year: int
     end_year: int
@@ -978,6 +979,12 @@ class WindowOffer(_WireModel):
     last_year: int
     missing_years: list[int] | None = None
     single: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def _a_single_offer_names_one_year(self) -> WindowOffer:
+        if self.single and self.start_year != self.end_year:
+            raise ValueError("a single window names the one year the card draws")
+        return self
 
 
 class PlaceOption(_WireModel):

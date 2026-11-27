@@ -654,6 +654,7 @@ async def _card_move(
     *,
     places: PlaceOptionsReader | None,
     listed: RolePlaces | None = None,
+    places_gated: bool = False,
 ) -> UnitMove | ChangeMove | JSONResponse | None:
     """The card change `body` asks of `conversation`, `None` when it asks none,
     or its HTTP refusal. A unit change (`harness.card_unit.unit_move`) is
@@ -668,10 +669,15 @@ async def _card_move(
     when an earlier check read them, and a door that cannot be read refuses
     it 503 `transient_unavailable`, `place_options_unavailable`, to retry;
     an apis that serves no places door refuses it 503 `capability_unavailable`,
-    as `/places` does. `detail` is copy the client shows."""
+    as `/places` does, and so is any change of places while `places_gated`
+    says the deployment learnt apis serves none and stopped the offers
+    (`harness.place_options.places_offered`). `detail` is copy the client
+    shows."""
     if body.apply_unit is not None:
         move: UnitMove | ChangeMove | tuple[str, str] = unit_move(conversation, body.apply_unit)
     elif body.apply_change is not None:
+        if places_gated and isinstance(body.apply_change.change, PlacesChange):
+            return _places_not_served_response()
         move = await change_move(conversation, body.apply_change, reader=places, listed=listed)
     else:
         return None
@@ -1822,6 +1828,12 @@ def _offering(studio: StudioRunner) -> PlaceOptionsReader | None:
     return reader if places_offered(reader) else None
 
 
+def _places_gated(studio: StudioRunner) -> bool:
+    """Whether the deployment offers places but has stopped the offers, having
+    learnt apis serves no places door (`places_offered`)."""
+    return studio.place_options is not None and not places_offered(studio.place_options)
+
+
 def _places_not_served_response() -> JSONResponse:
     """The 503 `capability_unavailable` of a deployment whose cards offer no
     change of places, by its setting or because apis serves no options door."""
@@ -2691,7 +2703,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if isinstance(checked, JSONResponse):
                 hold.release()
                 return checked
-            moved = await _card_move(conversation, body, places=_offering(studio))
+            moved = await _card_move(
+                conversation, body, places=_offering(studio), places_gated=_places_gated(studio)
+            )
             if isinstance(moved, JSONResponse):
                 hold.release()
                 return moved
@@ -2824,6 +2838,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                 body,
                 places=_offering(studio),
                 listed=moved.listed if isinstance(moved, ChangeMove) else None,
+                places_gated=_places_gated(studio),
             )
             if isinstance(moved, JSONResponse):
                 await _release_claim(

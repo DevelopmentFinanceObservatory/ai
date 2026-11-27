@@ -2406,7 +2406,11 @@ class _Translator:
             return None
         block = blocks.get(card.spec_id)
         card = encoded(
-            card, block, intent=intent, cut=str(component.get("component_id")) in self._cut
+            card,
+            block,
+            intent=intent,
+            cut=str(component.get("component_id")) in self._cut,
+            component=component,
         )
         created.unit_change = card_unit_change(card, block)
         created.card_changes = card_changes(

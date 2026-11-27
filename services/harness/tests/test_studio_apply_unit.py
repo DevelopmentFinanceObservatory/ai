@@ -90,6 +90,9 @@ def _component(
     )
     component["fact_summary"]["component_id"] = component_id
     component["fact_summary"]["window"] = {"start": str(window[0]), "end": str(window[1])}
+    # A stat card draws the last year of its window, as the platform's
+    # assembler draws one.
+    component["payload"]["component"]["period"] = str(window[1])
     component["provenance"]["inputs"] = [dict(ref)]
     return component
 
@@ -100,6 +103,7 @@ def _written(
     title: str,
     window: tuple[int, int] = (2015, 2023),
     identity: Mapping[str, Any] | None = None,
+    entity_labels: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """A `write_component` outcome for that card, with the lineage of the one
     `get_data` retrieval it draws, which summed the spec's StatVars and
@@ -108,6 +112,7 @@ def _written(
     if identity is not None:
         definition["identity"] = dict(identity)
     manifest = {
+        **({"entity_labels": dict(entity_labels)} if entity_labels is not None else {}),
         "definition": definition,
         "content_version": ref["content_version"],
         "artifacts": [{"rendering": _SUMMED}],
@@ -1988,7 +1993,12 @@ _TOGO_IDENTITY = {
 }
 
 
-def _togo_app(pg_engine: AsyncEngine, identity: Mapping[str, Any]) -> Any:
+def _togo_app(
+    pg_engine: AsyncEngine,
+    identity: Mapping[str, Any],
+    labels: Mapping[str, str] | None = None,
+    title: str = "Aid to Togo",
+) -> Any:
     return _app(
         search_call("aid from France to Togo"),
         fetch_call(_SPEC, stat_vars="sum", scope={"entities": {"recipient": ["Togo"]}}),
@@ -1999,7 +2009,13 @@ def _togo_app(pg_engine: AsyncEngine, identity: Mapping[str, Any]) -> Any:
             [
                 {"outcome": "ok", "frame_refs": [_TOGO_REF], "summary": "fetched"},
                 _VIEW,
-                _written("cmp_01unit0001", _TOGO_REF, "Aid to Togo", identity=identity),
+                _written(
+                    "cmp_01unit0001",
+                    _TOGO_REF,
+                    title,
+                    identity=identity,
+                    entity_labels={"country/TGO": "Togo"} if labels is None else labels,
+                ),
             ]
         ),
         tool_surface=_Search(),  # ty: ignore[invalid-argument-type] -- the one tool a change reads
@@ -2028,8 +2044,11 @@ async def test_a_card_fetched_by_spoken_names_offers_the_blocks_roles_and_refs(
 
     offered = _frame(first, "component.created")["card_changes"]
     assert offered["spec_id"] == _SPEC
-    chosen = {p["role"]: [o["id"] for o in p["chosen"]] for p in offered["places"]}
-    assert chosen == {"destination": ["country/TGO"], "origin": ["country/FRA"]}
+    chosen = {p["role"]: [(o["id"], o["label"]) for o in p["chosen"]] for p in offered["places"]}
+    assert chosen == {
+        "destination": [("country/TGO", "Togo")],
+        "origin": [("country/FRA", "France")],
+    }
     assert (read.status_code, places.asked[0]) == (200, "destination")
     (fetched,) = changer.fetched()
     assert fetched["scope"]["entities"] == {
@@ -2117,3 +2136,93 @@ async def test_a_card_cut_to_its_largest_members_offers_no_years(
     assert (refused.status_code, refused.json()["constraint_id"]) == (422, "change_not_offered")
     stored = app.state.studio.store.current(PRINCIPAL, CONVERSATION).components["cmp_01unit0001"]
     assert stored["unit_card"]["cut"] is True
+
+
+async def test_a_place_with_no_name_is_never_shown_by_its_ref(pg_engine: AsyncEngine) -> None:
+    """A card whose retrieval named no label for Togo offers no change of
+    Togo's role, and a title built after a change of its other role names
+    no ref: it leaves the places out."""
+    app = _togo_app(pg_engine, _TOGO_IDENTITY, labels={}, title="Aid in 2023 to Togo")
+    app.state.studio.place_options = _Places()
+    changer = _Changer()
+    changer.title = "Aid in 2023 to Togo"
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Togo"))
+        app.state.studio.recorder._executor = changer
+        germany = {"kind": "places", "role": "origin", "entities": ["country/DEU"]}
+        await _stream(client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, germany))
+
+    offered = _frame(first, "component.created")["card_changes"]
+    assert [p["role"] for p in offered["places"]] == ["origin"]
+    assert all(o["label"] != o["id"] for p in offered["places"] for o in p["chosen"])
+    write = next(call for call in changer.calls if call["tool"] == "write_component")
+    assert "country/" not in write["args"]["intent"]["title"]
+    assert write["args"]["intent"]["title"].endswith(", 2015 to 2023")
+
+
+async def test_a_places_change_while_the_offers_are_stopped_is_capability_unavailable(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Once a places read learnt apis serves no door, a change of places
+    answers what the places read does, before reading the card's offer."""
+    app = _changes_app(pg_engine)
+    app.state.studio.place_options = ApisPlaceOptions(
+        base_url="http://apis.test",
+        client=_NoDoorApis(),  # ty: ignore[invalid-argument-type] -- the two reads the reader makes
+    )
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        read = await client.get("/api/studio/places", params=_places_query(), headers=AUTH)
+        changed = await client.post(
+            "/api/studio/turn", json=_change_body("cmp_01unit0001", _SPEC, _UGANDA), headers=AUTH
+        )
+
+    assert [(r.status_code, r.json()["error"]) for r in (read, changed)] == [
+        (503, "capability_unavailable"),
+        (503, "capability_unavailable"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("origin", "destination"),
+    [
+        (
+            "International Bank for Reconstruction and Development",
+            "Democratic Republic of the Congo",
+        ),
+        ("I" * 70, "D" * 70),
+    ],
+    ids=["two-long-labels", "longer-still"],
+)
+def test_long_places_give_way_before_the_subject(origin: str, destination: str) -> None:
+    """The subject stays whole and the title opens on it: the flow falls back
+    to a count of its places."""
+    block = copy.deepcopy(_ENVELOPE["parts"][0]["spec"])
+    block["resolved"]["concept_label"] = "Official development assistance"
+    card = UnitCard(
+        spec_id=_SPEC,
+        args={},
+        scope={"entities": {"origin": ["dcid:org/IBRD"], "destination": ["dcid:country/COD"]}},
+        labels={"org/IBRD": origin, "country/COD": destination},
+    )
+
+    title = _composed_title(block, card, "2010 to 2024")
+
+    assert title == "Official development assistance, 2 places, 2010 to 2024"
+
+
+def test_unit_words_keep_their_base_year_on_a_card_whose_unit_cannot_change() -> None:
+    move = _move("x", WindowChange(kind="window", start_year=2010, end_year=2024))
+    block = copy.deepcopy(move.block)
+    block["resolved"].pop("unit_conversion", None)
+    block["resolved"].pop("price_bases", None)
+    block["definition"]["identity"]["facets"] = {
+        "unit": {"request": {"currency": "USD", "prices": "constant", "base_year": 2023}}
+    }
+    move = replace(move, block=block)
+    _, rewrite = _redrawn_intent({"type": "line_chart", "title": "t"}, _REF, move)
+
+    assert _changed_title("Aid in constant 2023 prices, 2015 to 2023", move) == (
+        "Aid in constant 2023 prices, 2010 to 2024"
+    )
+    assert rewrite("y_label", "USD, constant 2023 prices") == "USD, constant 2023 prices"

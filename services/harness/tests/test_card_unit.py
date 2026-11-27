@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,7 +25,9 @@ from harness.wire import (
     UnitCurrency,
     UnitOffer,
     UnitPrices,
+    WindowOffer,
 )
+from pydantic import ValidationError
 
 _DEFAULT = {"format": "parquet", "bundle": False, "layout": "frame"}
 _SPEC = "spec_" + "b" * 32
@@ -561,3 +565,71 @@ def test_a_role_beside_one_drawing_several_series_keeps_one_place(
     intent = {"type": "line_chart", "select": select}
 
     assert card_unit.takes_several(intent, ["country/KEN"], others) is several
+
+
+def _france_kenya_block() -> dict[str, Any]:
+    envelope = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "data-mcp"
+            / "tests"
+            / "fixtures"
+            / "resolve_aid_france_kenya.json"
+        ).read_text()
+    )
+    return envelope["parts"][0]["spec"]
+
+
+_FETCHED_2016_2024 = {"window": {"start": "2016", "end": "2024"}}
+
+
+@pytest.mark.parametrize(
+    ("intent", "drawn", "window"),
+    [
+        (
+            {"type": "stat_card", "select": {"stat_var": "dcid:Aid"}},
+            {"type": "stat_card", "period": "2023"},
+            (2023, 2023, True),
+        ),
+        (
+            {"type": "bar_chart", "select": {"destination": ["country/KEN", "country/UGA"]}},
+            {"type": "bar_chart", "category_axis": {"mode": "entity", "period": "2021"}},
+            (2021, 2021, True),
+        ),
+        ({"type": "stat_card", "select": {"stat_var": "dcid:Aid"}}, {"type": "stat_card"}, None),
+        (
+            {"type": "line_chart", "select": {"stat_var": "dcid:Aid"}},
+            {"type": "line_chart"},
+            (2016, 2024, None),
+        ),
+    ],
+    ids=["key-number", "bar-per-member", "key-number-period-unread", "line-chart"],
+)
+def test_a_card_showing_one_value_offers_the_year_it_draws(
+    intent: dict[str, Any], drawn: dict[str, Any], window: tuple[int, int, bool | None] | None
+) -> None:
+    """Fetched over 2016 to 2024, a card showing one value per series draws
+    one year, which its offer names as both bounds, read off the drawn
+    payload, since the platform's fact summary states no window for it; one
+    whose drawn year cannot be read offers no years. Other cards offer the
+    years their fact summary states."""
+    block = _france_kenya_block()
+    card = card_unit.encoded(
+        card_unit.UnitCard(spec_id=block["spec_id"], args={}),
+        block,
+        intent=intent,
+        component={"payload": {"component": drawn}},
+    )
+
+    offer = card_unit.card_changes(card, block, fact_summary=_FETCHED_2016_2024)
+
+    offered = offer.window if offer is not None else None
+    got = (offered.start_year, offered.end_year, offered.single) if offered else None
+    assert got == window
+    if offered is not None and offered.single:
+        assert offered.start_year == offered.end_year == card.drawn_year
+
+
+def test_a_single_window_naming_a_range_is_refused_on_the_wire() -> None:
+    with pytest.raises(ValidationError):
+        WindowOffer(start_year=2016, end_year=2024, first_year=1970, last_year=2024, single=True)

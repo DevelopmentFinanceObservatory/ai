@@ -86,9 +86,10 @@ class UnitCard:
     with the label of each place a change of places set (`labels`, by ref),
     which the spec's Search block does not name.
 
-    `single`, `roles` and `cut` are the card's encoding, fixed when the card
-    is drawn (`encoded`): whether it shows one value per series, so its years
-    change one at a time; the roles whose places it can change, each with
+    `single`, `drawn_year`, `roles` and `cut` are the card's encoding, fixed
+    when the card is drawn (`encoded`): whether it shows one value per
+    series, so its years change one at a time, and the one year such a card
+    draws, as the platform's drawn payload states it; the roles whose places it can change, each with
     whether it takes several; and whether its members are the largest ones
     `make_charts` ranked at one period, so its years cannot change, since
     another year has other largest members. A card stored before they were
@@ -100,6 +101,7 @@ class UnitCard:
     scope: dict[str, Any] | None = None
     labels: dict[str, str] | None = None
     single: bool = False
+    drawn_year: int | None = None
     roles: dict[str, bool] | None = None
     cut: bool = False
 
@@ -111,6 +113,8 @@ class UnitCard:
             stored["labels"] = dict(self.labels)
         if self.single:
             stored["single"] = True
+        if self.drawn_year is not None:
+            stored["drawn_year"] = self.drawn_year
         if self.roles is not None:
             stored["roles"] = dict(self.roles)
         if self.cut:
@@ -134,6 +138,7 @@ class UnitCard:
             if isinstance(labels, Mapping) and labels
             else None,
             single=stored.get("single") is True,
+            drawn_year=stored["drawn_year"] if type(stored.get("drawn_year")) is int else None,
             cut=stored.get("cut") is True,
             roles={str(k): v is True for k, v in roles.items()}
             if isinstance(roles, Mapping)
@@ -211,19 +216,43 @@ def takes_several(
     return listed <= naming
 
 
+def drawn_year(component: Mapping[str, Any] | None) -> int | None:
+    """The one year a card showing one value per series draws, as the
+    platform's drawn payload states it: a stat card's `period`, and the
+    `period` of a bar chart drawn one bar per member (`category_axis.mode`
+    `entity`). `None` for any other card, or a period that is no year. The
+    card's fact summary states no window for such a card."""
+    drawn = ((component or {}).get("payload") or {}).get("component") or {}
+    if not isinstance(drawn, Mapping):
+        return None
+    if drawn.get("type") == "stat_card":
+        return _year(drawn.get("period"))
+    axis = drawn.get("category_axis")
+    if (
+        drawn.get("type") == "bar_chart"
+        and isinstance(axis, Mapping)
+        and axis.get("mode") == "entity"
+    ):
+        return _year(axis.get("period"))
+    return None
+
+
 def encoded(
     card: UnitCard,
     block: Mapping[str, Any] | None,
     *,
     intent: Mapping[str, Any] | None,
     cut: bool | None = None,
+    component: Mapping[str, Any] | None = None,
 ) -> UnitCard:
     """`card` with its encoding as the card drawn from `intent` fixes it:
     `single` when it shows one value per series (`one_value`), and as `roles`
     each role whose places it shows, the ones `card` already kept, else
     those `block` and its scope bind, each marked with whether it can show
     several places (`takes_several`). `cut` says whether `make_charts` cut
-    the card to its largest members; `None` keeps the card's own."""
+    the card to its largest members; `None` keeps the card's own. A card
+    showing one value per series reads the year it draws off `component`,
+    the written card (`drawn_year`), else keeps its own."""
     shown = chosen_places(card, block) if block is not None else {}
     if card.roles is not None:
         bound: list[str] = list(card.roles)
@@ -237,8 +266,14 @@ def encoded(
         )
         for role in bound
     }
+    single = one_value(intent)
+    year = (drawn_year(component) if component is not None else card.drawn_year) if single else None
     return replace(
-        card, single=one_value(intent), roles=roles, cut=card.cut if cut is None else cut
+        card,
+        single=single,
+        drawn_year=year,
+        roles=roles,
+        cut=card.cut if cut is None else cut,
     )
 
 
@@ -310,7 +345,8 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
     hold one whose identity the served definition's matches outside its
     places and window: the card reads that block's spec with the places and
     window the served definition names as its scope (`_scope_over`), the
-    places as Search resolved them, under the block's own roles. The served
+    places as Search resolved them, under the block's own roles, labelled by
+    the names the retrieval resolved them by (`get_data`'s `entity_labels`). The served
     identity is the one source, since the model's `get_data` arguments name
     places as spoken, under its own role names, and may name facets the
     scope cannot carry; a served identity that differs from every block's in
@@ -335,10 +371,22 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
     if blocks is None or spec_id in blocks:
         return UnitCard(spec_id=spec_id, args=args)
     served_identity = (member.manifest.get("definition") or {}).get("identity")
+    named = member.manifest.get("entity_labels")
+    named = named if isinstance(named, Mapping) else {}
     for base_id, block in blocks.items():
         scope = _scope_over((block.get("definition") or {}).get("identity"), served_identity)
         if scope:
-            return UnitCard(spec_id=base_id, args=args, scope=scope)
+            scoped = [
+                str(ref).removeprefix("dcid:")
+                for refs in (scope.get("entities") or {}).values()
+                for ref in refs
+            ]
+            labels = {
+                ref: str(named[ref])
+                for ref in scoped
+                if isinstance(named.get(ref), str) and named[ref]
+            }
+            return UnitCard(spec_id=base_id, args=args, scope=scope, labels=labels or None)
     return UnitCard(spec_id=spec_id, args=args)
 
 
@@ -436,7 +484,11 @@ def card_changes(
     `places` holds each role whose places the card names."""
     if block is None:
         return None
-    window = None if card.cut else _window_offer(block, fact_summary, single=card.single)
+    window = (
+        None
+        if card.cut
+        else _window_offer(block, fact_summary, single=card.single, drawn=card.drawn_year)
+    )
     roles = _places_offers(card, block) if places else []
     if window is None and not roles:
         return None
@@ -473,10 +525,21 @@ def _years_held(block: Mapping[str, Any]) -> tuple[int, int, list[int]] | None:
 
 
 def _window_offer(
-    block: Mapping[str, Any], fact_summary: Mapping[str, Any] | None, *, single: bool
+    block: Mapping[str, Any],
+    fact_summary: Mapping[str, Any] | None,
+    *,
+    single: bool,
+    drawn: int | None = None,
 ) -> WindowOffer | None:
-    drawn = (fact_summary or {}).get("window") or {}
-    start, end = _year(drawn.get("start")), _year(drawn.get("end"))
+    """The years a card can change to. A card showing one value per series
+    (`single`) offers the year it draws (`drawn`) as both bounds, and no
+    window when that year is unknown; any other card offers the years its
+    `fact_summary` states it draws."""
+    if single:
+        start = end = drawn
+    else:
+        window = (fact_summary or {}).get("window") or {}
+        start, end = _year(window.get("start")), _year(window.get("end"))
     held = _years_held(block)
     if start is None or end is None or end < start or held is None:
         return None
@@ -498,7 +561,8 @@ def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer
     """One offer per role of the card's encoding (`UnitCard.roles`), taking
     several places where it says so, whatever number it shows now; a card
     stored with no encoding offers each role it shows places for, taking
-    several where it shows several."""
+    several where it shows several. A role showing a place neither the
+    block nor the card's labels name offers none."""
     labels = {**place_labels(block), **(card.labels or {})}
     shown = chosen_places(card, block)
     roles = card.roles if card.roles is not None else {r: len(v) > 1 for r, v in shown.items()}
@@ -514,14 +578,16 @@ def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer
             roles.items(), key=lambda kv: listed.index(kv[0]) if kv[0] in listed else len(listed)
         )
     )
+    # A place with no name is never shown by its ref: its role offers no
+    # change.
     return [
         PlacesOffer(
             role=role,
             multiple=several,
-            chosen=[PlaceOption(id=ref, label=labels.get(ref, ref)) for ref in shown[role]],
+            chosen=[PlaceOption(id=ref, label=labels[ref]) for ref in shown[role]],
         )
         for role, several in roles.items()
-        if shown.get(role)
+        if shown.get(role) and all(labels.get(ref) for ref in shown[role])
     ]
 
 
@@ -680,7 +746,7 @@ PLACES_NOT_SERVED = "places_not_served"
 
 
 # The `detail` of a change refused because Search's places door could not be read.
-PLACES_UNREAD_NOTE = "The places this card can show cannot be read now; try again."
+PLACES_UNREAD_NOTE = "The places this card can show cannot be read now."
 
 
 def changeable(
@@ -861,12 +927,12 @@ def stored_reading(
     return None
 
 
-def unit_pattern(unit: UnitChoice, offer: UnitOffer) -> str:
+def unit_pattern(unit: UnitChoice, offer: UnitOffer | None) -> str:
     """The pattern, read case-insensitively, of each phrase that names `unit`
     (`retitled` lists them): the currency by its code or by the name `offer`
-    gives it, after an optional price basis; a price basis followed by
+    gives it (by its code alone with no offer), after an optional price basis; a price basis followed by
     "prices"; or, for a constant unit, "constant <base year>" alone."""
-    names = {currency.code: currency.name for currency in offer.currencies}
+    names = {currency.code: currency.name for currency in offer.currencies} if offer else {}
     name = names.get(unit.currency)
     if unit.prices is UnitPrices.CONSTANT:
         year = re.escape(str(unit.base_year))
