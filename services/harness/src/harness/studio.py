@@ -1190,6 +1190,7 @@ class _SegmentWork:
         approving: PlanProposed | None = None,
         restored: Sequence[PlanApproved] = (),
         replay: bool = False,
+        hold_removals: bool = False,
     ) -> None:
         self._runner = runner
         self._principal = principal
@@ -1206,6 +1207,7 @@ class _SegmentWork:
             approving=approving,
             restored=restored,
             places=places_offered(runner.place_options),
+            hold_removals=hold_removals,
         )
         # The drive's half of the translation: it marks each event with the
         # calls recorded before it, and reads nothing else.
@@ -1299,9 +1301,9 @@ class _SegmentWork:
         return outcome, []
 
     def owed(self) -> list[BaseModel]:
-        """The canvas update of a removal no frame reported, held by the
-        translator or marked on the conversation
-        (`_Translator.release_removal`)."""
+        """On a stream with `hold_removals`, the canvas update of a removal
+        no frame reported, held by the translator or marked on the
+        conversation; none otherwise (`_Translator.release_removal`)."""
         return [*self._translator.release_removal()]
 
     def fatal(self, error: BaseException) -> ErrorFrame:
@@ -2488,6 +2490,7 @@ async def _replay_pause(
     hold: LockHold,
     settings: Settings,
     turn: ConversationState | None,
+    hold_removals: bool,
     stale: JSONResponse | None = None,
 ) -> Response:
     """Stream the later pause the paused `cursor` holds to a retry of the
@@ -2529,6 +2532,7 @@ async def _replay_pause(
             cursor=cursor,
             segment_id=segment_id,
             replay=True,
+            hold_removals=hold_removals,
         ),
         owners=studio.owners,
         store=studio.store,
@@ -3039,6 +3043,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     conversation=conversation,
                     cursor=cursor,
                     segment_id=segment_id,
+                    hold_removals=body.hold_removals,
                 ),
                 owners=studio.owners,
                 store=studio.store,
@@ -3516,6 +3521,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     segment_id=segment_id,
                     hold=hold,
                     settings=settings,
+                    hold_removals=body.hold_removals,
                     turn=claiming,
                 )
             pending = work.pending[body.interrupt_id]
@@ -3725,6 +3731,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                     approving=None if taken is not None else approving,
                     restored=() if taken is None else (taken,),
+                    hold_removals=body.hold_removals,
                 ),
                 owners=studio.owners,
                 store=studio.store,
@@ -3966,6 +3973,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     cursor=claimed,
                     segment_id=segment_id,
                     hold=hold,
+                    hold_removals=body.hold_removals,
                     settings=settings,
                     turn=claiming,
                     stale=_resume_conflict("the conversation changed before this resume was saved"),
@@ -4017,6 +4025,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     segment_id=segment_id,
                     approving=None if taken is not None else approving,
                     restored=_turn_approvals(conversation, taken),
+                    hold_removals=body.hold_removals,
                 ),
                 owners=studio.owners,
                 store=studio.store,

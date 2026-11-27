@@ -39,7 +39,7 @@ from harness.scripted import (
 from harness.scripted_plan import scripted_fetch_series_stats
 from harness.settings import Settings
 from harness.studio import StudioRunner, create_studio_router
-from harness.studio_state import make_recall_part
+from harness.studio_state import make_recall_part, make_remove_cards
 from harness.studio_store import StudioStore
 from harness.turn.store import FrameLineage, TurnStore
 from harness.turn_budget import TurnBudget, current_turn_budget
@@ -123,7 +123,8 @@ def orchestrator_app(
 ) -> tuple[FastAPI, ScriptLlm]:
     """The studio routes on the turn graph, and the agent's model client.
 
-    Wired as `harness.server` wires the studio: the agent's tools and the
+    Wired as `harness.server` wires the studio: the agent's tools, its
+    `remove_cards` on the conversation store included, and the
     `execute` node run through the studio's recorder, the planner hands its
     failures back to the agent, and turns stream over SSE. The model
     answers from `script`, then "done" in plain text.
@@ -169,6 +170,7 @@ def orchestrator_app(
             surface=surface_recorder,
             definition_surface=definition_surface,
             recall_part=make_recall_part(store),
+            remove_cards=make_remove_cards(store),
             stated_scope=stated_scope,
         )
         return studio_graph(

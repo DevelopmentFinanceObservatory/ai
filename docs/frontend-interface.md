@@ -853,18 +853,7 @@ canvas at once. With `auto_add: false`, cards stream as `component.created`
 but do not join the canvas. Add one later with the `add` operation. Use
 this for the Auto-add toggle and the "Added" chip.
 
-**Removal by the agent**: when the user asks in chat to remove cards or
-clear the canvas, the agent takes the blocks off, and a
-`composition.updated` frame carries the manifest without them. The removed
-components stay readable. A model turn's manifest can therefore shrink or
-be empty. When the agent removes cards to draw others in their place, the
-`composition.updated` without them comes right after the line that draws
-the new cards, so the page can swap the old cards for placeholders in one
-step. If nothing is drawn, it comes when the next response ends, after
-any text that response streamed, or before the stream's last frame, an
-`error` included. A stream cut off because
-another server took the turn over also sends it first. Drop any manifest
-no newer than one you rendered.
+**Removal by the agent**: when the user asks in chat to remove cards or clear the canvas, the agent takes the blocks off, and a `composition.updated` frame carries the manifest without them. The removed components stay readable. A model turn's manifest can therefore shrink or be empty. By default the update comes as soon as the removal's answer is read, before the removal's line closes. Send `"hold_removals": true` on a `/turn`, `/interrupt` or `/resume` body to have it held instead: when the agent removes cards to draw others in their place, the update comes right after the line that draws the new cards, so the page can swap the old cards for placeholders in one step. If nothing is drawn, it comes when the next response ends, after any text that response streamed. The member is a boolean, `false` when absent, and holds for the one stream its request opens. With the member, a removal not yet reported comes before the stream's last frame, an `error` included, and a stream cut off because another server took the turn over also sends it first. Without it, a removal whose answer was never read comes on the turn's next stream instead, at its start, or held to its drawing line when that stream asks to hold. Each removal comes once. Drop any manifest no newer than one you rendered.
 
 **Cards on their way**: the `running` `activity.step` of a `make_charts`
 call carries `coming`, `[{placeholder_id, type, title}]`, one entry per

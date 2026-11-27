@@ -1816,8 +1816,12 @@ class _Translator:
         approving: PlanProposed | None = None,
         restored: Sequence[PlanApproved] = (),
         places: bool = False,
+        hold_removals: bool = False,
     ) -> None:
         self._conversation = conversation
+        # Whether the request asked to hold a removal's update until the next
+        # drawing line (`TurnRequest.hold_removals`).
+        self._hold_removals = hold_removals
         self._recorder = recorder
         self._surface_recorder = surface_recorder
         # Whether a card offers a change of the places its roles bind, which
@@ -1900,9 +1904,10 @@ class _Translator:
         # Whether a `remove_cards` changed the canvas and its
         # `composition.updated` is held, to go out beside the next drawing
         # line so the canvas never shows empty while the cards replacing the
-        # removed ones are drawn (`_release_removal`). One still held when the
-        # segment ends goes out before its ending frame, whatever that is. The
-        # stream's owner asks for it (`release_removal`).
+        # removed ones are drawn (`_release_removal`). Only a request with
+        # `hold_removals` holds one. One still held when the segment ends goes
+        # out before its ending frame, whatever that is. The stream's owner
+        # asks for it (`release_removal`).
         self._removal_held = False
 
     async def translate_recorded(self, event: SegmentEvent, marks: RecordMarks) -> list[Any]:
@@ -2339,11 +2344,15 @@ class _Translator:
             else {}
         )
         frames: list[Any] = self._close_starting() if records else []
-        # A removal changed the canvas as its tool ran. Its frame is held
-        # until the next response's drawing line (`_agent_response`), unless
-        # a card these records drew lands, before which it goes out.
+        # A removal changed the canvas as its tool ran. Its frame goes out
+        # here, ahead of these records' frames. With `hold_removals` it is
+        # held until the next response's drawing line (`_agent_response`),
+        # unless a card these records drew lands, before which it goes out.
         if self._conversation.take_unreported_removal():
-            self._removal_held = True
+            if self._hold_removals:
+                self._removal_held = True
+            else:
+                frames.extend(self._composition_update())
         if any(
             record.land and isinstance(record.result.get("component"), dict) for record in records
         ):
@@ -2573,14 +2582,21 @@ class _Translator:
         return self._composition_update()
 
     def release_removal(self) -> list[CompositionUpdated]:
-        """What the conversation still owes the stream as the segment ends:
+        """What a stream with `hold_removals` still owes as the segment ends:
         one `composition.updated` for every removal no frame has reported,
         the one this translator holds and one the conversation marked that no
         drain took yet (`ConversationState.take_unreported_removal`), as when
         the drive raised or its lease went before the removal's answer was
-        translated. Nothing is returned when neither is owed. The work's `owed`
-        hands it to the stream's owner (`harness.studio_stream.Work.owed`), and
-        taking it clears both, so no later stream of the turn sends it again."""
+        translated. Taking it clears both, so no later stream of the turn
+        sends it again. The work's `owed` hands it to the stream's owner
+        (`harness.studio_stream.Work.owed`).
+
+        A stream without `hold_removals` owes nothing. A removal whose answer
+        its drive never reached stays marked on the conversation, and the
+        next stream of the turn reports it at its first drain, held to that
+        stream's next drawing line when that stream holds removals."""
+        if not self._hold_removals:
+            return []
         if self._conversation.take_unreported_removal():
             self._removal_held = True
         return self._release_removal()

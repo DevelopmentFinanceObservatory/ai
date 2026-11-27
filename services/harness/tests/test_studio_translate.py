@@ -2415,8 +2415,9 @@ _DRAWING = _call("make_charts", {"charts": [{"frame": "f", "type": "stat_card", 
 
 
 async def _held_removal(engine: AsyncEngine) -> tuple[StudioStore, _Translator, list[Any]]:
-    """A translator whose agent removed `cmp_01` of two cards, and the frames
-    up to the answer of that removal, which hold its canvas update."""
+    """A translator for a request with `hold_removals` whose agent removed
+    `cmp_01` of two cards, and the frames up to the answer of that removal,
+    which hold its canvas update."""
     current_conversation_id.set("c1")
     store, conversation = await _stored_conversation(engine)
     for held in ("cmp_01", "cmp_02"):
@@ -2429,7 +2430,9 @@ async def _held_removal(engine: AsyncEngine) -> tuple[StudioStore, _Translator, 
             ),
         )
     translator = _Translator(
-        conversation=conversation, recorder=_RecordingExecutor(_dummy_executor, store=store)
+        conversation=conversation,
+        recorder=_RecordingExecutor(_dummy_executor, store=store),
+        hold_removals=True,
     )
     frames = await translated(translator, _call("remove_cards"))
     await store.mutate_composition(

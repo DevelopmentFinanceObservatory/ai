@@ -1194,6 +1194,13 @@ class TurnRequest(_WireModel):
     `turn_moved` when the conversation's latest turn is another, checked
     under the row lock every turn's claim takes, so of two pages sending the
     same follow-up after turn N at most one begins a turn.
+
+    `hold_removals` asks the stream to hold the `composition.updated` of a
+    card removal until the next `make_charts` line, or until the response
+    or the segment ends when nothing is drawn. Absent or false, the update
+    goes out as the removal's answer is translated, ahead of the removal's
+    closing line. It applies to the stream this request opens, and
+    `InterruptResponse` and `ResumeRequest` carry it the same way.
     """
 
     kind: Literal["turn.request"]
@@ -1219,6 +1226,7 @@ class TurnRequest(_WireModel):
         BeforeValidator(_known_prompt_source),
         WithJsonSchema({"enum": [*(source.value for source in PromptSource), None]}),
     ] = None
+    hold_removals: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
@@ -1382,6 +1390,8 @@ class InterruptResponse(_WireModel):
     # A `switch` of a row offering a unit: the unit the user picked.
     unit: UnitChoice | None = None
     client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
+    # Whether the stream holds a removal's canvas update (`TurnRequest`).
+    hold_removals: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def _switch_members_come_with_switch(self) -> InterruptResponse:
@@ -1549,6 +1559,8 @@ class ResumeRequest(_WireModel):
     schema_version: Literal[1]
     conversation_id: str
     turn_index: int = Field(ge=1)
+    # Whether the stream holds a removal's canvas update (`TurnRequest`).
+    hold_removals: bool = Field(default=False, strict=True)
 
 
 StudioRequest = Annotated[

@@ -347,6 +347,38 @@ def test_a_malformed_answer_is_refused(answer: dict[str, Any]) -> None:
         STUDIO_REQUEST_ADAPTER.validate_python(raw)
 
 
+_ABSENT = object()
+_STREAMING_REQUESTS = [
+    "request-01-turn.json",
+    "request-03-interrupt-approve.json",
+    "request-14-resume.json",
+]
+
+
+@pytest.mark.parametrize("name", _STREAMING_REQUESTS)
+@pytest.mark.parametrize(
+    ("value", "held"),
+    [(_ABSENT, False), (False, False), (True, True), ("true", None), (1, None), (None, None)],
+    ids=["absent", "false", "true", "string", "number", "null"],
+)
+def test_a_streaming_request_takes_hold_removals_only_as_a_boolean(
+    name: str, value: object, held: bool | None
+) -> None:
+    """`hold_removals` on a turn, an interrupt answer and a resume: absent
+    is false, a boolean is taken, and anything else is refused."""
+    raw = _load(name)
+    if value is not _ABSENT:
+        raw["hold_removals"] = value
+
+    if held is None:
+        with pytest.raises(ValidationError):
+            STUDIO_REQUEST_ADAPTER.validate_json(json.dumps(raw))
+        return
+    request = STUDIO_REQUEST_ADAPTER.validate_json(json.dumps(raw))
+    assert isinstance(request, TurnRequest | InterruptResponse | ResumeRequest)
+    assert request.hold_removals is held
+
+
 @pytest.mark.parametrize("turn_index", [0, 2**31], ids=["zero", "past-postgres-int"])
 def test_a_cancel_naming_a_turn_out_of_range_is_refused(turn_index: int) -> None:
     raw = {**_load("request-21-cancel-turn.json"), "turn_index": turn_index}

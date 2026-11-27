@@ -1007,8 +1007,10 @@ class _RemovingSegment(_SegmentWork):
     `fatal` as served, over a conversation whose agent removes `cmp_01` of
     two cards. Its drive stands in for the turn loop: it emits the
     removal's call, removes the card once the call is translated, emits the
-    call's answer when `answered`, and then raises `raises`, ends `ends`, or
-    runs until it is cancelled."""
+    call's answer when `answered`, a response drawing a chart when `draws`,
+    and then raises `raises`, ends `ends`, or runs until it is cancelled.
+    With `calls` false it makes no removal call and goes straight to the
+    drawing. `hold` is the request's `hold_removals`, left out when `None`."""
 
     def __init__(
         self,
@@ -1018,6 +1020,9 @@ class _RemovingSegment(_SegmentWork):
         answered: bool = True,
         raises: BaseException | None = None,
         ends: Outcome | None = None,
+        draws: bool = False,
+        calls: bool = True,
+        hold: bool | None = None,
     ) -> None:
         runner = SimpleNamespace(
             recorder=_RecordingExecutor(_never_called, store=unconnected_store()),
@@ -1031,7 +1036,10 @@ class _RemovingSegment(_SegmentWork):
             conversation=conversation,
             cursor=cast(Any, self.cursor),
             segment_id=SEGMENT,
+            **({} if hold is None else {"hold_removals": hold}),
         )
+        self._draws = draws
+        self._calls = calls
         self._remove = remove
         self._answered = answered
         self._raises = raises
@@ -1043,18 +1051,23 @@ class _RemovingSegment(_SegmentWork):
         def recorded(event: Any) -> None:
             emit(self._marks.recorded(event), key=event_key(event))
 
-        call = types.FunctionCall(id="r", name="remove_cards", args={})
-        recorded(ModelResponded(parts=(types.Part(function_call=call),)))
-        # The call runs once its response is translated, as the agent's does.
-        await self._responded.wait()
-        if self._remove:
-            remove_cards(self._conversation, ["cmp_01"], all_cards=False)
+        if self._calls:
+            call = types.FunctionCall(id="r", name="remove_cards", args={})
+            recorded(ModelResponded(parts=(types.Part(function_call=call),)))
+            # The call runs once its response is translated, as the agent's does.
+            await self._responded.wait()
+            if self._remove:
+                remove_cards(self._conversation, ["cmp_01"], all_cards=False)
         self.removed.set()
-        if self._answered:
+        if self._calls and self._answered:
             answer = types.FunctionResponse(
                 id="r", name="remove_cards", response={"removed": ["cmp_01"]}
             )
             recorded(ToolsAnswered(answers=(answer,), state={}))
+        if self._draws:
+            charts = {"charts": [{"frame": "f", "type": "stat_card", "title": "Aid"}]}
+            drawing = types.FunctionCall(id="m", name="make_charts", args=charts)
+            recorded(ModelResponded(parts=(types.Part(function_call=drawing),)))
         if self._raises is not None:
             raise self._raises
         if self._ends is not None:
@@ -1111,21 +1124,26 @@ async def test_a_removal_goes_out_before_the_stream_ends_however_it_ends(
     raises: BaseException | None,
     ends: Outcome | None,
 ) -> None:
-    """The drive raises, its turn is abandoned, or another instance takes its
-    lease, after the agent removed a card, whether or not the removal's
-    answer was translated. The stream sends the canvas without the card
-    once, then the `error` frame. With nothing removed, it sends the error
-    alone."""
+    """With `hold_removals`, the drive raises, its turn is abandoned, or
+    another instance takes its lease, after the agent removed a card, whether
+    or not the removal's answer was translated. The stream sends the canvas
+    without the card once, after the removal's line closed, then the `error`
+    frame. With nothing removed, it sends the error alone."""
     current_conversation_id.set(CONVERSATION)
     conversation = _two_cards()
     work = _RemovingSegment(
-        conversation, remove=remove, answered=answered, raises=raises, ends=ends
+        conversation, remove=remove, answered=answered, raises=raises, ends=ends, hold=True
     )
 
     frames = await _owned(cast(Any, work), conversation, _LandingStore())
 
     events = [f["event"] for f in frames if f["event"] != "activity.step"]
     assert events == (["composition.updated", "error"] if remove else ["error"])
+    if remove and answered:
+        # Held through the removal's answer, which the default sends ahead of.
+        assert _order(frames).index("composition.updated") > _order(frames).index(
+            "remove_cards:complete"
+        )
     if remove:
         (update,) = [f for f in frames if f["event"] == "composition.updated"]
         assert [b["component_id"] for b in update["manifest"]["blocks"]] == ["cmp_02"]
@@ -1140,7 +1158,7 @@ async def test_an_owner_that_fails_still_sends_the_removal_before_its_transient_
     owner. The stream sends the removal before the transient frame."""
     current_conversation_id.set(CONVERSATION)
     conversation = _two_cards()
-    work = _RemovingSegment(conversation, answered=False, raises=_RAISED)
+    work = _RemovingSegment(conversation, answered=False, raises=_RAISED, hold=True)
 
     def broken(conversation: ConversationState, error: Exception) -> ErrorFrame:
         raise RuntimeError("the fatal frame could not be built")
@@ -1154,17 +1172,108 @@ async def test_an_owner_that_fails_still_sends_the_removal_before_its_transient_
     assert frames[-1]["error"]["error"] == "transient_unavailable"
 
 
-@pytest.mark.parametrize("answered", [True, False], ids=["answered", "unanswered"])
-async def test_a_client_that_leaves_leaves_no_removal_for_a_later_stream(
-    spans: Spans, answered: bool
+def _order(frames: list[dict[str, Any]]) -> list[str]:
+    """The removal's and the drawing's lines, canvas updates and the error,
+    in stream order."""
+    return [
+        f"{f.get('tool')}:{f['status']}" if f["event"] == "activity.step" else f["event"]
+        for f in frames
+        if f["event"] != "activity.step" or f.get("tool") in {"remove_cards", "make_charts"}
+    ]
+
+
+_BASE_ORDER = [
+    "remove_cards:running",
+    "composition.updated",
+    "remove_cards:complete",
+    "make_charts:running",
+    "make_charts:failed",
+    "error",
+]
+_HELD_ORDER = [
+    "remove_cards:running",
+    "remove_cards:complete",
+    "make_charts:running",
+    "composition.updated",
+    "make_charts:failed",
+    "error",
+]
+
+
+@pytest.mark.parametrize(
+    ("hold", "answered", "order", "left_marked"),
+    [
+        (None, True, _BASE_ORDER, False),
+        (False, True, _BASE_ORDER, False),
+        (True, True, _HELD_ORDER, False),
+        (None, False, ["remove_cards:running", "remove_cards:failed", "error"], True),
+    ],
+    ids=["absent", "false", "true", "absent-raises-before-the-answer"],
+)
+async def test_a_removal_then_a_drawing_streams_in_the_order_the_request_asks(
+    spans: Spans, hold: bool | None, answered: bool, order: list[str], left_marked: bool
 ) -> None:
-    """The client leaves after the agent removed a card, before or after the
-    removal's answer was translated. The owner takes what the work owes as
-    the segment ends, so neither the translator nor the conversation keeps
-    the removal for a later stream of the turn."""
+    """A turn removes a card, then draws one. Without `hold_removals` the
+    canvas update goes out as the removal's answer is drained, ahead of the
+    removal's closing line, as the base branch sends it. With it, the update
+    waits for the drawing line and follows it. The abandoned turn fails the
+    drawing line. Without the member, a drive that raises before the
+    removal's answer sends no update and leaves the removal marked on the
+    conversation for the turn's next stream, as the base branch does."""
     current_conversation_id.set(CONVERSATION)
     conversation = _two_cards()
-    work = _RemovingSegment(conversation, answered=answered)
+    work = _RemovingSegment(
+        conversation,
+        answered=answered,
+        draws=answered,
+        ends=None if not answered else Outcome.ABANDONED,
+        raises=None if answered else _RAISED,
+        hold=hold,
+    )
+
+    frames = await _owned(cast(Any, work), conversation, _LandingStore())
+
+    assert _order(frames) == order
+    assert conversation.take_unreported_removal() is left_marked
+
+
+@pytest.mark.parametrize(
+    ("first", "answered", "then", "left_sent", "resumed_sends"),
+    [
+        (True, True, None, 1, None),
+        (True, False, None, 1, None),
+        (None, True, True, 1, None),
+        (None, False, True, 0, "make_charts:running"),
+        (None, False, None, 0, "first"),
+    ],
+    ids=[
+        "held-then-not-answered",
+        "held-then-not-unanswered",
+        "not-then-held-answered",
+        "not-then-held-unanswered",
+        "not-then-not-unanswered",
+    ],
+)
+async def test_a_client_that_leaves_has_its_removal_reported_once_whatever_the_next_stream_asks(
+    spans: Spans,
+    first: bool | None,
+    answered: bool,
+    then: bool | None,
+    left_sent: int,
+    resumed_sends: str | None,
+) -> None:
+    """The client leaves after the agent removed a card, before or after the
+    removal's answer was translated, and a later stream picks the turn up
+    and draws. A segment with `hold_removals` reports the removal as it
+    ends, on the stream the client left. One without it reports it when its
+    answer is drained, and otherwise leaves it marked on the conversation,
+    as the base branch does. The later stream, whose first response draws,
+    then reports it at its first drain, ahead of the drawing line, without
+    the member, and holds it to right after that line with it. Across both
+    streams it goes out once."""
+    current_conversation_id.set(CONVERSATION)
+    conversation = _two_cards()
+    work = _RemovingSegment(conversation, answered=answered, hold=first)
     channel: Channel = asyncio.Queue()
     gone = asyncio.Event()
     await conversation.lock.acquire()
@@ -1186,7 +1295,22 @@ async def test_a_client_that_leaves_leaves_no_removal_for_a_later_stream(
         await asyncio.sleep(0)
     gone.set()
     await owner
+    left: list[str] = []
+    while not channel.empty() and (frame := channel.get_nowait()) is not None:
+        left.append(frame.event)
+    resumed = _RemovingSegment(
+        conversation, calls=False, draws=True, ends=Outcome.ABANDONED, hold=then
+    )
 
+    frames = await _owned(cast(Any, resumed), conversation, _LandingStore())
+
+    assert left.count("composition.updated") == left_sent
+    order = _order(frames)
+    assert order.count("composition.updated") == (0 if resumed_sends is None else 1)
+    if resumed_sends == "first":
+        assert order[0] == "composition.updated"
+    elif resumed_sends is not None:
+        assert order[order.index("composition.updated") - 1] == resumed_sends
     assert work.owed() == []
     assert not conversation.take_unreported_removal()
 

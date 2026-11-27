@@ -14087,3 +14087,173 @@ async def test_a_stated_scope_read_that_raises_licenses_nothing_and_the_turn_ans
     ]
     assert sent == [_window(2020, 2030)]
     assert reads == [[words], [words]]
+
+
+_SECOND = json.loads(json.dumps(COMPONENT).replace("cmp_01test0001", "cmp_01test0002"))
+
+
+def _swaps_the_card() -> tuple[types.Part, ...]:
+    """What the agent does to replace `_card`'s card: it removes it and
+    fetches in one response, which is no lone removal the harness answers
+    itself, then draws another card."""
+    return (
+        reply(call_part("remove_cards", {"component_ids": ["cmp_01test0001"]}), fetch_call(SPEC_A)),
+        make_charts_call(chart(FRAME_A, type_="stat_card", title="Aid to Uganda")),
+        _text("Swapped."),
+    )
+
+
+class _SearchesThenHangs:
+    """Answers the first search with `_search()`'s envelope and hangs on the
+    next, setting `entered`, as a slow upstream does while the client
+    leaves."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self._first = _search()
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.entered.is_set() and not getattr(self, "_answered", False):
+            self._answered = True
+            return await self._first(**kwargs)
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+def _removal_order(frames: list[dict[str, Any]]) -> list[str]:
+    """The removal's and the drawing's lines and the canvas updates, in
+    stream order, up to the update that follows the removal."""
+    order = [
+        f"{f['tool']}:{f['status']}" if f["event"] == "activity.step" else f["event"]
+        for f in frames
+        if f["event"] == "composition.updated"
+        or (f["event"] == "activity.step" and f.get("tool") in {"remove_cards", "make_charts"})
+    ]
+    return order[: order.index("composition.updated") + 1]
+
+
+_BASE_REMOVAL = ["remove_cards:running", "composition.updated"]
+_HELD_REMOVAL = [
+    "remove_cards:running",
+    "remove_cards:complete",
+    "make_charts:running",
+    "composition.updated",
+]
+
+
+@pytest.mark.parametrize(
+    ("hold", "order"),
+    [
+        ({}, _BASE_REMOVAL),
+        ({"hold_removals": False}, _BASE_REMOVAL),
+        ({"hold_removals": True}, _HELD_REMOVAL),
+    ],
+    ids=["absent", "false", "true"],
+)
+@pytest.mark.parametrize("route", ["turn", "interrupt", "resume"])
+async def test_each_streaming_route_holds_a_removal_only_when_its_body_asks(
+    route: str, hold: dict[str, Any], order: list[str]
+) -> None:
+    """A turn replaces the card an earlier turn drew: it removes it, then
+    draws another, on a `/turn`, on the `/interrupt` that answers its
+    question, or on the `/resume` of a turn whose client left. Without
+    `hold_removals` in that request's body, the canvas update goes out as
+    the removal's answer is read, before its line closes. With it, the
+    update follows the line that draws the new card."""
+    executor = ScriptedExecutor([*_card_results(), *_card_results(_SECOND)])
+    resolver = _SearchesThenHangs()
+    before = (*_ask("A", "B"),) if route == "interrupt" else ()
+    before += (search_call("aid to Uganda"),) if route == "resume" else ()
+    app = _app(*_card(), *before, *_swaps_the_card(), resolver=resolver, executor=executor)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body())
+        second = _turn_body("swap the card")
+        match route:
+            case "turn":
+                frames = await _stream(client, "/api/studio/turn", {**second, **hold})
+            case "interrupt":
+                asked = await _stream(client, "/api/studio/turn", second)
+                frames = await _stream(
+                    client, "/api/studio/interrupt", {**_ask_answer(asked, 0), **hold}
+                )
+            case _:
+                await _asgi(app, "/api/studio/turn", second, disconnect_after=resolver.entered)
+                body = {
+                    "kind": "turn.resume",
+                    "schema_version": 1,
+                    "conversation_id": CONVERSATION,
+                    "turn_index": 2,
+                }
+                frames = await _stream(client, "/api/studio/resume", {**body, **hold})
+
+    assert _events(frames)[-1] == "done"
+    assert _removal_order(frames) == order
+    (removal,) = [
+        f
+        for f in frames
+        if f["event"] == "composition.updated"
+        and not any(b["component_id"] == "cmp_01test0002" for b in f["manifest"]["blocks"])
+    ]
+    assert removal["manifest"]["blocks"] == []
+
+
+@pytest.mark.parametrize(
+    ("hold", "held"),
+    [({}, False), ({"hold_removals": True}, True)],
+    ids=["absent", "true"],
+)
+@pytest.mark.parametrize("route", ["interrupt", "resume"])
+async def test_a_replayed_pause_takes_hold_removals_from_its_body(
+    monkeypatch: pytest.MonkeyPatch, route: str, hold: dict[str, Any], held: bool
+) -> None:
+    """A pause the client never read is sent again with no node run
+    (`_replay_pause`): on `/interrupt`, the retried answer of a stream whose
+    closing write kept the answered entry; on `/resume`, a turn whose
+    closing write failed. A replay runs no node, so no removal of its own
+    orders its frames: its segment takes the body's `hold_removals`, which
+    decides how it reports one this instance owes."""
+    built: list[tuple[bool, bool]] = []
+
+    class _Seen(studio_module._SegmentWork):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            built.append((kwargs.get("replay", False), kwargs.get("hold_removals", False)))
+            super().__init__(*args, **kwargs)
+
+    clock = await StoreClock.start(_engine())
+    store = StudioStore(_engine(), **clock.store_kwargs)
+    script = (*_ask("reading A", "reading B"), *_ask("C", "D"), _text("Done."))
+    app = _app(*script, store=store)
+    real_close = store.close_segment
+    closes: list[int] = []
+
+    async def close(*args: Any, **kwargs: Any) -> SegmentClose:
+        closes.append(1)
+        if route == "resume" and len(closes) == 1:
+            return SegmentClose.FAILED
+        return await real_close(*args, **kwargs)
+
+    store.close_segment = close  # type: ignore[method-assign]
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        if route == "interrupt":
+            body = _ask_answer(first, 1)
+            with monkeypatch.context() as patch:
+                patch.setattr(ConversationState, "drop_resuming", lambda self, segment_id: None)
+                await _stream(client, "/api/studio/interrupt", body)
+            monkeypatch.setattr(studio_module, "_SegmentWork", _Seen)
+            replayed = await _stream(client, "/api/studio/interrupt", {**body, **hold})
+        else:
+            assert first[-1]["event"] == "error"
+            await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
+            monkeypatch.setattr(studio_module, "_SegmentWork", _Seen)
+            resume = {
+                "kind": "turn.resume",
+                "schema_version": 1,
+                "conversation_id": CONVERSATION,
+                "turn_index": 1,
+            }
+            replayed = await _stream(client, "/api/studio/resume", {**resume, **hold})
+
+    assert _events(replayed)[-1] == "elicitation.request"
+    assert built == [(True, held)]
