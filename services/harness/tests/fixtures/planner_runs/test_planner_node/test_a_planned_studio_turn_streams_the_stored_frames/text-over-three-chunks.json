@@ -88,6 +88,10 @@
           "alternatives": [
             "annual debt service",
             "total debt stock"
+          ],
+          "step_ids": [
+            "debt",
+            "totals"
           ]
         }
       ],

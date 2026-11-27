@@ -166,6 +166,8 @@ from harness.graph.state import (
     UnitAsk,
     conversation_readings,
     count_call,
+    forget_plan_steps,
+    frame_plan_step,
     frame_store_ref,
     open_parts,
     pending_action,
@@ -2565,6 +2567,9 @@ def build_orchestrator_tools(
         key = _fetch_key(args, block)
         earlier = (call.state.get(_FETCHES_KEY) or {}).get(key)
         if earlier is not None:
+            # A plan may have returned these frames since; handed out by
+            # this fetch, they come from no plan step.
+            forget_plan_steps(call.state, earlier.get("frames") or ())
             frames = stored_mapping(call.state, ORCHESTRATOR_FRAMES_KEY)
             found = (
                 {**earlier, "spec_id": spec_id, "same_data_as": earlier["spec_id"]}
@@ -2940,7 +2945,7 @@ def build_orchestrator_tools(
                     return failed, dict(refusal), False
                 land = getattr(executor, "land_component", None)
                 if land is not None:
-                    land(component)
+                    land(component, plan_step=frame_plan_step(frame))
             except Exception as error:
                 # Charts already drawn stay on the canvas and in the result.
                 # A write that timed out may still have stored this chart,

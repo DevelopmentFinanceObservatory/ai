@@ -80,6 +80,7 @@ from harness.wire import (
     LayoutHintType,
     PinOp,
     PlanApproved,
+    PlanLink,
     PlanProposed,
     RemoveOp,
     ReorderOp,
@@ -424,6 +425,11 @@ class _PendingInterrupt:
     # `step_order` so a resumed segment's Activity lines carry the plan's
     # own step names. Empty for an interrupt saved before labels were kept.
     step_labels: dict[str, str] = field(default_factory=dict)
+    # The plan card's step each workflow step runs for
+    # (`harness.plan_display.card_steps`), restored beside `step_labels` so a
+    # resumed segment's Activity lines name the card's steps. Empty for an
+    # interrupt saved before it was kept.
+    card_steps: dict[str, str] = field(default_factory=dict)
     # Set by `/interrupt` to the id of the segment resuming this interrupt,
     # instead of deleting the entry outright: a crash between the answer
     # being appended and the resumed segment's own closing write leaves a
@@ -787,6 +793,13 @@ class ConversationState:
     # `approved`, and the state read hands them to a page that never read
     # the frame.
     turn_approved: list[dict[str, Any]] = field(default_factory=list)
+    # The plan and plan step each frame the turn's plan runs produced came
+    # from, by the frame's id (`harness.graph.state.frame_id_for`), written as
+    # the `execute` node hands a run back (`harness.studio_translate`). A card
+    # drawn on one of these frames names that plan step in its
+    # `created_from`. Kept for the turn only: a frame id names the frame's
+    # content, which a later turn can fetch outside any plan. No model reads it.
+    turn_plan_frames: dict[str, PlanLink] = field(default_factory=dict)
     # The turn's orchestrator conversation once its run closed on the reply
     # (`harness.graph.orchestrate.carried_record`), set by the Studio
     # translator from the `answered` edge's output once the write that closed
@@ -1610,6 +1623,7 @@ class ConversationState:
         self.turn_specs = {}
         self.turn_applied_choice = None
         self.turn_approved = []
+        self.turn_plan_frames = {}
         self.turn_carried = None
         self.turn_recorded = False
         self.turn_usage = usage if usage is not None else TurnUsage()
@@ -2160,6 +2174,11 @@ _DRAWN_CARD = "drawn_card"
 # (`harness.studio_edit._swapped`). The state read gives it on the card's
 # `StoredCard`. No digest, listing or recall states it.
 REPLACED_CARD_KEY = "replaces"
+# The key of a stored entry holding the plan and plan step whose frame the
+# card draws (`harness.wire.PlanLink`), which its `component.created` names
+# in `created_from`, kept so a card that takes its slot names them too
+# (`harness.studio_edit._swapped`). No digest, listing or recall states it.
+PLAN_LINK_KEY = "plan_link"
 
 
 def _digest_entry(component: dict[str, Any]) -> dict[str, Any]:
@@ -2194,11 +2213,11 @@ def drawn_series_ids(component: dict[str, Any]) -> dict[str, list[str]]:
 
 def _model_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """A stored entry as a model may read it, without its `_SERIES_IDS`,
-    `_DRAWN_CARD`, `CARD_UNIT_KEY` and `REPLACED_CARD_KEY`."""
+    `_DRAWN_CARD`, `CARD_UNIT_KEY`, `REPLACED_CARD_KEY` and `PLAN_LINK_KEY`."""
     return {
         key: value
         for key, value in entry.items()
-        if key not in {_SERIES_IDS, _DRAWN_CARD, CARD_UNIT_KEY, REPLACED_CARD_KEY}
+        if key not in {_SERIES_IDS, _DRAWN_CARD, CARD_UNIT_KEY, REPLACED_CARD_KEY, PLAN_LINK_KEY}
     }
 
 
@@ -2405,6 +2424,7 @@ def land_component(
     intent: dict[str, Any] | None = None,
     unit_card: dict[str, Any] | None = None,
     lineage: CardLineage | None = None,
+    plan: PlanLink | None = None,
 ) -> Literal["created", "held"]:
     """Land `component` on `conversation`'s canvas. `harness.studio_translate`
     calls this at drain time for a write `make_charts` stamped through
@@ -2417,7 +2437,8 @@ def land_component(
     canvas views whether or not it lands a block, and for a card
     `make_charts` wrote from `intent`, that intent with the revision it
     was drawn as (`canvas_cards`), and for a card whose unit can change, its
-    `unit_card` (`harness.card_unit.UnitCard.as_json`). `auto_add=False` means
+    `unit_card` (`harness.card_unit.UnitCard.as_json`), and for a card drawn
+    on a plan step's frame, its `plan` (`PLAN_LINK_KEY`). `auto_add=False` means
     there is no block to append: the component still streams to the
     client, but nothing here composes for it, and the return is `"held"`.
     Otherwise a new block is appended and the return is `"created"`.
@@ -2439,6 +2460,8 @@ def land_component(
         entry[_DRAWN_CARD] = {"intent": intent, "revision": int(component["revision"])}
     if unit_card is not None:
         entry[CARD_UNIT_KEY] = unit_card
+    if plan is not None:
+        entry[PLAN_LINK_KEY] = dict(plan)
     conversation.components[component["component_id"]] = entry
     conversation.turn_components.append(
         _turn_component_entry(

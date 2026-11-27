@@ -45,6 +45,10 @@
           "alternatives": [
             "annual debt service",
             "total debt stock"
+          ],
+          "step_ids": [
+            "debt",
+            "totals"
           ]
         }
       ],
@@ -131,6 +135,10 @@
           "alternatives": [
             "annual debt service",
             "total debt stock"
+          ],
+          "step_ids": [
+            "debt",
+            "totals"
           ]
         }
       ],

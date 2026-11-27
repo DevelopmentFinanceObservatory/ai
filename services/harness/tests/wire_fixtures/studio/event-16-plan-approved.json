@@ -8,12 +8,15 @@
   "summary": "Gross disbursements for health to Ethiopia from all donors, 2016\u20132024, in constant 2023 US dollars, from OECD CRS.",
   "steps": [
     {
+      "id": "s1",
       "label": "Find the health sector codes"
     },
     {
+      "id": "s2",
       "label": "Fetch disbursements to Ethiopia"
     },
     {
+      "id": "s3",
       "label": "Compare levels before and after 2021",
       "gives_answer": true
     }
@@ -22,13 +25,22 @@
     {
       "choice_id": "req1:measure_basis",
       "question": "Basis",
-      "chosen": "Gross disbursements"
+      "chosen": "Gross disbursements",
+      "step_ids": [
+        "s2",
+        "s3"
+      ]
     },
     {
       "choice_id": "decision/prices",
       "question": "Prices",
       "chosen": "Constant 2023 USD",
-      "changed_from": "Current USD"
+      "changed_from": "Current USD",
+      "step_ids": [
+        "s1",
+        "s2",
+        "s3"
+      ]
     }
   ],
   "caveats": [

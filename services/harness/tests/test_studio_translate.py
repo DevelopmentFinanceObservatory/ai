@@ -37,6 +37,7 @@ from executor.run import RunAbandonedError, current_step_id
 from google.auth import exceptions as google_auth_errors
 from google.genai import errors as genai_errors
 from google.genai import types
+from harness import studio_store
 from harness import studio_translate as studio_translate_module
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.decision_pick import DecisionPick, decision_pick
@@ -1098,9 +1099,13 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
         ],
         actions=[PlanAction.APPROVE],
         decisions=[
-            scope("c_basis", "Basis", "gross disbursements"),
+            scope("c_basis", "Basis", "gross disbursements").model_copy(
+                update={"step_ids": ["s1", "s2"]}
+            ),
             scope("c_region", "Region", "Africa's countries only"),
-            planner("window", "Window", "since 2020", "since 2015"),
+            planner("window", "Window", "since 2020", "since 2015").model_copy(
+                update={"step_ids": ["s2"]}
+            ),
             PlanDecision(
                 id="d_plan", question="Chart", chosen="line", reason="r", resolved_by="default"
             ),
@@ -1127,9 +1132,17 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
         "revision": "rev_1",
         "title": "Research plan",
         "summary": "Gross aid to Kenya, 2020 to 2024.",
-        "steps": [{"label": "Fetch aid"}, {"label": "Sum it", "gives_answer": True}],
+        "steps": [
+            {"id": "s1", "label": "Fetch aid"},
+            {"id": "s2", "label": "Sum it", "gives_answer": True},
+        ],
         "choices": [
-            {"choice_id": "c_basis", "question": "Basis", "chosen": "gross disbursements"},
+            {
+                "choice_id": "c_basis",
+                "question": "Basis",
+                "chosen": "gross disbursements",
+                "step_ids": ["s1", "s2"],
+            },
             {
                 "choice_id": "c_region",
                 "question": "Region",
@@ -1141,6 +1154,7 @@ def test_an_approved_plan_states_the_card_the_user_saw() -> None:
                 "question": "Window",
                 "chosen": "since 2020",
                 "changed_from": "since 2015",
+                "step_ids": ["s2"],
             },
         ],
         "caveats": [caveat],
@@ -1420,11 +1434,26 @@ def _surface_record(step_id: str, result: dict[str, Any]) -> _ExecutorRecord:
     )
 
 
-def _progress_translator() -> tuple[_Translator, _RecordingSurface]:
+def _progress_translator(
+    card_steps: dict[str, str] | None = None,
+) -> tuple[_Translator, _RecordingSurface]:
+    """A translator whose conversation showed plan version 1 as `plan_a`, a
+    card whose steps `card_steps` maps each workflow step to, by default
+    one for each step these tests run."""
     current_conversation_id.set("c1")
     surface_recorder = _RecordingSurface(_UnreachableSurface())
+    surface_recorder.set_step_order(
+        "c1",
+        [],
+        card_steps=card_steps
+        if card_steps is not None
+        else {step: step for step in ("debt", "pop", "s2")},
+    )
+    conversation = ConversationState(conversation_id="c1")
+    conversation.plan_version_ids = {1: "plan_a"}
+    conversation.latest_plan_version = 1
     translator = _Translator(
-        conversation=ConversationState(conversation_id="c1"),
+        conversation=conversation,
         recorder=_RecordingExecutor(_dummy_executor, store=unconnected_store()),
         surface_recorder=surface_recorder,
     )
@@ -1464,14 +1493,73 @@ async def test_a_step_keeps_one_wire_id_from_its_first_report_to_its_final_frame
     ]
     assert first.step_id == later.step_id != other.step_id
     assert first.label == final[0].label == "Fetching data"
-    assert [(f.step_id, f.status) for f in final] == [
-        (first.step_id, StepStatus.FAILED),
-        (first.step_id, StepStatus.COMPLETE),
-        (other.step_id, StepStatus.COMPLETE),
+    assert [(f.step_id, f.status, f.plan_step_id) for f in final] == [
+        (first.step_id, StepStatus.FAILED, "debt"),
+        (first.step_id, StepStatus.COMPLETE, "debt"),
+        (other.step_id, StepStatus.COMPLETE, "pop"),
     ]
+    assert [f.plan_step_id for f in (first, other, later)] == ["debt", "pop", "debt"]
+    # A replan can reuse step ids, so each line names its plan's version too.
+    assert {f.plan_version_id for f in (first, other, later, *final)} == {"plan_a"}
     # The Activity log replaces a line's detail with each frame, so the frame
     # that fails a line a report was showing on states a reason of its own.
     assert is_user_sentence(final[0].detail)
+
+
+@pytest.mark.parametrize(
+    ("card_steps", "labels", "named"),
+    [
+        ({"debt": "debt", "debt_history": "debt"}, {}, ["debt", "debt", None]),
+        ({}, {"debt": "Fetch debt"}, ["debt", None, None]),
+    ],
+    ids=["card-steps", "labels-only"],
+)
+async def test_an_activity_line_names_the_card_step_its_plan_step_runs_for(
+    card_steps: dict[str, str], labels: dict[str, str], named: list[str | None]
+) -> None:
+    """A rolling copy's line names the card step it copies, and a step the card
+    shows in no row names none, so every line names a step the card holds. A
+    plan stored before its card steps were kept names the steps it holds labels
+    for, the card's own, and a copy none."""
+    translator, surface_recorder = _progress_translator(card_steps)
+    surface_recorder.set_step_order("c1", [], labels, card_steps)
+
+    lines = [
+        line
+        for step in ("debt", "debt_history", "whole_sum")
+        for line in await translated(translator, _progress_event(step, "Preparing the dataset"))
+    ]
+
+    assert [line.plan_step_id for line in lines] == named
+    assert [line.plan_version_id for line in lines] == [
+        None if step is None else "plan_a" for step in named
+    ]
+
+
+async def test_a_plan_stored_without_card_steps_links_its_copies_to_no_step() -> None:
+    """A pending plan stored by a release that keeps no card steps loads with an
+    empty map. Resumed from it, a line of a step the card shows names that step,
+    and a rolling copy's line names none."""
+    entry = {
+        "adk_id": "adk_1",
+        "kind": "plan",
+        "step_order": ["debt_history", "debt"],
+        "step_labels": {"debt": "Fetch debt"},
+    }
+    pending = studio_store._deserialize_pending({"int_1": entry})["int_1"]
+    assert pending.card_steps == {}
+    translator, surface_recorder = _progress_translator()
+    surface_recorder.set_step_order(
+        "c1", pending.step_order, pending.step_labels, pending.card_steps
+    )
+
+    lines = [
+        line
+        for step in ("debt", "debt_history")
+        for line in await translated(translator, _progress_event(step, "Preparing the dataset"))
+    ]
+
+    assert [line.plan_step_id for line in lines] == ["debt", None]
 
 
 async def test_a_replan_run_in_the_same_segment_opens_new_lines_for_its_steps() -> None:
@@ -1531,10 +1619,14 @@ async def test_a_started_step_with_no_record_closes_as_failed_at_the_runs_hand_b
     frames = await translated(translator, NodeDone("execute", "ok", output))
 
     steps = [f for f in frames if f.tool is not None]
-    assert [(f.step_id, f.status, f.detail) for f in steps] == [
-        (done.step_id, StepStatus.COMPLETE, "done"),
-        (lost.step_id, StepStatus.FAILED, detail),
+    assert [(f.step_id, f.status, f.detail, f.plan_step_id, f.plan_version_id) for f in steps] == [
+        (done.step_id, StepStatus.COMPLETE, "done", "debt", "plan_a"),
+        (lost.step_id, StepStatus.FAILED, detail, "pop", "plan_a"),
     ]
+    # The agent's own status lines run no plan step.
+    assert [(f.plan_step_id, f.plan_version_id) for f in frames if f.tool is None] == [
+        (None, None)
+    ] * (len(frames) - len(steps))
     assert steps[1].label == lost.label
     assert steps[1].duration_ms is not None
     assert is_user_sentence(steps[1].detail)
@@ -2422,9 +2514,9 @@ def test_land_component_stamps_land_on_the_matching_record() -> None:
         )
     )
 
-    recorder.land_component(component)
+    recorder.land_component(component, plan_step="sum")
 
-    assert recorder._records.items[0].land is True
+    assert (recorder._records.items[0].land, recorder._records.items[0].plan_step) == (True, "sum")
 
 
 def test_land_component_is_a_silent_no_op_with_no_matching_record() -> None:
@@ -2434,6 +2526,91 @@ def test_land_component_is_a_silent_no_op_with_no_matching_record() -> None:
     recorder = _RecordingExecutor(_dummy_executor, store=unconnected_store())
 
     recorder.land_component(_written_component("cmp_two"))
+
+
+async def test_a_card_on_a_plan_steps_frame_names_the_plan_and_the_step() -> None:
+    """The execute node's hand-back maps each final frame to its plan step in
+    the turn's state, so a card drawn on one names both, from a translator on
+    another instance too. A card on any other frame names neither, and so
+    does a card on the frame of a run whose version the turn gave no card,
+    as a run carried on from an earlier turn has. A card `make_charts` drew
+    on the plan's frame as a fetch registered it, with no plan step, names
+    neither, since a frame's id names its content alone, and so does one drawn
+    on it as registered from a step the turn's map does not hold for it."""
+    current_conversation_id.set("c1")
+    conversation = ConversationState(conversation_id="c1")
+    conversation.plan_version_ids = {1: "plan_a"}
+    first = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_dummy_executor, store=unconnected_store()),
+    )
+    fetched, total, carried = (
+        {"spec_id": f"spec_{name}", "content_version": "cv_1"}
+        for name in ("fetched", "total", "carried")
+    )
+    await translated(
+        first,
+        NodeDone(
+            "execute",
+            "ok",
+            {
+                "frame_refs": [fetched, total],
+                "frame_ref_steps": [
+                    {"step_id": "fetch", "tool": "get_data", "is_final_step": False},
+                    {"step_id": "sum", "tool": "aggregate", "is_final_step": True},
+                ],
+                "plan_version": 1,
+            },
+        ),
+    )
+    await translated(
+        first,
+        NodeDone(
+            "execute",
+            "ok",
+            {
+                "frame_refs": [carried],
+                "frame_ref_steps": [{"step_id": "sum", "tool": "aggregate", "is_final_step": True}],
+                "plan_version": 3,
+            },
+        ),
+    )
+    reloaded = ConversationState(conversation_id="c1")
+    studio_store._apply_delta(reloaded, studio_store._serialize_durable(conversation))
+    recorder = _RecordingExecutor(_dummy_executor, store=unconnected_store())
+    second = _Translator(conversation=reloaded, recorder=recorder)
+    for name, ref, step in (
+        ("total", total, "sum"),
+        ("fetched", fetched, "fetch"),
+        ("carried", carried, "sum"),
+        ("refetched", total, None),
+        ("elsewhere", total, "fetch"),
+    ):
+        recorder._records.append(
+            _ExecutorRecord(
+                tool="write_component",
+                args={"intent": {"type": "line_chart", "frame_ref": ref}},
+                result={"outcome": "ok", "component": _written_component(f"cmp_{name}")},
+                duration_ms=1,
+                conversation="c1",
+                plan_step=step,
+            )
+        )
+
+    frames = await second._drain_recorder()
+
+    created = {
+        f.component_id: f.created_from.model_dump(exclude_none=True, exclude={"step_id"})
+        for f in frames
+        if f.event == "component.created"
+    }
+    assert created == {
+        "cmp_total": {"plan_version_id": "plan_a", "plan_step_id": "sum"},
+        "cmp_fetched": {},
+        "cmp_carried": {},
+        "cmp_refetched": {},
+        "cmp_elsewhere": {},
+    }
 
 
 # --- `_RecordingExecutor.__call__`: write tokens --------------------------

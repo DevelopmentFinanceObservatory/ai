@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 from collections.abc import (
+    Iterable,
     Mapping,
     Sequence,
 )
@@ -61,6 +62,9 @@ APPROVE_PAUSE: Final = "approve"
 # The orchestrator's turn state, written by its tools
 # (`harness.orchestrator_tools`) and read by the turn's nodes.
 ORCHESTRATOR_FRAMES_KEY = "orchestrator:frames"  # frame id -> {"ref", "view", "store_ref"}
+# The member of a frame's entry naming the plan step whose result it was
+# registered as (`register_frames`, `frame_plan_step`).
+FRAME_PLAN_STEP = "plan_step"
 # spec_id -> its search spec block, kept by the turn store as rows of their own.
 ORCHESTRATOR_SPECS_KEY = SPECS_KEY
 # The action the agent's `plan` or `ask_user` call recorded, which the
@@ -920,6 +924,7 @@ def register_frames(
     *,
     fetch_args: dict[str, Any] | None = None,
     wholes: Mapping[str, str] | None = None,
+    plan_steps: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Add each (frame ref, `describe_frame` view, store ref) to the frames in
     `state` (`ORCHESTRATOR_FRAMES_KEY`) under its id, and return the entries
@@ -934,7 +939,11 @@ def register_frames(
     `make_charts` asks the same retrieval again for the frame's members' kinds.
     `wholes` maps the id of a frame holding shares to the whole they divide
     by (`harness.plan_display.share_wholes`), kept as the entry's `whole`,
-    which `make_charts` states in the card's title.
+    which `make_charts` states in the card's title. `plan_steps` maps the id
+    of a frame a plan's final step returned to that step's id, kept as the
+    entry's `FRAME_PLAN_STEP`, which `make_charts` hands the card it draws
+    on the frame (`frame_plan_step`). Each registration writes the entry
+    whole, so a frame a `fetch` registers again carries no plan step.
 
     A frame id the frames did not hold clears the turn's count of calls that
     drew nothing (`make_charts_failed`), so a chart of a frame that arrived
@@ -954,6 +963,8 @@ def register_frames(
             frames[frame_id]["fetch_args"] = fetch_args
         if wholes and frame_id in wholes:
             frames[frame_id]["whole"] = wholes[frame_id]
+        if plan_steps and frame_id in plan_steps:
+            frames[frame_id][FRAME_PLAN_STEP] = plan_steps[frame_id]
         entries.append({"frame": frame_id, "view": view})
     state[ORCHESTRATOR_FRAMES_KEY] = frames
     calls = state.get(ORCHESTRATOR_CALLS_KEY) or {}
@@ -962,6 +973,33 @@ def register_frames(
             tool: count for tool, count in calls.items() if tool != "make_charts_failed"
         }
     return entries
+
+
+def frame_plan_step(entry: Mapping[str, Any]) -> str | None:
+    """The id of the plan step whose result `entry`, an entry of
+    `ORCHESTRATOR_FRAMES_KEY`, was registered as (`register_frames`), or None
+    for a frame registered outside a plan's hand-back."""
+    step = entry.get(FRAME_PLAN_STEP)
+    return step if isinstance(step, str) and step else None
+
+
+def forget_plan_steps(state: SessionState, frame_ids: Iterable[str]) -> None:
+    """Drop the plan step from the entries of `frame_ids` in `state`
+    (`ORCHESTRATOR_FRAMES_KEY`): the frames are handed out again outside a
+    plan, as a `fetch` the turn already made gives its frames back."""
+    frames = stored_mapping(state, ORCHESTRATOR_FRAMES_KEY)
+    marked = [
+        f for f in frame_ids if isinstance(frames.get(f), Mapping) and FRAME_PLAN_STEP in frames[f]
+    ]
+    if not marked:
+        return
+    state[ORCHESTRATOR_FRAMES_KEY] = {
+        **frames,
+        **{
+            frame_id: {k: v for k, v in frames[frame_id].items() if k != FRAME_PLAN_STEP}
+            for frame_id in marked
+        },
+    }
 
 
 def frame_store_ref(entry: Mapping[str, Any]) -> dict[str, Any]:

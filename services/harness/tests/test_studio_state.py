@@ -31,6 +31,7 @@ import json
 import logging
 import ssl
 import time
+import typing
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -88,6 +89,7 @@ from harness.turn.store import TurnStatus, TurnStore
 from harness.turn_records import PlanRecord, RecordedIdentity, SearchReading
 from harness.unit_offer import whole_unit_options, whole_units
 from harness.wire import (
+    STUDIO_FRAME_ADAPTER,
     AddOp,
     ClientFeature,
     ComponentType,
@@ -100,11 +102,14 @@ from harness.wire import (
     MessageComplete,
     MutationOp,
     OptionAnswer,
+    PlanApproved,
+    PlanLink,
     PlanProposed,
     UnitOffer,
 )
 from planner.plan import PlanStatus
 from planner.workflow import SelectedSource
+from pydantic import BaseModel
 from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
@@ -476,10 +481,12 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     )
     state = ConversationState(conversation_id=CONVERSATION)
     intent = {"type": "bar_chart", "title": "t", "select": {"observationAbout": codes}}
-    land_component(state, card, intent=intent)
+    plan = PlanLink(plan_version_id="plan_secret", plan_step_id="step_secret")
+    land_component(state, card, intent=intent, plan=plan)
     card_id = card["component_id"]
 
     ids = [drawn_cards.series_id(code) for code in codes]
+    assert state.components[card_id]["plan_link"] == plan
     assert state.canvas_series_ids() == ids
     assert state.canvas_cards() == [
         {"component_id": card_id, "intent": intent, "revision": card["revision"]}
@@ -496,6 +503,7 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     )
     assert "series_ids" not in model_facing
     assert "drawn_card" not in model_facing
+    assert "plan_secret" not in model_facing
     assert ids[11] in model_facing
     assert ids[12] not in model_facing
 
@@ -1523,10 +1531,12 @@ def test_begin_turn_clears_the_previous_turns_plans_and_readings():
     state.turn_plans = [_PLAN_JSON]
     state.turn_readings = [_READING_JSON]
     state.turn_specs = {"spec_a": {}}
+    state.turn_plan_frames = {"f1": PlanLink(plan_version_id="plan_a", plan_step_id="s1")}
 
     state.begin_turn()
 
     assert (state.turn_plans, state.turn_readings, state.turn_specs) == ([], [], {})
+    assert state.turn_plan_frames == {}
 
 
 def test_begin_turn_and_a_new_plan_lineage_reset_the_lineage_fields_together():
@@ -1997,6 +2007,127 @@ def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_fr
     assert (restored.card, restored.frames) == (card, (note, card))
 
 
+# The members each model of a stored pause or approved plan has on the release
+# `feat/studio-prototype` (`git show origin/feat/studio-prototype:services/harness/
+# src/harness/wire.py`, each model's `model_fields`), which refuses any other: what a
+# release rolled back to that one loads.
+_ROLLBACK_MEMBERS: dict[str, frozenset[str]] = {
+    name: frozenset(members.split())
+    for name, members in {
+        "PlanProposed": "actions asks caveats decisions event interrupt_id moved new_plan"
+        " operations plan_version_id requirements revision seq steps summary switch_failed"
+        " title version",
+        "PlanStep": "args description gives_answer id label",
+        "PlanDecision": "active_option_id alternatives choice_id chosen id options question"
+        " reason resolved_by unit",
+        "PlanDecisionOption": "label option_id reason status years",
+        "UnitOffer": "currencies presets start",
+        "UnitCurrency": "base_year_max base_year_min code name prices",
+        "UnitChoice": "base_year currency prices",
+        "PlanRequirement": "decision_ids id kind sentence",
+        "PlanOperation": "id kind requirement_id sentence",
+        "PlanAsk": "answered_by ask declined not_computed",
+        "PlanMoved": "choice_id from_label reason to_label",
+        "PlanSwitchFailed": "choice_id code option_id reason retryable",
+        "PlanApproved": "caveats choices event plan_version_id revision seq steps summary"
+        " title version",
+        "PlanApprovedStep": "gives_answer label",
+        "PlanApprovedChoice": "changed_from choice_id chosen question",
+        "MessageComplete": "event seq text",
+    }.items()
+}
+
+
+def _rollback_refusals(model: type[BaseModel], stored: Any, where: str = "") -> list[str]:
+    """Each member of `stored`, a value of `model` as stored, that `model` lacks on
+    the release `_ROLLBACK_MEMBERS` lists, by its path. Nested models are found
+    through this release's field types."""
+    known = _ROLLBACK_MEMBERS[model.__name__]
+    refused = [f"{where}/{member}" for member in stored if member not in known]
+    for name, value in stored.items():
+        annotation = model.model_fields[name].annotation if name in known else None
+        nested = [
+            kind
+            for kind in _annotation_types(annotation)
+            if isinstance(kind, type) and issubclass(kind, BaseModel)
+        ]
+        if not nested:
+            continue
+        (kind,) = nested
+        for index, item in enumerate(value if isinstance(value, list) else [value]):
+            if isinstance(item, dict):
+                refused += _rollback_refusals(kind, item, f"{where}/{name}/{index}")
+    return refused
+
+
+def _annotation_types(annotation: Any) -> list[Any]:
+    """`annotation` and every type its arguments name, at any depth."""
+    found = [annotation]
+    for argument in typing.get_args(annotation):
+        found += _annotation_types(argument)
+    return found
+
+
+def test_a_pause_and_an_approved_plan_are_stored_as_a_rolled_back_release_reads_them() -> None:
+    """A plan card's `decisions[].step_ids` and a `plan.approved`'s `steps[].id` and
+    `choices[].step_ids` are members a rolled-back release refuses, so the pause's
+    card and frames, the turn's approved plans and the turn record holding them are
+    stored without them, the members beside them, and restored on load."""
+    fixtures = Path(__file__).parent / "wire_fixtures" / "studio"
+    proposed = PlanProposed.model_validate(
+        json.loads((fixtures / "event-03-plan-proposed.json").read_text())
+    )
+    raw_unit = json.loads((fixtures / "event-22-plan-proposed-unit.json").read_text())
+    unit_card = PlanProposed.model_validate(
+        {**raw_unit, "decisions": [{**d, "step_ids": ["s1"]} for d in raw_unit["decisions"]]}
+    )
+    approved = PlanApproved.model_validate(
+        json.loads((fixtures / "event-16-plan-approved.json").read_text())
+    )
+    assert approved.steps[0].id and approved.choices and approved.choices[0].step_ids
+    note = MessageComplete(event="message.complete", seq=8, text="Version 1 is still there.")
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.pending["int_1"] = _PendingInterrupt(
+        adk_id="adk_1", kind="plan", card=unit_card, frames=(note, proposed, unit_card)
+    )
+    state.record_approved(approved)
+    state.turns = [{"user": "q", "approved": list(state.turn_approved)}]
+
+    stored = json.loads(json.dumps(studio_store._serialize_durable(state)))
+    reloaded = ConversationState(conversation_id=CONVERSATION)
+    studio_store._apply_delta(reloaded, stored)
+
+    entry = stored["pending"]["int_1"]
+    kept = [
+        (PlanProposed, entry["card"]),
+        *((STUDIO_FRAME_ADAPTER.validate_python(f).__class__, f) for f in entry["frames"]),
+        *((PlanApproved, frame) for frame in stored["turn_approved"]),
+        *((PlanApproved, frame) for frame in stored["turn:0"]["approved"]),
+    ]
+    assert [where for model, frame in kept for where in _rollback_refusals(model, frame)] == []
+    (pause,) = reloaded.pending.values()
+    assert (pause.card, pause.frames) == (unit_card, (note, proposed, unit_card))
+    assert reloaded.turn_approved == state.turn_approved
+    assert reloaded.turns == state.turns
+    # A save that changes only the members kept beside the approved plans carries
+    # those alone, and the load puts them back on the plans it holds.
+    first = state.turn_approved[0]
+    state.turn_approved = [
+        {**first, "steps": [{**step, "id": f"x{n}"} for n, step in enumerate(first["steps"])]}
+    ]
+    changed = studio_store._changed_since(
+        json.loads(json.dumps(studio_store._serialize_durable(state))), stored
+    )
+    studio_store._apply_delta(reloaded, changed)
+    assert reloaded.turn_approved == state.turn_approved
+    # A rolled-back release that approves another plan rewrites the approved
+    # plans and leaves the members kept beside them, which stay off its plan.
+    other = {**stored["turn_approved"][0], "revision": "rev_other"}
+    after_rollback = ConversationState(conversation_id=CONVERSATION)
+    studio_store._apply_delta(after_rollback, {**stored, "turn_approved": [other]})
+    assert after_rollback.turn_approved == [other]
+
+
 def test_a_stored_unit_question_is_kept_in_its_whole_units_form() -> None:
     """A unit question marks the emitted frame with the `unit` input and its offer. An
     instance rolled back to a model without them, or to one that adds `decisions` to
@@ -2218,6 +2349,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
         skippable=True,
         step_order=("step_b", "step_a"),
         step_labels={"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"},
+        card_steps={"step_b": "step_b", "step_b_history": "step_b", "step_a": "step_a"},
         resuming_segment="seg_1",
         answer={"decision": "approve", "option_id": "spec_a"},
     )
@@ -2274,6 +2406,11 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     assert (pending.skippable, pending.legacy) == (True, False)
     assert pending.step_order == ("step_b", "step_a")
     assert pending.step_labels == {"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"}
+    assert pending.card_steps == {
+        "step_b": "step_b",
+        "step_b_history": "step_b",
+        "step_a": "step_a",
+    }
     assert pending.resuming_segment == "seg_1"
     assert pending.answer == {"decision": "approve", "option_id": "spec_a"}
     assert loaded.awaiting_answer is False  # its only entry is resuming
@@ -4457,20 +4594,43 @@ def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> 
     pending = studio_store._deserialize_pending({"int_1": entry})["int_1"]
 
     assert pending.step_order == ("step_a",)
-    assert pending.step_labels == {}
+    assert (pending.step_labels, pending.card_steps) == ({}, {})
     assert (pending.questions, pending.legacy) == ((), False)
 
 
-def test_a_turns_choice_baseline_reloads_on_another_instance() -> None:
+def test_a_turns_choice_baseline_and_plan_frames_reload_on_another_instance() -> None:
     """The labels `plan.approved` names as `changed_from` are durable, so an
-    approve answered on another instance states them."""
+    approve answered on another instance states them, and so is the turn's
+    map of plan frames, so a card drawn on another instance names its plan."""
     state = ConversationState(conversation_id=CONVERSATION)
     state.turn_choice_baseline = {"aid:sector": "health (CRS 120)"}
+    state.turn_plan_frames = {"f1a2b3c": PlanLink(plan_version_id="plan_a", plan_step_id="s2")}
     reloaded = ConversationState(conversation_id=CONVERSATION)
 
     studio_store._apply_delta(reloaded, studio_store._serialize_durable(state))
 
     assert reloaded.turn_choice_baseline == state.turn_choice_baseline
+    assert reloaded.turn_plan_frames == state.turn_plan_frames
+
+
+def test_a_turn_begun_by_a_release_storing_no_plan_frames_keeps_none_of_the_last_turns() -> None:
+    """A release that stores no map of plan frames merges only the keys it knows
+    into `turn_state` (`turn_state || :scalars`), so a turn it begins leaves the
+    previous turn's map stored. A load of that row holds no plan frame for the
+    new turn, so no card of it names the previous turn's plan."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.begin_turn()
+    state.turn_plan_frames = {"f1a2b3c": PlanLink(plan_version_id="plan_a", plan_step_id="s2")}
+    stored = json.loads(json.dumps(studio_store._serialize_durable(state)))
+    state.begin_turn()
+    written = studio_store._serialize_durable(state)
+    older = {key: value for key, value in written.items() if key != "turn_plan_frames"}
+    reloaded = ConversationState(conversation_id=CONVERSATION)
+
+    studio_store._apply_delta(reloaded, json.loads(json.dumps({**stored, **older})))
+
+    assert reloaded.turn_index == state.turn_index
+    assert reloaded.turn_plan_frames == {}
 
 
 def test_a_pending_ask_saved_before_questions_were_kept_loads_as_one_legacy_question() -> None:

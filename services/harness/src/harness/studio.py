@@ -117,6 +117,7 @@ from harness.studio_edit import (
 )
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
+    PLAN_LINK_KEY,
     REPLACED_CARD_KEY,
     ConversationState,
     SegmentBusy,
@@ -1674,8 +1675,9 @@ def _stored_card(
     canvas carries the unit its stored `UnitCard` can change within
     (`stored_unit_change`), as `apply_unit`, which refuses a card off the
     canvas, reads it. A card `swapped` in by the turn being read names the
-    card whose slot it took (`REPLACED_CARD_KEY`). A `fact_summary` or a
-    unit offer that cannot be read is left out and logged, and an entry
+    card whose slot it took (`REPLACED_CARD_KEY`), and a card drawn on a plan
+    step's frame names that plan and step (`PLAN_LINK_KEY`). A `fact_summary`
+    or a unit offer that cannot be read is left out and logged, and an entry
     with no type or title gives no card."""
     if not entry.get("type") or not entry.get("title"):
         return None
@@ -1703,6 +1705,12 @@ def _stored_card(
                 exc_info=True,
             )
     replaces = entry.get(REPLACED_CARD_KEY) if swapped else None
+    plan = entry.get(PLAN_LINK_KEY)
+    linked = (
+        isinstance(plan, Mapping)
+        and isinstance(plan.get("plan_version_id"), str)
+        and isinstance(plan.get("plan_step_id"), str)
+    )
     return StoredCard(
         component_id=component_id,
         type=str(entry["type"]),
@@ -1711,6 +1719,8 @@ def _stored_card(
         fact_summary=summary,
         unit_change=unit_change,
         replaces=replaces if isinstance(replaces, str) else None,
+        plan_version_id=plan["plan_version_id"] if linked else None,
+        plan_step_id=plan["plan_step_id"] if linked else None,
     )
 
 
@@ -3493,6 +3503,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ledger_conversation_id(principal, body.conversation_id),
                     pending.step_order,
                     pending.step_labels,
+                    pending.card_steps,
                 )
 
             if body.decision is InterruptDecision.REJECT:
@@ -3862,6 +3873,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ledger_conversation_id(principal, conversation_id),
                     answered.step_order,
                     answered.step_labels,
+                    answered.card_steps,
                 )
             _set_turn_context(principal, conversation_id, conversation, settings)
             approving = (

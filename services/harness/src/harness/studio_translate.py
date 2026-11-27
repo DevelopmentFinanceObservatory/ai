@@ -90,6 +90,7 @@ from harness.graph.state import (
     ORCHESTRATOR_PLAN_FAILED_STATUS,
     ORCHESTRATOR_PLAN_RAN_STATUS,
     card_unit_offers,
+    frame_id_for,
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
@@ -159,6 +160,7 @@ from harness.wire import (
     PlanAsk,
     PlanDecision,
     PlanDecisionOption,
+    PlanLink,
     PlanMoved,
     PlanOperation,
     PlanProposed,
@@ -491,6 +493,10 @@ class _ExecutorRecord:
     # The lineage of the frame a drawn card rests on, taken off its result
     # with the write token, which the card's write commits with the card.
     card_lineage: CardLineage | None = None
+    # Stamped with `land`: the plan step whose result the frame the card
+    # draws was registered as, None for a frame registered outside a plan's
+    # hand-back or one two steps gave (`harness.graph.state.frame_plan_step`).
+    plan_step: str | None = None
 
 
 class _Records:
@@ -583,17 +589,20 @@ class _RecordingExecutor:
     def store(self) -> StudioStore:
         return self._store
 
-    def land_component(self, component: dict[str, Any]) -> None:
+    def land_component(self, component: dict[str, Any], *, plan_step: str | None = None) -> None:
         """The synchronous stamping capability `make_charts` calls right after
         `write_component` returns, with no `await` in between. Stamps `land`
         onto this call's own recorded write (matched by identity: the record
         whose result carries this exact `component` object) so
-        `_component_frames` can perform the landing later, at drain time.
+        `_component_frames` can perform the landing later, at drain time,
+        and `plan_step`, the plan step the card's frame was registered from
+        (`harness.graph.state.frame_plan_step`), beside it.
         Never touches the conversation itself; a component with no matching
         record (this capability called directly, not through `__call__`
         first) leaves nothing to stamp and is silently a no-op."""
         if (record := self._record_for(component)) is not None:
             record.land = True
+            record.plan_step = plan_step
 
     def _record_for(self, component: dict[str, Any]) -> _ExecutorRecord | None:
         """The latest record whose result carries this exact `component`
@@ -822,6 +831,9 @@ class _RecordingSurface:
         # The same plan's label for each step, by conversation: the Activity
         # feed names a plan step's line with it.
         self._step_labels: dict[str, dict[str, str]] = {}
+        # The plan card's step each workflow step runs for, by conversation
+        # (`plan_display.card_steps`): an Activity line names it as its plan step.
+        self._card_steps: dict[str, dict[str, str]] = {}
         # When each plan step's call in flight started, by (conversation,
         # step id). A call that returns or fails takes its entry with it
         # (`_record`); a cancelled one leaves it for `mark_step_failed`.
@@ -1095,6 +1107,7 @@ class _RecordingSurface:
         conversation: str,
         order: Sequence[str],
         labels: Mapping[str, str] | None = None,
+        card_steps: Mapping[str, str] | None = None,
     ) -> None:
         """Remember `conversation`'s latest approved plan's workflow step order.
 
@@ -1103,10 +1116,12 @@ class _RecordingSurface:
         waves (`executor.run._Run.execute`), so two independent steps can
         finish, and get recorded, in the opposite order the plan lists
         them; `step_order` lets `_drain_recorder` put them back. `labels`
-        are the plan's own label for each step, by step id.
+        are the plan's own label for each step, by step id, and `card_steps`
+        the card step each workflow step runs for (`card_step`).
         """
         self._step_order[conversation] = list(order)
         self._step_labels[conversation] = dict(labels or {})
+        self._card_steps[conversation] = dict(card_steps or {})
 
     def step_order(self, conversation: str) -> list[str]:
         """`conversation`'s latest plan step order, or `[]` if none was set."""
@@ -1115,6 +1130,16 @@ class _RecordingSurface:
     def step_labels(self, conversation: str) -> dict[str, str]:
         """`conversation`'s latest plan step labels by step id, or `{}`."""
         return self._step_labels.get(conversation, {})
+
+    def card_step(self, conversation: str, step: str) -> str | None:
+        """The step of `conversation`'s latest plan card that workflow step
+        `step` runs for (`plan_display.card_steps`), or None for a step the
+        card shows in no row. A plan whose card steps were not kept names
+        the steps it holds labels for, the card's own."""
+        card_steps = self._card_steps.get(conversation)
+        if card_steps:
+            return card_steps.get(step)
+        return step if step in self.step_labels(conversation) else None
 
 
 # ---------------------------------------------------------------------------
@@ -1446,6 +1471,7 @@ def plan_approved(
             changed_from=held
             if (held := baseline.get(decision.choice_id)) != labels[decision.choice_id]
             else None,
+            step_ids=decision.step_ids,
         )
         for decision in card.decisions or ()
         if decision.choice_id is not None
@@ -1459,7 +1485,7 @@ def plan_approved(
         title=card.title,
         summary=card.summary,
         steps=[
-            PlanApprovedStep(label=step.label, gives_answer=step.gives_answer)
+            PlanApprovedStep(id=step.id, label=step.label, gives_answer=step.gives_answer)
             for step in card.steps
         ],
         choices=choices,
@@ -1974,6 +2000,7 @@ class _Translator:
                 )
             frames.extend(self._close_status())
         elif node == "execute":
+            self._remember_plan_frames(output)
             # The run's records came with this event, so a line still
             # running belongs to a step that recorded nothing.
             frames.extend(self._close_unrecorded_steps(output))
@@ -1989,6 +2016,57 @@ class _Translator:
             self._answer_step = self._answer_detail = None
             self._wire_step_ids.clear()
         return frames
+
+    def _remember_plan_frames(self, output: Mapping[str, Any]) -> None:
+        """Keep the plan and plan step of each final frame the `execute`
+        node's `output` hands back (`frame_refs`, with `frame_ref_steps`
+        beside them), in the turn's map of plan frames
+        (`ConversationState.turn_plan_frames`), so a card drawn on one names
+        them. The plan is the wire id of the run's `plan_version`; a run
+        whose version the turn gave no card keeps nothing."""
+        plan_version_id = self._conversation.plan_version_ids.get(output.get("plan_version"))
+        if plan_version_id is None:
+            return
+        steps = output.get("frame_ref_steps") or ()
+        for ref, step in zip(output.get("frame_refs") or (), steps, strict=True):
+            if step.get("is_final_step") and step.get("step_id"):
+                self._conversation.turn_plan_frames[frame_id_for(ref)] = PlanLink(
+                    plan_version_id=plan_version_id, plan_step_id=str(step["step_id"])
+                )
+
+    def _plan_of(self, record: _ExecutorRecord) -> PlanLink | None:
+        """The plan step whose frame the card `record` wrote draws: the one
+        the turn's map of plan frames holds for the write's `intent.frame_ref`,
+        when it is the step the frame was registered from as `make_charts`
+        drew it (`_ExecutorRecord.plan_step`), and `None` otherwise. A frame
+        id names the frame's content, so the map alone cannot tell a plan's
+        frame from the same frame fetched outside the plan, or say which of
+        two steps that gave it the card draws."""
+        if record.tool != "write_component":
+            return None
+        intent = record.args.get("intent")
+        ref = intent.get("frame_ref") if isinstance(intent, dict) else None
+        if not isinstance(ref, dict):
+            return None
+        link = self._conversation.turn_plan_frames.get(frame_id_for(ref))
+        return link if link is not None and link["plan_step_id"] == record.plan_step else None
+
+    def _plan_step(self, step: str | None) -> dict[str, str]:
+        """The members of an `activity.step` line running plan step `step`:
+        the card step it runs for (`_RecordingSurface.card_step`) and the
+        wire id of the plan running it, the turn's latest card, since every
+        run follows the approval of the card the turn showed last. Empty for
+        a line outside a plan, for one whose plan the conversation gave no
+        card, and for a step the card shows in no row."""
+        plan_version_id = self._conversation.plan_version_ids.get(
+            self._conversation.latest_plan_version
+        )
+        if step is None or plan_version_id is None or self._surface_recorder is None:
+            return {}
+        card_step = self._surface_recorder.card_step(current_conversation_id.get(), step)
+        if card_step is None:
+            return {}
+        return {"plan_version_id": plan_version_id, "plan_step_id": card_step}
 
     def _planner_call_status(self, name: str) -> list[ActivityStep]:
         """The status line for one of the planner's own calls. A
@@ -2144,6 +2222,7 @@ class _Translator:
             status=StepStatus.RUNNING,
             tool=tool or None,
             detail=_plan_step_detail(progress),
+            **self._plan_step(step),
         )
 
     def _close_unrecorded_steps(self, output: Mapping[str, Any]) -> list[ActivityStep]:
@@ -2165,8 +2244,9 @@ class _Translator:
                 tool=tool or None,
                 detail=failure_detail({"code": code, "retry_mode": RetryMode.DO_NOT_RETRY.value}),
                 duration_ms=int((now - started) * 1000),
+                **self._plan_step(plan_step),
             )
-            for step_id, label, tool, started in self._running_plan_steps.values()
+            for plan_step, (step_id, label, tool, started) in self._running_plan_steps.items()
         ]
         self._running_plan_steps.clear()
         return frames
@@ -2233,8 +2313,9 @@ class _Translator:
                 # `McpExecutor` refuses a card that fails this contract
                 # (`stored_card_unreadable`). A bare executor's card is logged
                 # and left off the wire here.
+                plan = self._plan_of(record)
                 try:
-                    created = component_created(component, step_id=step_id)
+                    created = component_created(component, step_id=step_id, plan=plan)
                 except ValidationError as fault:
                     log_unreadable_card(
                         logger, component, fault, where="record_frames", frame=step_id
@@ -2267,6 +2348,7 @@ class _Translator:
                         if isinstance(component, dict) and created is not None
                         else None
                     ),
+                    **self._plan_step(record.step_id),
                 )
             )
             if isinstance(component, dict) and created is not None:
@@ -2287,6 +2369,7 @@ class _Translator:
                         write_token=record.write_token,
                         card_lineage=record.card_lineage,
                         unit_card=card,
+                        plan=plan,
                     )
                 )
         return frames
@@ -2322,6 +2405,7 @@ class _Translator:
         write_token: str | None = None,
         card_lineage: CardLineage | None = None,
         unit_card: UnitCard | None = None,
+        plan: PlanLink | None = None,
     ) -> list[Any]:
         """Frames for `component`, which passed the `component.created` wire
         contract (`created` is the frame `_record_frames` built from it).
@@ -2338,7 +2422,7 @@ class _Translator:
         itself, also only `component.created`, and writes the card's entry
         with no block. The card's `write_token` is kept with it, in its
         write, and its `card_lineage` commits in that write, as does its
-        `unit_card` with its entry. A card that does not land keeps its token
+        `unit_card` and `plan` with its entry. A card that does not land keeps its token
         in the conversation for the closing write, and stores no lineage."""
         created.seq = self._conversation.next_seq()
         if not land:
@@ -2351,6 +2435,7 @@ class _Translator:
             write_token=write_token,
             card_lineage=card_lineage,
             unit_card=unit_card,
+            plan=plan,
         )
         if landed != "created":
             return [created]
@@ -2365,6 +2450,7 @@ class _Translator:
         write_token: str | None,
         card_lineage: CardLineage | None = None,
         unit_card: UnitCard | None = None,
+        plan: PlanLink | None = None,
     ) -> Literal["created", "held"]:
         """`harness.studio_state.land_component` on the current
         conversation, inside the store's card write
@@ -2388,6 +2474,7 @@ class _Translator:
                 intent=intent,
                 unit_card=unit_card.as_json() if unit_card is not None else None,
                 lineage=card_lineage,
+                plan=plan,
             )
 
         return await self._recorder.store.change_canvas(
@@ -2564,9 +2651,10 @@ class _Translator:
                 else [step.id for step in steps]
             )
             step_labels = {step.id: step.label for step in steps}
+            card_steps = plan_display.card_steps(plan)
             if self._surface_recorder is not None:
                 self._surface_recorder.set_step_order(
-                    current_conversation_id.get(), step_order, step_labels
+                    current_conversation_id.get(), step_order, step_labels, card_steps
                 )
             # A requirement cites only the card's rows: a caveat it cites
             # reaches the card as a caveat alone.
@@ -2599,6 +2687,7 @@ class _Translator:
                 )
                 for row in plan_display.ask_rows(plan)
             ]
+            decision_steps = plan_display.decision_steps(plan)
             decisions = [
                 PlanDecision.model_validate(
                     {
@@ -2622,6 +2711,7 @@ class _Translator:
                         "resolved_by": _RESOLVED_BY_TO_WIRE.get(
                             decision.get("resolved_by", ""), "default"
                         ),
+                        "step_ids": decision_steps.get(decision["slot"]),
                         # A unit row words its choice and alternatives as its options.
                         **_choice_members(
                             held,
@@ -2672,6 +2762,7 @@ class _Translator:
                 plan_revision=revision,
                 step_order=tuple(step_order),
                 step_labels=step_labels,
+                card_steps=card_steps,
                 choices=choices,
                 card=card,
                 frames=tuple(frames),

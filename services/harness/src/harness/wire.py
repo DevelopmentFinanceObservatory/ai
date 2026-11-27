@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 from enum import StrEnum
-from typing import Annotated, Any, Literal, cast, get_args
+from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 
 from common.place_type import PartyClass
 from pydantic import (
@@ -1497,6 +1497,13 @@ class PlanDecision(_WireModel):
     that renders no unit picker switches between them. A decision without
     `choice_id` cannot be switched, and only one with `choice_id` carries
     `unit`.
+
+    `step_ids` are the ids of the plan's steps (`PlanStep.id`) the decision
+    applies to: those carrying out a requirement that cites it and every
+    step reading their results (`harness.plan_display.decision_steps`). A
+    decision no requirement cites applies to the whole plan and names every
+    step. A replan reuses step ids, so a step is named by the plan's
+    `plan_version_id` and its id together.
     """
 
     id: str
@@ -1509,6 +1516,7 @@ class PlanDecision(_WireModel):
     active_option_id: str | None = None
     options: list[PlanDecisionOption] | None = None
     unit: UnitOffer | None = None
+    step_ids: list[str] | None = None
 
     @model_validator(mode="after")
     def _scope_members_come_together(self) -> PlanDecision:
@@ -1667,9 +1675,13 @@ class PlanVersioned(_WireModel):
 
 
 class PlanApprovedStep(_WireModel):
-    """One step of the approved plan: its label, and whether its result
-    answers the user's question."""
+    """One step of the approved plan: its id (`PlanStep.id`, the
+    `plan_step_id` its `activity.step` lines carry), its label, and whether
+    its result answers the user's question. A replan reuses step ids, so a
+    step is named by the plan's `plan_version_id` and its `id` together."""
 
+    # A `plan.approved` stored before steps carried ids has none.
+    id: str | None = None
     label: str
     gives_answer: bool | None = None
 
@@ -1679,13 +1691,17 @@ class PlanApprovedChoice(_WireModel):
     card's `PlanDecision.choice_id` carries, `"decision/<slot>"` for a
     planner decision), its short name (`question`), the option label it holds
     (`chosen`) and, when a switch of the turn changed it, the label it held
-    on the card the user first switched from (`changed_from`)."""
+    on the card the user first switched from (`changed_from`), and the ids
+    of the plan steps it applies to (`step_ids`, as `PlanDecision.step_ids`
+    states them)."""
 
     # Delta 24 (v1.9): a `plan.approved` stored before it has no `choice_id`.
     choice_id: str
     question: str
     chosen: str
     changed_from: str | None = None
+    # A `plan.approved` stored before choices named their steps has none.
+    step_ids: list[str] | None = None
 
 
 class PlanApproved(_WireModel):
@@ -1747,14 +1763,37 @@ class ActivityStep(_WireModel):
     duration_ms: int | None = None
     produced: StepProduced | None = None
     progress: StepProgress | None = None
+    # The plan this line runs a step of and that step (`PlanStep.id`), both
+    # or neither; absent on a line outside a plan. A replan reuses step ids,
+    # so a step is named by the two together.
+    plan_version_id: str | None = None
+    plan_step_id: str | None = None
 
 
 class CreatedFrom(_WireModel):
     """The step and message that produced this card, for Activity-trace
-    linking and "Ask follow up"."""
+    linking and "Ask follow up".
+
+    `plan_version_id` and `plan_step_id` name the plan and the plan step
+    (`PlanStep.id`) whose result the card draws, both or neither: a card
+    drawn from a frame no plan step produced names no plan. A replan reuses
+    step ids, so a step is named by the two together. A card that takes
+    another's slot (`ComponentCreated.replaces`) keeps the plan of the card
+    it replaced."""
 
     step_id: str
     message_seq: int | None = Field(default=None, ge=0)
+    plan_version_id: str | None = None
+    plan_step_id: str | None = None
+
+
+class PlanLink(TypedDict):
+    """The plan and plan step a card's frame came from, as `CreatedFrom`
+    names them; stored with the card's entry and in the turn's map of plan
+    frames (`harness.studio_state`)."""
+
+    plan_version_id: str
+    plan_step_id: str
 
 
 class ComponentCreated(_WireModel):
@@ -1781,10 +1820,13 @@ class ComponentCreated(_WireModel):
     replaces: str | None = None
 
 
-def component_created(component: dict[str, Any], *, step_id: str) -> ComponentCreated:
+def component_created(
+    component: dict[str, Any], *, step_id: str, plan: PlanLink | None = None
+) -> ComponentCreated:
     """The `component.created` frame for `component` (a `write_component`
     result's own `component` member), with `seq` 0 until the caller stamps it.
-    `step_id` is the step that produced it, unless the component names its own.
+    `step_id` is the step that produced it and `plan` the plan step its frame
+    came from, unless the component names its own `created_from`.
 
     Raises:
         ValidationError: `component` does not satisfy the contract above.
@@ -1794,7 +1836,7 @@ def component_created(component: dict[str, Any], *, step_id: str) -> ComponentCr
             **component,
             "event": "component.created",
             "seq": 0,
-            "created_from": component.get("created_from") or {"step_id": step_id},
+            "created_from": component.get("created_from") or {"step_id": step_id, **(plan or {})},
         }
     )
 
@@ -2116,7 +2158,12 @@ class StoredCard(_WireModel):
     from what the conversation keeps with the card, set while the card is on
     the canvas. `replaces` names the card whose canvas slot this one took,
     on the closed turn that swapped it in. A card an earlier release stored
-    carries no `replaces`."""
+    carries no `replaces`.
+
+    `plan_version_id` and `plan_step_id` are the plan and plan step its
+    `component.created` named in `created_from` (`CreatedFrom`), both or
+    neither, so a page that missed the stream links the card to the turn's
+    approved plan."""
 
     component_id: str
     type: str
@@ -2125,6 +2172,8 @@ class StoredCard(_WireModel):
     fact_summary: FactSummary | None = None
     unit_change: UnitChange | None = None
     replaces: str | None = None
+    plan_version_id: str | None = None
+    plan_step_id: str | None = None
 
 
 class ClosedTurn(_WireModel):

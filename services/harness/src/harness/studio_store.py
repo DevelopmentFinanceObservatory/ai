@@ -170,6 +170,7 @@ from harness.wire import (
     CompositionManifest,
     ElicitationInput,
     ErrorCode,
+    PlanLink,
     PlanProposed,
     UnitOffer,
     declared_features,
@@ -210,6 +211,12 @@ _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
 _KEY_TURN_APPROVED = "turn_approved"
+_KEY_TURN_APPROVED_ADDED = "turn_approved_added"
+_KEY_TURN_PLAN_FRAMES = "turn_plan_frames"
+# The members of the stored map of plan frames: the turn index it was written
+# in and the map itself (`_plan_frames_of`).
+_PLAN_FRAMES_TURN = "turn_index"
+_PLAN_FRAMES_MAP = "frames"
 _KEY_TURN_USAGE = "turn_usage"
 _SCALAR_KEYS = frozenset(
     {
@@ -235,6 +242,8 @@ _SCALAR_KEYS = frozenset(
         _KEY_TURN_APPLIED_CHOICE,
         _KEY_TURN_CHOICE_BASELINE,
         _KEY_TURN_APPROVED,
+        _KEY_TURN_APPROVED_ADDED,
+        _KEY_TURN_PLAN_FRAMES,
         _KEY_TURN_USAGE,
     }
 )
@@ -422,6 +431,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "legacy": p.legacy,
             "step_order": list(p.step_order),
             "step_labels": dict(p.step_labels),
+            "card_steps": dict(p.card_steps),
             "resuming_segment": p.resuming_segment,
             "answer": p.answer,
             "choices": {
@@ -434,17 +444,17 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
                 }
                 for choice_id, choice in p.choices.items()
             },
-            # `new_plan` is stored beside the card, and each decision's `unit`
+            # `new_plan` is stored beside the card, each decision's `unit`
             # and each unit question's offer beside the card and the frames
-            # (`_units_apart`, `_unit_questions_apart`). An instance rolled back
+            # (`_units_apart`, `_unit_questions_apart`), and each member of
+            # `_ADDED_MEMBERS` too (`_added_apart`). An instance rolled back
             # to a model without them
             # cannot load a stored card or frame that holds them, and ignores
             # an unknown key of the entry.
-            **_units_apart(
-                "card",
+            **_card_apart(
                 p.card.model_dump(mode="json", exclude_none=True, exclude={"new_plan"})
                 if p.card
-                else None,
+                else None
             ),
             "card_new_plan": bool(p.card and p.card.new_plan),
             # Written only when set: an entry with no admitted run has no key.
@@ -460,6 +470,99 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
         }
         for interrupt_id, p in pending.items()
     }
+
+
+# The members of a stored frame's list items that a release this one can be
+# rolled back to refuses, by the frame's `event` and the list they sit in. A
+# pause's card and frames and the turn's approved plans are stored without
+# them, the members beside each frame (`_added_apart`), and a load puts them
+# back (`_added_back`). Another such member is one more name here.
+_ADDED_MEMBERS: dict[str, dict[str, frozenset[str]]] = {
+    "plan.proposed": {"decisions": frozenset({"step_ids"})},
+    "plan.approved": {"steps": frozenset({"id"}), "choices": frozenset({"step_ids"})},
+}
+
+
+def _added_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """`frame` with no member `_ADDED_MEMBERS` names for its event, and those
+    members, by list and by each item's index there, empty when it holds none."""
+    kept = dict(frame)
+    added: dict[str, Any] = {}
+    for name, members in _ADDED_MEMBERS.get(frame.get("event", ""), {}).items():
+        items = frame.get(name) or ()
+        moved = {
+            str(index): taken
+            for index, item in enumerate(items)
+            if (taken := {k: v for k, v in item.items() if k in members})
+        }
+        if moved:
+            kept[name] = [{k: v for k, v in item.items() if k not in members} for item in items]
+            added[name] = moved
+    return kept, added
+
+
+def _added_back(frame: dict[str, Any], added: Mapping[str, Any] | None) -> dict[str, Any]:
+    """`frame` with the members `_added_apart` took from it put back."""
+    if not added:
+        return frame
+    return {
+        **frame,
+        **{
+            name: [
+                {**item, **(moved.get(str(index)) or {})}
+                for index, item in enumerate(frame.get(name) or ())
+            ]
+            for name, moved in added.items()
+        },
+    }
+
+
+def _card_apart(card: dict[str, Any] | None) -> dict[str, Any]:
+    """A pause's `card` under `"card"` with its units under `"card_units"`
+    (`_units_apart`) and its added members under `"card_added"`
+    (`_added_apart`), each key written only when it holds something."""
+    if card is None:
+        return {"card": None}
+    card, added = _added_apart(card)
+    return {**_units_apart("card", card), **({"card_added": added} if added else {})}
+
+
+def _approved_apart(
+    frames: Sequence[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """`frames`, stored `plan.approved` frames, without their added members,
+    and those members by each frame's plan `revision` (`_added_apart`). A
+    rolled-back release that rewrites the frames leaves the members where
+    they were, and the revision keeps them off another plan's frame."""
+    apart = [_added_apart(frame) for frame in frames]
+    return [kept for kept, _ in apart], {
+        str(kept.get("revision")): added for kept, added in apart if added
+    }
+
+
+def _approved_back(
+    frames: Sequence[dict[str, Any]], added: Mapping[str, Any] | None
+) -> list[dict[str, Any]]:
+    """The frames `_approved_apart` split, whole again."""
+    return [_added_back(frame, (added or {}).get(str(frame.get("revision")))) for frame in frames]
+
+
+def _turn_record_apart(record: dict[str, Any]) -> dict[str, Any]:
+    """A turn record as stored: its `approved` plans without their added
+    members, which go under `approved_added` (`_approved_apart`)."""
+    if not record.get("approved"):
+        return record
+    approved, added = _approved_apart(record["approved"])
+    return {**record, "approved": approved, **({"approved_added": added} if added else {})}
+
+
+def _turn_record_back(record: Any) -> Any:
+    """The turn record `_turn_record_apart` stored, whole again."""
+    if not isinstance(record, dict) or "approved_added" not in record:
+        return record
+    whole = {key: value for key, value in record.items() if key != "approved_added"}
+    whole["approved"] = _approved_back(record.get("approved") or (), record["approved_added"])
+    return whole
 
 
 def _units_apart(key: str, frame: dict[str, Any] | None) -> dict[str, Any]:
@@ -479,20 +582,24 @@ def _units_apart(key: str, frame: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _frames_apart(frames: list[dict[str, Any]]) -> dict[str, Any]:
-    """`frames` under `"frames"`, each with no decision's `unit` and no unit question's
-    offer, each frame's units taken out, by its index, under `"frames_units"`, and its
-    unit questions' offers under `"frames_unit_questions"`, when there is one
-    (`_units_apart`, `_unit_questions_apart`)."""
-    asked = [_unit_questions_apart(frame) for frame in frames]
+    """`frames` under `"frames"`, each with no decision's `unit`, no unit question's
+    offer and no added member, each frame's units taken out, by its index, under
+    `"frames_units"`, its unit questions' offers under `"frames_unit_questions"`, and
+    its added members under `"frames_added"`, when there is one (`_units_apart`,
+    `_unit_questions_apart`, `_added_apart`)."""
+    taken = [_added_apart(frame) for frame in frames]
+    asked = [_unit_questions_apart(frame) for frame, _ in taken]
     apart = [_units_apart("frame", frame) for frame, _ in asked]
     units = {
         str(index): one["frame_units"] for index, one in enumerate(apart) if "frame_units" in one
     }
     offers = {str(index): one for index, (_, one) in enumerate(asked) if one}
+    added = {str(index): one for index, (_, one) in enumerate(taken) if one}
     return {
         "frames": [one["frame"] for one in apart],
         **({"frames_units": units} if units else {}),
         **({"frames_unit_questions": offers} if offers else {}),
+        **({"frames_added": added} if added else {}),
     }
 
 
@@ -627,6 +734,7 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         plan_revision=entry.get("plan_revision"),
         step_order=tuple(entry.get("step_order") or ()),
         step_labels=dict(entry.get("step_labels") or {}),
+        card_steps=dict(entry.get("card_steps") or {}),
         resuming_segment=entry.get("resuming_segment"),
         answer=entry.get("answer"),
         choices={
@@ -642,7 +750,10 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         card=(
             PlanProposed.model_validate(
                 {
-                    **_units_back(entry["card"], entry.get("card_units")),
+                    **_added_back(
+                        _units_back(entry["card"], entry.get("card_units")),
+                        entry.get("card_added"),
+                    ),
                     "new_plan": True if entry.get("card_new_plan") else None,
                 }
             )
@@ -652,9 +763,12 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         admitted_run=entry.get("admitted_run"),
         frames=tuple(
             STUDIO_FRAME_ADAPTER.validate_python(
-                _unit_questions_back(
-                    _units_back(frame, (entry.get("frames_units") or {}).get(str(index))),
-                    (entry.get("frames_unit_questions") or {}).get(str(index)),
+                _added_back(
+                    _unit_questions_back(
+                        _units_back(frame, (entry.get("frames_units") or {}).get(str(index))),
+                        (entry.get("frames_unit_questions") or {}).get(str(index)),
+                    ),
+                    (entry.get("frames_added") or {}).get(str(index)),
                 )
             )
             for index, frame in enumerate(entry.get("frames") or ())
@@ -687,6 +801,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
     """Every durable field of `state` as the flat map the tables store,
     proven JSON-safe. Both a save's candidate delta (before diffing against
     a baseline) and the snapshot later saves diff against."""
+    approved, approved_added = _approved_apart(state.turn_approved)
     data: dict[str, Any] = {
         _KEY_TURN_INDEX: state.turn_index,
         _KEY_SEQ: state.seq,
@@ -715,11 +830,23 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
-        _KEY_TURN_APPROVED: state.turn_approved,
+        # The approved plans' added members are stored beside them
+        # (`_approved_apart`), as a pause's are.
+        _KEY_TURN_APPROVED: approved,
+        _KEY_TURN_APPROVED_ADDED: approved_added,
+        # Stamped with the turn it belongs to: a release that writes no map
+        # leaves the previous turn's in place (`_plan_frames_of`). An empty
+        # map needs no stamp, so a new turn's index alone changes no key here.
+        _KEY_TURN_PLAN_FRAMES: {
+            _PLAN_FRAMES_TURN: state.turn_index,
+            _PLAN_FRAMES_MAP: state.turn_plan_frames,
+        }
+        if state.turn_plan_frames
+        else {},
         _KEY_TURN_USAGE: dataclasses.asdict(state.turn_usage),
     }
     for index, turn in enumerate(state.turns):
-        data[f"{_TURN_ITEM_PREFIX}{index}"] = turn
+        data[f"{_TURN_ITEM_PREFIX}{index}"] = _turn_record_apart(turn)
     for component_id, component_entry in state.components.items():
         data[f"{_COMPONENT_ITEM_PREFIX}{component_id}"] = component_entry
     for component_id, token in state.write_tokens.items():
@@ -740,10 +867,22 @@ def _set_list_item(items: list[Any], index: int, value: Any) -> None:
         items.append(value)
 
 
+def _plan_frames_of(stored: Any, *, turn_index: int) -> dict[str, PlanLink]:
+    """The turn's map of plan frames (`ConversationState.turn_plan_frames`)
+    from its stored value, empty unless that value is stamped with
+    `turn_index`. A release that stores no map merges only the keys it knows
+    into `turn_state`, so a turn it began keeps the previous turn's map, whose
+    frames name that turn's plans."""
+    if not isinstance(stored, Mapping) or stored.get(_PLAN_FRAMES_TURN) != turn_index:
+        return {}
+    return dict(stored.get(_PLAN_FRAMES_MAP) or {})
+
+
 def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
     """Merge `delta` (a subset of `_serialize_durable`'s keys) onto `state`
     in place. A key this release does not know (one a later release wrote
     into `turn_state`) is logged and ignored."""
+    turn_index = state.turn_index
     for key, value in delta.items():
         if key == _KEY_TURN_INDEX:
             state.turn_index = value
@@ -795,12 +934,16 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_applied_choice = dict(value) if value else None
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
-        elif key == _KEY_TURN_APPROVED:
-            state.turn_approved = list(value or ())
+        elif key in (_KEY_TURN_APPROVED, _KEY_TURN_APPROVED_ADDED):
+            pass  # after the loop, the two together
+        elif key == _KEY_TURN_PLAN_FRAMES:
+            pass  # after the loop, once `turn_index` holds its value from this delta
         elif key == _KEY_TURN_USAGE:
             pass  # after the loop, once `trace_id` holds its value from this delta
         elif key.startswith(_TURN_ITEM_PREFIX):
-            _set_list_item(state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), value)
+            _set_list_item(
+                state.turns, int(key.removeprefix(_TURN_ITEM_PREFIX)), _turn_record_back(value)
+            )
         elif key.startswith(_COMPONENT_ITEM_PREFIX):
             state.components[key.removeprefix(_COMPONENT_ITEM_PREFIX)] = value
         elif key.startswith(_WRITE_TOKEN_ITEM_PREFIX):
@@ -810,6 +953,20 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             _set_list_item(state.approvals, index, ApprovalRecord.model_validate(value))
         else:
             logger.warning("studio store: ignoring unknown turn state key %r", key)
+    if _KEY_TURN_APPROVED in delta or _KEY_TURN_APPROVED_ADDED in delta:
+        # A delta carries either key alone when only it changed, so the other
+        # is read from the plans `state` holds.
+        approved, added = _approved_apart(state.turn_approved)
+        state.turn_approved = _approved_back(
+            list(delta.get(_KEY_TURN_APPROVED, approved) or ()),
+            delta.get(_KEY_TURN_APPROVED_ADDED, added),
+        )
+    if _KEY_TURN_PLAN_FRAMES in delta:
+        state.turn_plan_frames = _plan_frames_of(
+            delta[_KEY_TURN_PLAN_FRAMES], turn_index=state.turn_index
+        )
+    elif state.turn_index != turn_index:
+        state.turn_plan_frames = {}
     if _KEY_TURN_USAGE in delta:
         state.turn_usage = _turn_usage(delta[_KEY_TURN_USAGE], trace_id=state.trace_id)
     elif state.turn_usage.trace_id != (state.trace_id or None):
