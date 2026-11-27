@@ -1196,8 +1196,8 @@ class TurnRequest(_WireModel):
     same follow-up after turn N at most one begins a turn.
 
     `hold_removals` asks the stream to hold the `composition.updated` of a
-    card removal until the next `make_charts` line, or until the response
-    or the segment ends when nothing is drawn. Absent or false, the update
+    card removal until the next `make_charts` line, or until the segment
+    ends when nothing is drawn. Absent or false, the update
     goes out as the removal's answer is translated, ahead of the removal's
     closing line. It applies to the stream this request opens, and
     `InterruptResponse` and `ResumeRequest` carry it the same way.

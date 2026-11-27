@@ -2448,17 +2448,17 @@ async def _held_removal(engine: AsyncEngine) -> tuple[StudioStore, _Translator, 
 
 
 @pytest.mark.parametrize("ending", ["draws", "answers", "done", "pause", "error"])
-async def test_a_removal_shows_beside_the_next_drawing_line_or_when_nothing_is_drawn(
+async def test_a_removal_shows_beside_the_next_drawing_line_or_as_the_segment_ends(
     pg_engine: AsyncEngine, ending: str
 ) -> None:
     """The canvas update of a removal waits through the removal's answer, so
     the removed cards stay on screen until the cards replacing them are
     announced. It goes out right after the next response's `make_charts`
-    line, or as the next response ends when that draws nothing, after the
-    text it streamed delta by delta, which never waits for the update. When
-    the segment ends first, on `done`, a pause or a failure, the translator
-    still holds it, once, for the stream's owner to send before the ending
-    frame (`release_removal`, which the work's `owed` hands over)."""
+    line. A response that only answers in text streams it delta by delta
+    and leaves the update held. When the segment ends with it held, on
+    `done`, a pause or a failure, the translator gives it, once, to the
+    stream's owner to send before the ending frame (`release_removal`,
+    which the work's `owed` hands over)."""
     _, translator, held = await _held_removal(pg_engine)
     match ending:
         case "draws":
@@ -2493,13 +2493,96 @@ async def test_a_removal_shows_beside_the_next_drawing_line_or_when_nothing_is_d
             assert events[shown - 1] == "make_charts:running"
         case "answers":
             # Each delta is its own frame, sent as it streams, and the update
-            # follows the last of them.
+            # waits for the segment's end.
             assert texts == ["Do", "ne."]
-            assert events.index("composition.updated") > max(
-                index for index, event in enumerate(events) if event == "message.delta"
-            )
+            assert "composition.updated" not in events
         case _:
             assert "composition.updated" not in events
+
+
+def _responding(*calls: tuple[str, str]) -> ModelResponded:
+    """A model response making each `(id, tool)` call."""
+    return ModelResponded(
+        parts=tuple(
+            types.Part(function_call=types.FunctionCall(id=call_id, name=tool, args={}))
+            for call_id, tool in calls
+        )
+    )
+
+
+def _answering(*calls: tuple[str, str]) -> ToolsAnswered:
+    return ToolsAnswered(
+        answers=tuple(
+            types.FunctionResponse(id=call_id, name=tool, response={"ok": True})
+            for call_id, tool in calls
+        ),
+        state={},
+    )
+
+
+@pytest.mark.parametrize(
+    ("again", "draws"),
+    [(False, True), (False, False), (True, True)],
+    ids=["draws-two-responses-on", "never-draws", "two-removals-then-draws"],
+)
+async def test_a_held_removal_waits_through_responses_that_draw_nothing(
+    pg_engine: AsyncEngine, again: bool, draws: bool
+) -> None:
+    """With `hold_removals`, a turn removes a card and searches in one
+    response, reads and fetches in the next, removing the other card too
+    when `again`, then draws or answers in text. A response that draws
+    nothing releases nothing: one update goes out right after the drawing
+    line, carrying every removal so far, or, when nothing is drawn, as the
+    segment ends (`release_removal`)."""
+    current_conversation_id.set("c1")
+    store, conversation = await _stored_conversation(pg_engine)
+    for held in ("cmp_01", "cmp_02"):
+        await store.mutate_composition(
+            "principal",
+            "c1",
+            _on_canvas(
+                conversation,
+                lambda held=held: land_component(conversation, _written_component(held)),
+            ),
+        )
+    translator = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_dummy_executor, store=store),
+        hold_removals=True,
+    )
+
+    async def remove(card: str) -> None:
+        await store.mutate_composition(
+            "principal",
+            "c1",
+            _on_canvas(conversation, lambda: remove_cards(conversation, [card], all_cards=False)),
+        )
+
+    first = (("r1", "remove_cards"), ("s1", "search"))
+    frames = await translated(translator, _responding(*first))
+    await remove("cmp_01")
+    frames += await translated(translator, _answering(*first))
+    second = (("f1", "fetch"), *((("r2", "remove_cards"),) if again else ()))
+    frames += await translated(translator, _responding(*second))
+    if again:
+        await remove("cmp_02")
+    frames += await translated(translator, _answering(*second))
+    frames += await translated(
+        translator,
+        _DRAWING if draws else ModelResponded(parts=(types.Part(text="Done."),)),
+    )
+    owed = translator.release_removal()
+
+    events = [
+        f"{f.tool}:{f.status.value}" if f.event == "activity.step" else f.event for f in frames
+    ]
+    sent = [f.manifest for f in [*frames, *owed] if f.event == "composition.updated"]
+    assert [[b.component_id for b in m.blocks] for m in sent] == [[] if again else ["cmp_02"]]
+    if draws:
+        shown = events.index("composition.updated")
+        assert events[shown - 1] == "make_charts:running"
+    else:
+        assert "composition.updated" not in events
 
 
 async def test_a_held_removal_shows_a_canvas_edit_made_while_it_was_held(

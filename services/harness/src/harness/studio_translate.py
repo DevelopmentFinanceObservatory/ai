@@ -2346,8 +2346,9 @@ class _Translator:
         frames: list[Any] = self._close_starting() if records else []
         # A removal changed the canvas as its tool ran. Its frame goes out
         # here, ahead of these records' frames. With `hold_removals` it is
-        # held until the next response's drawing line (`_agent_response`),
-        # unless a card these records drew lands, before which it goes out.
+        # held until the next drawing line (`_agent_response`) or the
+        # segment's end (`release_removal`), unless a card these records drew
+        # lands, before which it goes out.
         if self._conversation.take_unreported_removal():
             if self._hold_removals:
                 self._removal_held = True
@@ -3025,9 +3026,9 @@ class _Translator:
         return frames
 
     def _agent_text(self, text: str) -> list[Any]:
-        """Answer text as the model streams it. A held removal's update goes
-        out as the response ends (`_agent_response`), after the text, since
-        only then is it known whether the response draws."""
+        """Answer text as the model streams it. A held removal's update
+        waits for a drawing line or the segment's end, so it never goes
+        out between deltas."""
         if not text:
             return []
         frames: list[Any] = [*self._close_status(), *self._narration_break()]
@@ -3096,8 +3097,9 @@ class _Translator:
                 # The held removal goes out beside the first line that draws
                 # the cards replacing the removed ones.
                 frames.extend(self._release_removal())
-        # A response that draws nothing releases the held removal.
-        return [*self._release_removal(), *frames]
+        # A response that draws nothing releases nothing: the held removal
+        # waits for a later drawing line or the segment's end (`release_removal`).
+        return frames
 
     def _announce(
         self, call_id: str | None, step_id: str, args: Mapping[str, Any]
