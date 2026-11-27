@@ -1,5 +1,5 @@
 {
-  "_source": "The redraws of a sum of gross ODA disbursements to Kenya for health refused live: the card's stored intent as the platform kept it, the pair its retrieval was served under (old_served), and for each change the new retrieval's served pair, the sum's derived manifest as served and the sum frame's view (describe_frame), each recorded against the dev data API.",
+  "_source": "The redraws of a sum of gross ODA disbursements to Kenya for health refused live: the card's stored intent as the platform kept it, the pair its retrieval was served under (old_served), and for each change the new retrieval's served pair, the sum's derived manifest as served and the sum frame's view (describe_frame), each recorded against the dev data API; the labels its Search block resolved (block_labels: its resolved concept, measure and shape labels and sentence plan, cut from the block), and the card's title as drawn followed by the titles its three changes redrew (titles).",
   "stored_intent": {
     "type": "line_chart",
     "title": "Total gross ODA disbursements to Kenya for health, 2010 to 2020",
@@ -502,5 +502,223 @@
   "old_served": {
     "spec_id": "spec_c3bdd40d307f08d0b3a0cbfff2ba1d00",
     "content_version": "cv_79d2847b0f045c25a31b2a28cd4ec1c6"
-  }
+  },
+  "block_labels": {
+    "spec_id": "spec_c3bdd40d307f08d0b3a0cbfff2ba1d00",
+    "resolved": {
+      "concept_label": "health",
+      "measure_label": "gross disbursements",
+      "shape": {
+        "label": "gross disbursements (health and population policy, programme, and reproductive health, official development assistance)"
+      },
+      "sentence_plan": [
+        {
+          "axis": "what",
+          "kind": "slot",
+          "text": "Gross ODA disbursements",
+          "states": [
+            "how:crsTypeOfFlow",
+            "how:financialFlowType",
+            "how:nettingBasis",
+            "axis:populationType",
+            "axis:measuredProperty"
+          ],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": " to ",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "axis": "where",
+          "kind": "slot",
+          "role": "destination",
+          "text": "Kenya",
+          "states": [
+            "where:"
+          ],
+          "segment": "heading",
+          "binding_ref": "where:",
+          "entity_refs": [
+            "country/KEN"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " from ",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "kind": "slot",
+          "role": "origin",
+          "text": "47 providers",
+          "states": [
+            "origin:"
+          ],
+          "segment": "heading",
+          "binding_ref": "origin:",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": " for ",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "health and population policy, programme, and reproductive health",
+          "states": [
+            "how:crsPurpose"
+          ],
+          "segment": "heading",
+          "binding_ref": "how:crsPurpose",
+          "entity_refs": [],
+          "property_dcid": "crsPurpose"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:crsCooperationModality",
+          "entity_refs": [],
+          "property_dcid": "crsCooperationModality"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:crsTypeOfFinance",
+          "entity_refs": [],
+          "property_dcid": "crsTypeOfFinance"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:iatiTransactionType",
+          "entity_refs": [],
+          "property_dcid": "iatiTransactionType"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:crsTypeOfFlow",
+          "entity_refs": [],
+          "property_dcid": "crsTypeOfFlow"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:financialFlowType",
+          "entity_refs": [],
+          "property_dcid": "financialFlowType"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:nettingBasis",
+          "entity_refs": [],
+          "property_dcid": "nettingBasis"
+        },
+        {
+          "kind": "text",
+          "text": ", ",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "axis": "when",
+          "kind": "slot",
+          "text": "2010 to 2020",
+          "states": [
+            "when:"
+          ],
+          "segment": "heading",
+          "binding_ref": "when:",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "states": [],
+          "segment": "byline",
+          "entity_refs": []
+        },
+        {
+          "axis": "unit",
+          "kind": "slot",
+          "text": "Current US dollars",
+          "states": [
+            "unit:",
+            "axis:measurementQualifier"
+          ],
+          "segment": "byline",
+          "binding_ref": "unit:",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": " \u00b7 ",
+          "states": [],
+          "segment": "byline",
+          "entity_refs": []
+        },
+        {
+          "axis": "source",
+          "kind": "slot",
+          "text": "OECD Creditor Reporting System (CRS)",
+          "states": [
+            "source:"
+          ],
+          "segment": "byline",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "states": [],
+          "segment": "byline",
+          "entity_refs": []
+        }
+      ]
+    }
+  },
+  "titles": [
+    "Total gross ODA disbursements to Kenya for health, 2010 to 2020",
+    "Health, Kenya, 2012 to 2018",
+    "Health, Kenya, 2014 to 2020",
+    "Health, Uganda, 2014 to 2020"
+  ]
 }

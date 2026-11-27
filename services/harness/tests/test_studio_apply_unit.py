@@ -2872,6 +2872,48 @@ _SUMMED_CARD = card_unit.SummedFrame(
 )
 
 
+_RECORDED_SUM_TITLE = "Total gross ODA disbursements to Kenya for health, 2010 to 2020"
+
+
+@pytest.mark.parametrize(
+    ("title", "change", "redrawn"),
+    [
+        (
+            _RECORDED_SUM_TITLE,
+            WindowChange(kind="window", start_year=2012, end_year=2018),
+            "Total gross ODA disbursements to Kenya for health, 2012 to 2018",
+        ),
+        (
+            "Total gross ODA disbursements to Kenya for health, 2012 to 2018",
+            WindowChange(kind="window", start_year=2014, end_year=2020),
+            "Total gross ODA disbursements to Kenya for health, 2014 to 2020",
+        ),
+        (
+            "Total gross ODA disbursements to Kenya for health, 2014 to 2020",
+            PlacesChange(kind="places", role="destination", entities=["country/UGA"]),
+            "Total gross ODA disbursements to Uganda for health, 2014 to 2020",
+        ),
+    ],
+    ids=["years", "years-again", "places"],
+)
+def test_a_changed_sums_title_keeps_its_measure_as_a_plain_cards_does(
+    title: str, change: Any, redrawn: str
+) -> None:
+    """The live sum of health aid to Kenya, changed to 2012 to 2018, then to
+    2014 to 2020, then to Uganda, redrew "Health, Kenya, 2012 to 2018" and
+    the like. A sum's title that counts no members keeps its subject and its
+    measure as a plain card's does: the new period after a change of years,
+    the new place where the title named the old one."""
+    assert _REDRAWS["titles"][0] == _RECORDED_SUM_TITLE
+    move = _move(title, change)
+    move = replace(move, card=replace(move.card, total=_SUMMED_CARD))
+    stored = {"title": title, "type": "line_chart", "frame_ref": dict(_SUM_OPS)}
+
+    intent, _ = _redrawn_intent(stored, dict(_SUM_OPS), move)
+
+    assert intent["title"] == redrawn
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -2880,20 +2922,33 @@ _SUMMED_CARD = card_unit.SummedFrame(
     ],
     ids=["years", "places"],
 )
-def test_a_changed_sums_title_and_labels_count_no_members(change: Any) -> None:
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Total ODA from 32 donors to Kenya, 2015 to 2023",
+        "Aid to Kenya, 8 largest of 36, 2015 to 2023",
+    ],
+    ids=["donors", "largest"],
+)
+def test_a_changed_sums_title_and_labels_count_no_members(change: Any, title: str) -> None:
     """A sum's title may count the members it adds up, which a change can
-    alter. Its redrawn title is always built from the measure, places and
-    period, and an axis label stating a count is dropped, so neither states
-    a count the new sum may not have."""
-    title = "Total ODA from 32 donors to Kenya, 2015 to 2023"
-    move = _move(title, change)
+    alter. Such a title is built from the measure the card's Search block
+    heads its sentence with (here the recorded sum of health aid to Kenya's
+    "Gross ODA disbursements"), places and period, and an axis label stating
+    a count is dropped, so neither states a count the new sum may not have,
+    and the measure is never a bare sector word."""
+    block = {**_ENVELOPE["parts"][0]["spec"], "resolved": _REDRAWS["block_labels"]["resolved"]}
+    (what,) = [
+        part["text"] for part in block["resolved"]["sentence_plan"] if part.get("axis") == "what"
+    ]
+    move = replace(_move(title, change), block=block)
     move = replace(move, card=replace(move.card, total=_SUMMED_CARD))
     stored = {"title": title, "type": "line_chart", "frame_ref": dict(_SUM_OPS)}
 
     intent, rewrite = _redrawn_intent(stored, dict(_SUM_OPS), move)
 
-    assert "32" not in intent["title"]
-    assert intent["title"].startswith("Gross disbursements")
+    assert not {"32", "36", "8"} & set(re.findall(r"\d+", intent["title"]))
+    assert intent["title"].startswith(what)
     assert rewrite("y_label", "Sum over 32 donors") is None
     assert rewrite("y_label", "USD, current prices") == "USD, current prices"
 

@@ -629,13 +629,13 @@ def _changed_title(title: Any, move: ChangeMove) -> str:
     card's years where it ended on none (its offer's, else the ones it draws). A title whose subject cannot be
     read, or a card with no title, is built from the block's facts too.
 
-    A card on a sum (`harness.card_unit.UnitCard.total`) is always built from
-    the block's facts, with the new period or the one its title ended on,
-    since a title written for the sum can count the members it adds up ("from
-    32 donors") and other years or places can add up another number."""
+    A card on a sum (`harness.card_unit.UnitCard.total`) whose title counts
+    the members it adds up (`_counts_members`, "from 32 donors") is built
+    from the block's facts, with the new period or the one its title ended
+    on, since other years or places can add up another number."""
     text = title if isinstance(title, str) else ""
     card = replace(move.card, scope=move.scope)
-    summed = move.card.total is not None
+    summed = move.card.total is not None and _counts_members(text, move)
     if isinstance(move.change, WindowChange):
         period = period_words(move.change.start_year, move.change.end_year)
         subject = _title_subject(text, _unit_said(move)) if text and not summed else None
@@ -656,6 +656,16 @@ def _changed_title(title: Any, move: ChangeMove) -> str:
     else:
         period = None
     return _composed_title(move.block, card, period)
+
+
+def _counts_members(title: str, move: ChangeMove) -> bool:
+    """Whether `title`, before the period it ends on, holds a number other
+    than a year the card's offer spans: a count ("32 donors", "8 largest of
+    36") that another sum may not share."""
+    subject = _PERIOD_TAIL.sub("", title)
+    window = move.offer.window
+    years = range(window.first_year, window.last_year + 1) if window is not None else range(0)
+    return any(int(number) not in years for number in re.findall(r"\b\d+\b", subject))
 
 
 def _named(label: str) -> str:
@@ -700,7 +710,8 @@ def _renamed_places(title: str, move: ChangeMove) -> str | None:
 
 
 def _composed_title(block: Mapping[str, Any], card: UnitCard, period: str | None) -> str:
-    """A title from `block`'s facts: what it measures (`concept_label`, else
+    """A title from `block`'s facts: what it measures (the words its sentence
+    opens on, its `sentence_plan`'s `what` slot, else `concept_label`, else
     `measure_label`, else its shape's label), the places `card` shows, and
     `period`, whole and last, in at most `_TITLE_CHARS`. The places give way
     before the subject does: listed as far as they fit, then counted ("12
@@ -708,8 +719,17 @@ def _composed_title(block: Mapping[str, Any], card: UnitCard, period: str | None
     (`_places_words`). The subject is cut, at a word, only when it alone
     leaves no room for the period."""
     resolved = block.get("resolved") or {}
+    heading = next(
+        (
+            part.get("text")
+            for part in resolved.get("sentence_plan") or ()
+            if isinstance(part, Mapping) and part.get("axis") == "what"
+        ),
+        None,
+    )
     measure = (
-        resolved.get("concept_label")
+        (heading if isinstance(heading, str) and heading.strip() else None)
+        or resolved.get("concept_label")
         or resolved.get("measure_label")
         or (resolved.get("shape") or {}).get("label")
     )
