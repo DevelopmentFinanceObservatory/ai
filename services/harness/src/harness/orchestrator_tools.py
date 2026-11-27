@@ -213,8 +213,9 @@ _FETCHES_KEY = "orchestrator:fetches"
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # The cards `make_charts` drew this turn that are still on the canvas:
 # {"turn", "drawn"}, `drawn` mapping `_card_identity` to the card's
-# {"component_id", "revision"}, the revision it was drawn as; a card the harness
-# could not read back also holds "unreadable": True and is not on the canvas.
+# {"component_id", "revision"}, the revision it was drawn as; a card cut to
+# its largest members at one period also holds "cut": True, and a card the harness
+# could not read back holds "unreadable": True and is not on the canvas.
 # `remove_cards` drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 
@@ -231,6 +232,17 @@ def drawn_cards(state: Mapping[str, Any], turn_id: str) -> frozenset[tuple[str, 
         (card["component_id"], card["revision"])
         for card in held["drawn"].values()
         if not card.get("unreadable") and card.get("component_id")
+    )
+
+
+def cut_cards(state: Mapping[str, Any]) -> frozenset[str]:
+    """The component ids of the cards `make_charts` drew cut to their largest
+    members at one period (`_DRAWN_CARDS_KEY`), whose years cannot change."""
+    held = state.get(_DRAWN_CARDS_KEY) or {}
+    return frozenset(
+        str(card["component_id"])
+        for card in (held.get("drawn") or {}).values()
+        if isinstance(card, Mapping) and card.get("cut") and card.get("component_id")
     )
 
 
@@ -2969,7 +2981,11 @@ def build_orchestrator_tools(
             )
             _remember_drawn(
                 identity,
-                {"component_id": component["component_id"], "revision": component["revision"]},
+                {
+                    "component_id": component["component_id"],
+                    "revision": component["revision"],
+                    **({"cut": True} if cut is not None else {}),
+                },
             )
             return entry, None, False
 

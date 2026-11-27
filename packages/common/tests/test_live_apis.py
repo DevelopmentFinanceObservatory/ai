@@ -778,15 +778,39 @@ async def test_read_entity_options_posts_the_identity_and_role_and_reads_each_pl
 
 
 @pytest.mark.parametrize(
-    "answer",
+    "bad",
     [
-        {"options": {}},
-        {"items": []},
-        {"options": {"items": [{"value": "country/KEN"}]}},
-        {"options": {"items": [{"value": {"ref": "country/KEN"}}]}},
-        {"options": {"items": ["country/KEN"]}},
+        {"value": "country/KEN"},
+        {"value": {"ref": "country/KEN"}},
+        "country/KEN",
+        {"value": {"ref": {"ref": "country/TZA", "label": 7}}},
     ],
-    ids=["no-items", "no-options", "value-text", "ref-text", "item-text"],
+    ids=["value-text", "ref-text", "item-text", "label-number"],
+)
+async def test_read_entity_options_leaves_out_an_item_outside_the_contract(
+    bad: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One bad item leaves the rest of the list readable, and is logged."""
+    answer = {
+        "options": {
+            "items": [bad, {"value": {"ref": {"ref": "country/KEN", "label": "Kenya"}}}],
+            "truncated": False,
+        }
+    }
+    calls = Calls(ok(answer))
+
+    async with make_client(calls) as client:
+        with caplog.at_level("WARNING"):
+            listed = await client.read_entity_options(identity={}, role="destination")
+
+    assert listed == ((("country/KEN", "Kenya"),), False)
+    assert [r.name for r in caplog.records if r.levelname == "WARNING"] == ["common.live_apis"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [{"options": {}}, {"items": []}, {"options": {"items": "country/KEN"}}],
+    ids=["no-items", "no-options", "items-text"],
 )
 async def test_read_entity_options_answer_outside_the_contract_is_invalid(answer: object) -> None:
     calls = Calls(ok(answer))

@@ -3693,6 +3693,26 @@ async def _draw_ten(monkeypatch: pytest.MonkeyPatch) -> BarPlatform:
     return executor
 
 
+@pytest.mark.parametrize("cap", [2, 24], ids=["cut", "uncut"])
+async def test_the_state_names_the_cards_make_charts_cut(
+    monkeypatch: pytest.MonkeyPatch, cap: int
+) -> None:
+    """A card cut to its largest members is named as cut, so its years are
+    not offered; a card drawn whole is not."""
+    for module in (orchestrator_tools, chart_binding):
+        monkeypatch.setattr(module, "MAX_SERIES_PER_COMPONENT", cap)
+    monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(TEN_PROVIDERS))
+    executor = BarPlatform(TEN_PROVIDERS)
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"]([_wide_chart(type="bar_chart")], ctx)
+
+    drawn = executor.written["component_id"]
+    assert orchestrator_tools.cut_cards(ctx.state) == (
+        frozenset({drawn}) if cap == 2 else frozenset()
+    )
+
+
 async def test_a_cut_cards_figures_cover_every_bar_it_draws(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4324,9 +4344,9 @@ async def test_make_charts_reads_the_figures_asked_of_a_card_on_the_canvas(
     assert [args for tool, args in executor.calls if tool == "describe_component"] == [
         {"component_id": "cmp_01"}
     ]
-    # The turn keeps the card's id alone, none of its points.
+    # The turn keeps the card's id and that it was cut, none of its points.
     assert [set(card) for card in ctx.state["orchestrator:drawn_cards"]["drawn"].values()] == [
-        {"component_id", "revision"}
+        {"component_id", "revision", "cut"}
     ]
     assert card["holds"]["series_count"] == 24
     assert _figures(card) == [("Provider donor/19", 81.0, "2023")] + (

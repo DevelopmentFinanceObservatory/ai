@@ -101,7 +101,7 @@ from harness.graph.state import (
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
-from harness.orchestrator_tools import HANDED_OFF
+from harness.orchestrator_tools import HANDED_OFF, cut_cards
 from harness.provenance import (
     CARD_FRAME_KEY,
     CARD_LINEAGE_KEY,
@@ -1805,9 +1805,9 @@ class _Translator:
         # Whether a card offers a change of the places its roles bind, which
         # Search's places door serves (`harness.place_options`).
         self._places = places
-        # The arguments of each recorded `get_data` call by the frames it
-        # served (`_remember_fetch`).
-        self._fetched: dict[tuple[str, str], dict[str, Any]] = {}
+        # The cards `make_charts` cut to their largest members, by id, as
+        # the latest answered tools' state names them (`cut_cards`).
+        self._cut: frozenset[str] = frozenset()
         # The plan card the user approved on this segment's first answer to
         # its interrupt; `plan.approved` states it once the `approve` node
         # takes the approval, and only then.
@@ -1915,6 +1915,7 @@ class _Translator:
                 ]
             case ToolsAnswered(answers=answers, state=state):
                 keep_turn_records(self._conversation, state)
+                self._cut = cut_cards(state)
                 return await self._agent_answers(self._answered(answers), records)
             case NodeDone(node="orchestrate", label=label) if label in HAND_OFF_EDGES.values():
                 # A hand-off no `ToolsAnswered` drew: the response made the
@@ -2307,7 +2308,6 @@ class _Translator:
         if self._conversation.take_unreported_removal():
             frames.extend(self._composition_update())
         for record in records:
-            self._remember_fetch(record)
             if self._unshown(record):
                 continue
             seq = self._conversation.next_seq()
@@ -2397,18 +2397,17 @@ class _Translator:
         `unit_change` and `card_changes` set on `created`: a card drawing one
         retrieval's own frame of a spec whose Search block, this turn's or one
         an earlier turn kept, converts its unit, offers other years, or binds
-        places (`harness.card_unit`). The spec and scope are the ones the
-        recorded `get_data` call that served the frame named
-        (`_remember_fetch`), and the encoding the one `intent`, the card's
-        written intent, fixes (`harness.card_unit.encoded`)."""
+        places (`harness.card_unit`). The encoding is the one `intent`, the
+        card's written intent, fixes (`harness.card_unit.encoded`)."""
         c = self._conversation
         blocks = known_blocks(c.turn_specs, c.turns)
-        fetched = self._fetched.get(lineage.frame) if lineage is not None else None
-        card = unit_card(component, lineage, blocks, fetched=fetched)
+        card = unit_card(component, lineage, blocks)
         if card is None:
             return None
         block = blocks.get(card.spec_id)
-        card = encoded(card, block, intent=intent)
+        card = encoded(
+            card, block, intent=intent, cut=str(component.get("component_id")) in self._cut
+        )
         created.unit_change = card_unit_change(card, block)
         created.card_changes = card_changes(
             card, block, fact_summary=component.get("fact_summary"), places=self._places
@@ -2891,18 +2890,6 @@ class _Translator:
             self._step(step_id, label, StepStatus.COMPLETE, tool=tool, detail=_RECOVERED)
             for step_id, label, tool in steps
         ]
-
-    def _remember_fetch(self, record: _ExecutorRecord) -> None:
-        """Keep the arguments of a `get_data` call that served frames, by each
-        frame's `(spec_id, content_version)`, for a card drawn on one
-        (`_changeable_card`)."""
-        if record.tool != "get_data" or record.result.get("outcome") != "ok":
-            return
-        for ref in record.result.get("frame_refs") or ():
-            if isinstance(ref, Mapping) and ref.get("spec_id"):
-                self._fetched[(str(ref["spec_id"]), str(ref.get("content_version")))] = dict(
-                    record.args
-                )
 
     def _unshown(self, record: _ExecutorRecord) -> bool:
         """A successful call no plan step made, to a tool whose work an

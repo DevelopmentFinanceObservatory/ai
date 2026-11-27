@@ -529,3 +529,35 @@ def test_a_role_takes_several_places_where_each_draws_its_own_series(
     intent = {"type": kind, "select": select}
 
     assert card_unit.takes_several(intent, ["country/KEN"]) is several
+
+
+_G7 = ["country/USA", "country/JPN", "country/DEU", "country/FRA"]
+
+
+@pytest.mark.parametrize(
+    ("select", "others", "several"),
+    [
+        ({"stat_var": "dcid:Aid", "recipient": "country/KEN"}, [_G7], False),
+        ({"stat_var": "dcid:Aid", "recipient": "country/KEN"}, [["country/FRA"]], True),
+        (
+            {"stat_var": "dcid:Aid", "recipient": "country/KEN", "donor": "country/FRA"},
+            [["country/FRA"]],
+            True,
+        ),
+        ({"stat_var": "dcid:Aid", "recipient": "country/KEN", "donor": _G7}, [_G7], False),
+    ],
+    ids=[
+        "other-role-unbound-over-several",
+        "other-role-one-place",
+        "other-role-pinned",
+        "other-role-listed",
+    ],
+)
+def test_a_role_beside_one_drawing_several_series_keeps_one_place(
+    select: dict[str, Any], others: list[list[str]], several: bool
+) -> None:
+    """A line chart whose donors draw seven series cannot draw a second
+    recipient as well."""
+    intent = {"type": "line_chart", "select": select}
+
+    assert card_unit.takes_several(intent, ["country/KEN"], others) is several

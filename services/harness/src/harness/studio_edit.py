@@ -61,6 +61,7 @@ from harness.card_unit import (
     place_labels,
     retitled,
     unit_card,
+    unit_pattern,
 )
 from harness.conversation import current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
@@ -461,7 +462,9 @@ def _redrawn_intent(
         case ChangeMove(change=WindowChange()):
             intent.pop("window", None)
             intent["title"] = _changed_title(title, move)
-            rewrite = functools.partial(_changed_meta, shown=_shown_labels(move))
+            rewrite = functools.partial(
+                _changed_meta, shown=_shown_labels(move), unit=_unit_said(move)
+            )
         case ChangeMove(change=PlacesChange() as change):
             places = next(p for p in move.offer.places or () if p.role == change.role)
             old = {o.id for o in places.chosen}
@@ -471,7 +474,9 @@ def _redrawn_intent(
                     key: _reselected(value, old, change.entities) for key, value in select.items()
                 }
             intent["title"] = _changed_title(title, move)
-            rewrite = functools.partial(_changed_meta, shown=_shown_labels(move))
+            rewrite = functools.partial(
+                _changed_meta, shown=_shown_labels(move), unit=_unit_said(move)
+            )
     held = intent.get("order")
     if isinstance(held, dict) and "period" in held:
         intent["order"] = _without_period(held)
@@ -507,33 +512,60 @@ def period_words(start: int, end: int) -> str:
     return str(start) if start == end else f"{start} to {end}"
 
 
-def _title_subject(title: str) -> str | None:
+def _unit_said(move: ChangeMove) -> str | None:
+    """The pattern of the phrases that name the unit the card is served in
+    (`harness.card_unit.unit_pattern`), `None` for a card whose unit cannot
+    change, so the year in "constant 2023 US dollars" reads as no period."""
+    change = card_unit_change(move.card, move.block)
+    return unit_pattern(change.offer.start, change.offer) if change is not None else None
+
+
+def _names_a_year(text: str, unit: str | None) -> bool:
+    """Whether `text` names a four-digit year outside the unit's own words."""
+    if unit is not None:
+        text = re.sub(unit, " ", text, flags=re.IGNORECASE)
+    return _ANY_YEAR.search(text) is not None
+
+
+def _title_subject(title: str, unit: str | None = None) -> str | None:
     """`title` without the period `make_charts` ended it on, or the whole title
-    when it ends on none; `None` when what is left still names a year, such
-    as a cut's suffix or a period the title words in its own way."""
+    when it ends on none; `None` when what is left still names a year outside
+    the unit's words (`unit`, `_unit_said`), such as a cut's suffix or a
+    period the title words in its own way."""
     subject = _PERIOD_TAIL.sub("", title, count=1)
-    return None if _ANY_YEAR.search(subject) else subject
+    return None if _names_a_year(subject, unit) else subject
+
+
+def _cut_words(text: str, room: int) -> str:
+    """`text` cut at a word boundary to at most `room` characters."""
+    if len(text) <= room:
+        return text
+    cut = text[: max(room, 0) + 1].rsplit(" ", 1)[0].rstrip(" ,")
+    return cut if len(cut) <= room else text[: max(room, 0)]
 
 
 def _changed_title(title: Any, move: ChangeMove) -> str:
-    """The title of the card `move` redraws, built from parts, so it names no
-    year or place the card no longer shows.
+    """The title of the card `move` redraws, so it names no year or place the
+    card no longer shows.
 
     A change of years keeps the subject the title opened on
-    (`_title_subject`) and states the new period after it. A change of places
-    states the measure, the places and the period the title ended on, or
-    the card's years where it ended on none, since the subject may name the
-    old places in any words. A title whose subject cannot be read, or a
-    card with no title, is built from the Search block's own facts: its
-    measure, the card's places and the period (`_composed_title`)."""
+    (`_title_subject`) and states the new period after it, whole. A change
+    of places renames the places in the title where it can
+    (`_renamed_places`), else builds the title from the Search block's
+    facts (`_composed_title`) with the period the title ended on, or the
+    card's years where it ended on none. A title whose subject cannot be
+    read, or a card with no title, is built from the block's facts too."""
     text = title if isinstance(title, str) else ""
     card = replace(move.card, scope=move.scope)
     if isinstance(move.change, WindowChange):
         period = period_words(move.change.start_year, move.change.end_year)
-        subject = _title_subject(text) if text else None
+        subject = _title_subject(text, _unit_said(move)) if text else None
         if subject:
-            return f"{subject[: max(0, _TITLE_CHARS - len(period) - 2)]}, {period}"
+            return f"{_cut_words(subject, _TITLE_CHARS - len(period) - 2)}, {period}"
         return _composed_title(move.block, card, period)
+    renamed = _renamed_places(text, move)
+    if renamed is not None:
+        return renamed
     tail = _PERIOD_TAIL.search(text)
     window = move.offer.window
     if tail is not None:
@@ -545,19 +577,87 @@ def _changed_title(title: Any, move: ChangeMove) -> str:
     return _composed_title(move.block, card, period)
 
 
+def _named(label: str) -> str:
+    """The pattern of `label` as a whole word or phrase."""
+    return rf"(?<!\w){re.escape(label)}(?!\w)"
+
+
+def _renamed_places(title: str, move: ChangeMove) -> str | None:
+    """`title` naming the places the role now shows where it named the ones it
+    showed (`move.old`, `move.new`): their words as a reader lists them
+    (`joined_words`) replaced whole; else, for a change swapping places one
+    for one, each place it left named once in the title replaced by the one
+    that took its place. `None` when neither holds, when the title already
+    names a place the change brings, or when a place the card left is still
+    named after it."""
+    old, new = list(move.old), list(move.new)
+    if not title or not old:
+        return None
+    left = [label for label in old if label not in new]
+    arrived = [label for label in new if label not in old]
+    if any(re.search(_named(label), title) for label in arrived):
+        # "Aid to Kenya compared with Uganda" would read "Uganda compared
+        # with Uganda".
+        return None
+    joined = joined_words(old)
+    renamed: str | None = None
+    if re.search(_named(joined), title):
+        renamed = re.sub(_named(joined), lambda _: joined_words(new), title, count=1)
+    elif (
+        len(old) == len(new)
+        and len(left) == len(arrived)
+        and all(len(re.findall(_named(label), title)) == 1 for label in left)
+    ):
+        renamed = title
+        for gone, came in zip(left, arrived, strict=True):
+            renamed = re.sub(_named(gone), lambda _, came=came: came, renamed, count=1)
+    if renamed is None or len(renamed) > _TITLE_CHARS:
+        return None
+    if any(re.search(_named(label), renamed) for label in left):
+        return None
+    return renamed
+
+
 def _composed_title(block: Mapping[str, Any], card: UnitCard, period: str | None) -> str:
-    """A title from `block`'s facts: its measure (`measure_label`, else its
-    shape's label), the places `card` shows, and `period`."""
+    """A title from `block`'s facts: what it measures (`concept_label`, else
+    `measure_label`, else its shape's label), the places `card` shows, and
+    `period`, whole and last. Places that would take the title past
+    `_TITLE_CHARS` are listed as far as they fit, closing on "and N others"."""
     resolved = block.get("resolved") or {}
-    measure = resolved.get("measure_label") or (resolved.get("shape") or {}).get("label")
+    measure = (
+        resolved.get("concept_label")
+        or resolved.get("measure_label")
+        or (resolved.get("shape") or {}).get("label")
+    )
     measure = str(measure) if measure else "The data"
-    parts = [measure[:1].upper() + measure[1:], _places_words(card, block), period]
-    return ", ".join(part for part in parts if part)[:_TITLE_CHARS]
+    subject = measure[:1].upper() + measure[1:]
+    tail = f", {period}" if period else ""
+    room = _TITLE_CHARS - len(tail)
+    places = _places_words(card, block, room=room - len(subject) - 2)
+    if places and len(subject) + 2 + len(places) > room:
+        subject = _cut_words(subject, room - 2 - len(places))
+    head = f"{subject}, {places}" if places else _cut_words(subject, room)
+    return head + tail
 
 
-def _places_words(card: UnitCard, block: Mapping[str, Any]) -> str:
-    """The places `card` shows as a title states them: "France to Kenya" for a
-    flow from one party to another, else every role's places in a list."""
+def _fitting(labels: list[str], room: int) -> str:
+    """`labels` as a reader lists them in at most `room` characters: every one
+    where they fit, else the first ones and "and N others", else "N places"."""
+    whole = joined_words(labels)
+    if len(whole) <= room or len(labels) < 2:
+        return whole
+    for kept in range(len(labels) - 1, 0, -1):
+        rest = len(labels) - kept
+        words = joined_words([*labels[:kept], f"{rest} other" + ("s" if rest > 1 else "")])
+        if len(words) <= room:
+            return words
+    return f"{len(labels)} places"
+
+
+def _places_words(card: UnitCard, block: Mapping[str, Any], *, room: int = _TITLE_CHARS) -> str:
+    """The places `card` shows as a title states them in at most `room`
+    characters (`_fitting`): "France to Kenya" for a flow from one party to
+    another, else every role's places in a list."""
     labels = {**place_labels(block), **(card.labels or {})}
     shown = {
         role: [labels.get(ref, ref) for ref in refs]
@@ -565,8 +665,9 @@ def _places_words(card: UnitCard, block: Mapping[str, Any]) -> str:
         if refs
     }
     if set(shown) == {"origin", "destination"}:
-        return f"{joined_words(shown['origin'])} to {joined_words(shown['destination'])}"
-    return joined_words([label for labels_ in shown.values() for label in labels_])
+        origin = _fitting(shown["origin"], max((room - 4) // 2, 0))
+        return f"{origin} to {_fitting(shown['destination'], room - 4 - len(origin))}"
+    return _fitting([label for labels_ in shown.values() for label in labels_], room)
 
 
 def _shown_labels(move: ChangeMove) -> set[str]:
@@ -574,14 +675,15 @@ def _shown_labels(move: ChangeMove) -> set[str]:
     return {o.label for p in move.offer.places or () for o in p.chosen} | set(move.old)
 
 
-def _changed_meta(name: str, text: str, *, shown: set[str]) -> str | None:
+def _changed_meta(name: str, text: str, *, shown: set[str], unit: str | None = None) -> str | None:
     """A word of the card's meta after a change of years or places: the
     subtitle and the description, which the model wrote about the old years
     and places, are dropped, and an axis label is kept only when it names no
-    year and none of the places in `shown`, the ones the card showed."""
+    year outside the unit's words (`unit`, `_unit_said`) and none of the
+    places in `shown`, the ones the card showed."""
     if name in {"subtitle", "description"}:
         return None
-    if _ANY_YEAR.search(text) or any(
+    if _names_a_year(text, unit) or any(
         re.search(rf"(?<!\w){re.escape(label)}(?!\w)", text) for label in shown if label
     ):
         return None

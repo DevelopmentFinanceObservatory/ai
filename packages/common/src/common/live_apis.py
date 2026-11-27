@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import re
 import time
@@ -56,6 +57,8 @@ from urllib.parse import quote
 import httpx2
 
 from common.apis_auth import ApisAuthError, AuthProvider
+
+logger = logging.getLogger(__name__)
 
 # apis' principal header (`principal_header`, default `x-dfo-principal`).
 PRINCIPAL_HEADER = "x-dfo-principal"
@@ -779,13 +782,14 @@ class LiveApisClient:
         `identity` (`POST /api/search/options`, `for: {role, scope: peers}`),
         each as `(ref, label)`, in the order Search lists them, and whether
         Search capped the list (`truncated`). A listed entry whose value names
-        no ref is left out.
+        no ref is left out, and so is one outside the contract (an item or
+        `value` that is no object, or a `ref` that is no object naming a ref
+        with a text label), which is logged, so one bad entry leaves the rest
+        of the list readable.
 
         Raises:
             LiveApisError: apis refused the call, or answered a body with no
-                `options.items` list, or an item whose `value` is no object or
-                whose `ref` is no object with a text label
-                (`response_invalid`).
+                `options.items` list (`response_invalid`).
         """
         response = await self._send(
             "POST",
@@ -801,17 +805,21 @@ class LiveApisClient:
         if not isinstance(items, list):
             raise _invalid(response, "options answer")
         listed = []
-        for item in items:
+        for index, item in enumerate(items):
             value = item.get("value") if isinstance(item, dict) else None
-            if not isinstance(value, dict):
-                raise _invalid(response, "options answer")
-            ref = value.get("ref")
-            if ref is None:
+            if isinstance(value, dict) and value.get("ref") is None:
                 continue
-            if not isinstance(ref, dict) or not isinstance(ref.get("label", ""), str | None):
-                raise _invalid(response, "options answer")
-            if isinstance(ref.get("ref"), str) and ref["ref"]:
-                listed.append((ref["ref"], str(ref.get("label") or ref["ref"])))
+            ref: object = value.get("ref") if isinstance(value, dict) else None
+            named = ref.get("ref") if isinstance(ref, dict) else None
+            label = ref.get("label") if isinstance(ref, dict) else None
+            if not isinstance(named, str) or not named or not isinstance(label, str | None):
+                logger.warning(
+                    "options answer item %d is outside the contract and is left out: %.200r",
+                    index,
+                    item,
+                )
+                continue
+            listed.append((named, label or named))
         assert isinstance(options, dict)
         return tuple(listed), options.get("truncated") is True
 

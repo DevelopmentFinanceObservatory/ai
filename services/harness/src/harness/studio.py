@@ -82,6 +82,7 @@ from starlette.types import Receive, Scope
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
 from harness.card_unit import (
+    PLACES_NOT_SERVED,
     PLACES_UNREAD_NOTE,
     ChangeMove,
     UnitMove,
@@ -665,8 +666,9 @@ async def _card_move(
     `/apply_change`. A change of places reads the places its role can change
     to through `places`, Search's places door, or takes them from `listed`
     when an earlier check read them, and a door that cannot be read refuses
-    it 503 `transient_unavailable`, `place_options_unavailable`, to retry.
-    `detail` is copy the client shows."""
+    it 503 `transient_unavailable`, `place_options_unavailable`, to retry;
+    an apis that serves no places door refuses it 503 `capability_unavailable`,
+    as `/places` does. `detail` is copy the client shows."""
     if body.apply_unit is not None:
         move: UnitMove | ChangeMove | tuple[str, str] = unit_move(conversation, body.apply_unit)
     elif body.apply_change is not None:
@@ -676,6 +678,8 @@ async def _card_move(
     if isinstance(move, UnitMove | ChangeMove):
         return move
     constraint, detail = move
+    if constraint == PLACES_NOT_SERVED:
+        return _places_not_served_response()
     if constraint == "place_options_unavailable":
         return _places_unavailable_response(detail, pointer="/apply_change")
     if body.apply_change is not None:

@@ -42,6 +42,7 @@ from data_mcp.frame_materialisation import complete_rendering
 
 from harness.place_options import (
     PlaceOptionsReader,
+    PlacesNotServedError,
     PlacesUnavailableError,
     RolePlaces,
     read_role_places,
@@ -76,10 +77,6 @@ CARD_UNIT_KEY = "unit_card"
 _SUM_GROUPBY = {"by": ["time_period"], "op": "sum"}
 
 
-# The `scope` members a change sets on a card's retrieval.
-_SCOPE_MEMBERS = ("entities", "window")
-
-
 @dataclass(frozen=True)
 class UnitCard:
     """A card that can change: the spec_id its Search block answers, the
@@ -89,11 +86,14 @@ class UnitCard:
     with the label of each place a change of places set (`labels`, by ref),
     which the spec's Search block does not name.
 
-    `single` and `roles` are the card's encoding, fixed when the card is drawn
-    (`encoded`): whether it shows one value per series, so its years change
-    one at a time, and the roles whose places it can change, each with
-    whether it takes several. A card stored before they were kept has
-    `roles` `None`, and reads its roles off the places it shows."""
+    `single`, `roles` and `cut` are the card's encoding, fixed when the card
+    is drawn (`encoded`): whether it shows one value per series, so its years
+    change one at a time; the roles whose places it can change, each with
+    whether it takes several; and whether its members are the largest ones
+    `make_charts` ranked at one period, so its years cannot change, since
+    another year has other largest members. A card stored before they were
+    kept has `roles` `None`, and reads its roles off the places it shows,
+    and `cut` false."""
 
     spec_id: str
     args: dict[str, Any]
@@ -101,6 +101,7 @@ class UnitCard:
     labels: dict[str, str] | None = None
     single: bool = False
     roles: dict[str, bool] | None = None
+    cut: bool = False
 
     def as_json(self) -> dict[str, Any]:
         stored: dict[str, Any] = {"spec_id": self.spec_id, "args": dict(self.args)}
@@ -112,6 +113,8 @@ class UnitCard:
             stored["single"] = True
         if self.roles is not None:
             stored["roles"] = dict(self.roles)
+        if self.cut:
+            stored["cut"] = True
         return stored
 
     @classmethod
@@ -131,6 +134,7 @@ class UnitCard:
             if isinstance(labels, Mapping) and labels
             else None,
             single=stored.get("single") is True,
+            cut=stored.get("cut") is True,
             roles={str(k): v is True for k, v in roles.items()}
             if isinstance(roles, Mapping)
             else None,
@@ -156,7 +160,24 @@ def one_value(intent: Mapping[str, Any] | None) -> bool:
     )
 
 
-def takes_several(intent: Mapping[str, Any] | None, refs: Sequence[str]) -> bool:
+def _naming(select: Mapping[str, Any], refs: Sequence[str]) -> set[str]:
+    """The `select` entries naming any of `refs`, `dcid:`-marked or not."""
+    shown = set(refs)
+    return {
+        name
+        for name, value in select.items()
+        if any(
+            isinstance(v, str) and v.removeprefix("dcid:") in shown
+            for v in (value if isinstance(value, list) else [value])
+        )
+    }
+
+
+def takes_several(
+    intent: Mapping[str, Any] | None,
+    refs: Sequence[str],
+    others: Sequence[Sequence[str]] = (),
+) -> bool:
     """Whether a role showing places `refs` on the card drawn from `intent`
     can show several, each drawn as its own series, as dfo-apis' assembler
     draws a select (dfo-data-tools' `assembler/resolve.py` and
@@ -164,10 +185,12 @@ def takes_several(intent: Mapping[str, Any] | None, refs: Sequence[str]) -> bool
     draws one series per place, and so does a place column the select leaves
     unbound. A stat card draws one value; a table draws any select. A line
     chart takes several unless its select lists another dimension, since the
-    platform refuses a line or bar chart listing two. A bar chart takes
-    several only where its listed dimension is the role's, one bar per place:
-    a bar chart of one series draws its periods, and a second place would
-    turn it into one bar per place at one period."""
+    platform refuses a line or bar chart listing two, or another place role
+    (`others`, the places each shows) already draws several series, being
+    unbound or listed over several places. A bar chart takes several only
+    where its listed dimension is the role's, one bar per place: a bar chart
+    of one series draws its periods, and a second place would turn it into
+    one bar per place at one period."""
     if not isinstance(intent, Mapping):
         return True
     kind = intent.get("type")
@@ -177,36 +200,46 @@ def takes_several(intent: Mapping[str, Any] | None, refs: Sequence[str]) -> bool
         return True
     select = intent.get("select")
     select = select if isinstance(select, Mapping) else {}
-    shown = set(refs)
-    naming = {
-        name
-        for name, value in select.items()
-        if any(
-            isinstance(v, str) and v.removeprefix("dcid:") in shown
-            for v in (value if isinstance(value, list) else [value])
-        )
-    }
+    naming = _naming(select, refs)
     listed = {name for name, value in select.items() if isinstance(value, list)}
+    for other in others:
+        named = _naming(select, other)
+        if len(other) > 1 and (not named or named & listed):
+            return False
     if kind == "bar_chart":
         return bool(listed) and listed <= naming
     return listed <= naming
 
 
 def encoded(
-    card: UnitCard, block: Mapping[str, Any] | None, *, intent: Mapping[str, Any] | None
+    card: UnitCard,
+    block: Mapping[str, Any] | None,
+    *,
+    intent: Mapping[str, Any] | None,
+    cut: bool | None = None,
 ) -> UnitCard:
     """`card` with its encoding as the card drawn from `intent` fixes it:
     `single` when it shows one value per series (`one_value`), and as `roles`
     each role whose places it shows, the ones `card` already kept, else
     those `block` and its scope bind, each marked with whether it can show
-    several places (`takes_several`)."""
+    several places (`takes_several`). `cut` says whether `make_charts` cut
+    the card to its largest members; `None` keeps the card's own."""
     shown = chosen_places(card, block) if block is not None else {}
     if card.roles is not None:
         bound: list[str] = list(card.roles)
     else:
         bound = [role for role, refs in shown.items() if refs]
-    roles = {role: takes_several(intent, shown.get(role) or ()) for role in bound}
-    return replace(card, single=one_value(intent), roles=roles)
+    roles = {
+        role: takes_several(
+            intent,
+            shown.get(role) or (),
+            [refs for other, refs in shown.items() if other != role and refs],
+        )
+        for role in bound
+    }
+    return replace(
+        card, single=one_value(intent), roles=roles, cut=card.cut if cut is None else cut
+    )
 
 
 def frame_arguments(rendering: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -267,21 +300,21 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
     component: Mapping[str, Any],
     lineage: CardLineage | None,
     blocks: Mapping[str, Mapping[str, Any]] | None = None,
-    *,
-    fetched: Mapping[str, Any] | None = None,
 ) -> UnitCard | None:
     """The `UnitCard` of `component`, a written card, drawn from `lineage`;
     `None` when the card does not draw one retrieval's own frame, or its
     arguments cannot be read.
 
-    The card reads the spec and scope `fetched`, the recorded `get_data`
-    arguments that served its frame, name. A frame no recorded call names
-    (a plan step's retrieval, whose record carries no frames, or one an
-    earlier turn fetched) reads the served spec when `blocks`, the Search
-    blocks the conversation keeps by spec_id (`known_blocks`), hold none for
-    it but hold one whose identity the served definition's matches outside
-    its places and window: the card reads that block's spec with the places
-    and window the served definition names as its scope (`_scope_over`)."""
+    The card reads the served spec when `blocks`, the Search blocks the
+    conversation keeps by spec_id (`known_blocks`), hold none for it but
+    hold one whose identity the served definition's matches outside its
+    places and window: the card reads that block's spec with the places and
+    window the served definition names as its scope (`_scope_over`), the
+    places as Search resolved them, under the block's own roles. The served
+    identity is the one source, since the model's `get_data` arguments name
+    places as spoken, under its own role names, and may name facets the
+    scope cannot carry; a served identity that differs from every block's in
+    anything else, its facets among them, offers no change."""
     if lineage is None or len(lineage.lineage) != 1:
         return None
     (member,) = lineage.lineage
@@ -299,14 +332,6 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
     args = frame_arguments(rendering) if isinstance(rendering, Mapping) else None
     if args is None:
         return None
-    if fetched is not None and isinstance(fetched.get("spec_id"), str) and fetched["spec_id"]:
-        asked = fetched.get("scope")
-        scope = (
-            {k: asked[k] for k in _SCOPE_MEMBERS if k in asked}
-            if isinstance(asked, Mapping)
-            else {}
-        )
-        return UnitCard(spec_id=fetched["spec_id"], args=args, scope=scope or None)
     if blocks is None or spec_id in blocks:
         return UnitCard(spec_id=spec_id, args=args)
     served_identity = (member.manifest.get("definition") or {}).get("identity")
@@ -406,11 +431,12 @@ def card_changes(
     `window` is offered when the card draws one year or a range and its data
     holds more than one: Search's `years_with_data`, else the window its
     answer serves (`download.window`, then `coverage.window`), widened to the
-    years the card draws. With `places` (Search's places door is on),
+    years the card draws, and never on a card cut to its largest members at
+    one period (`UnitCard.cut`). With `places` (Search's places door is on),
     `places` holds each role whose places the card names."""
     if block is None:
         return None
-    window = _window_offer(block, fact_summary, single=card.single)
+    window = None if card.cut else _window_offer(block, fact_summary, single=card.single)
     roles = _places_offers(card, block) if places else []
     if window is None and not roles:
         return None
@@ -647,6 +673,12 @@ class ChangeMove:
 CHANGE_STALE_NOTE = "This card has changed since its menu opened, so nothing changed."
 
 
+# The refusal of a change of places on a deployment whose apis serves no
+# places door (`harness.place_options.PlacesNotServedError`), which the route
+# answers as `/places` does, 503 `capability_unavailable`.
+PLACES_NOT_SERVED = "places_not_served"
+
+
 # The `detail` of a change refused because Search's places door could not be read.
 PLACES_UNREAD_NOTE = "The places this card can show cannot be read now; try again."
 
@@ -670,7 +702,7 @@ def changeable(
     return card, block, offer, title
 
 
-async def change_move(
+async def change_move(  # noqa: PLR0911 -- one refusal per way a change cannot apply
     conversation: ConversationState,
     pick: ApplyChange,
     *,
@@ -708,6 +740,8 @@ async def change_move(
                 conversation_id=conversation.conversation_id,
                 component_id=pick.component_id,
             )
+        except PlacesNotServedError:
+            return PLACES_NOT_SERVED, PLACES_UNREAD_NOTE
         except PlacesUnavailableError:
             return "place_options_unavailable", PLACES_UNREAD_NOTE
     return _places_move(pick.component_id, title, card, block, offer, change, listed)
@@ -827,6 +861,30 @@ def stored_reading(
     return None
 
 
+def unit_pattern(unit: UnitChoice, offer: UnitOffer) -> str:
+    """The pattern, read case-insensitively, of each phrase that names `unit`
+    (`retitled` lists them): the currency by its code or by the name `offer`
+    gives it, after an optional price basis; a price basis followed by
+    "prices"; or, for a constant unit, "constant <base year>" alone."""
+    names = {currency.code: currency.name for currency in offer.currencies}
+    name = names.get(unit.currency)
+    if unit.prices is UnitPrices.CONSTANT:
+        year = re.escape(str(unit.base_year))
+        basis = rf"constant(?:\s+{year})?"
+        priced = rf"{basis}|{year}"
+        alone = rf"|(?P<alone>constant\s+{year})"
+    else:
+        basis = priced = "current"
+        alone = ""
+    currencies = [rf"(?P<code>(?-i:{re.escape(unit.currency)}))"]
+    if name:
+        currencies.append(rf"(?P<name>{re.escape(name)})")
+    return (
+        rf"(?<!\w)(?:(?:(?P<basis>{basis})\s+)?(?:{'|'.join(currencies)})"
+        rf"|(?P<prices>{priced})\s+prices{alone})(?!\w)"
+    )
+
+
 def retitled(title: str, *, old: UnitChoice, new: UnitChoice, offer: UnitOffer) -> str:
     """`title` with each phrase that names `old` naming `new` in the same shape.
 
@@ -848,21 +906,7 @@ def retitled(title: str, *, old: UnitChoice, new: UnitChoice, offer: UnitOffer) 
     new_name = names.get(new.currency, new.currency)
     words = unit_words(new, offer)
     new_basis = words[: len(words) - len(new_name) - 1].lower()
-    if old.prices is UnitPrices.CONSTANT:
-        year = re.escape(str(old.base_year))
-        basis = rf"constant(?:\s+{year})?"
-        priced = rf"{basis}|{year}"
-        alone = rf"|(?P<alone>constant\s+{year})"
-    else:
-        basis = priced = "current"
-        alone = ""
-    currencies = [rf"(?P<code>(?-i:{re.escape(old.currency)}))"]
-    if old_name:
-        currencies.append(rf"(?P<name>{re.escape(old_name)})")
-    pattern = (
-        rf"(?<!\w)(?:(?:(?P<basis>{basis})\s+)?(?:{'|'.join(currencies)})"
-        rf"|(?P<prices>{priced})\s+prices{alone})(?!\w)"
-    )
+    pattern = unit_pattern(old, offer)
 
     def swap(match: re.Match[str]) -> str:
         said = match.group(0)
