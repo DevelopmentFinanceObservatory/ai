@@ -1299,7 +1299,8 @@ class _SegmentWork:
         return outcome, []
 
     def owed(self) -> list[BaseModel]:
-        """The canvas update of a removal the translator still holds
+        """The canvas update of a removal no frame reported, held by the
+        translator or marked on the conversation
         (`_Translator.release_removal`)."""
         return [*self._translator.release_removal()]
 

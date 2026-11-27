@@ -121,12 +121,16 @@ _ROOT_SCOPE_MEMBERS = frozenset({"entities", "window", "facets"})
 class SummedFrame:
     """The one `aggregate` call a card's derived frame was computed by, as
     dfo-apis' analysis runner recorded it in the frame's recipe: the frame it
-    gave (`frame`), the retrieval frame it read (`root`), both as
-    `(spec_id, content_version)`, and the parameters it was called with
-    besides the frame, as recorded (`summed_frame`)."""
+    gave (`frame`), the retrieval frame it read, as the store holds it
+    (`root`), and the pair the data API serves that retrieval under
+    (`served`), each as `(spec_id, content_version)`, and the parameters it
+    was called with besides the frame, as recorded (`summed_frame`). The two
+    retrieval pairs differ for a frame minted with extra columns, and only
+    the served one can be described (`ProvenanceInput.served_ref`)."""
 
     frame: tuple[str, str]
     root: tuple[str, str]
+    served: tuple[str, str]
     parameters: dict[str, Any]
 
     @property
@@ -138,6 +142,7 @@ class SummedFrame:
         return {
             "frame": list(self.frame),
             "root": list(self.root),
+            "served": list(self.served),
             "parameters": dict(self.parameters),
         }
 
@@ -147,10 +152,10 @@ class SummedFrame:
         if not isinstance(stored, Mapping):
             return None
         frame, root = _pair(stored.get("frame")), _pair(stored.get("root"))
-        parameters = stored.get("parameters")
-        if frame is None or root is None or not isinstance(parameters, Mapping):
+        served, parameters = _pair(stored.get("served")), stored.get("parameters")
+        if frame is None or root is None or served is None or not isinstance(parameters, Mapping):
             return None
-        return cls(frame=frame, root=root, parameters=dict(parameters))
+        return cls(frame=frame, root=root, served=served, parameters=dict(parameters))
 
 
 def _pair(value: Any) -> tuple[str, str] | None:
@@ -171,10 +176,12 @@ def summed_frame(  # noqa: PLR0911 -- one `None` per way a recipe is not one sum
     """The sum `recipe`, the recipe dfo-apis' analysis runner stored for the
     derived frame `frame` (`harness.derived_frames.derived_recipe`), records:
     `None` unless its tree is one `aggregate` node with `aggregation` `sum`
-    whose one input is its one root, its `group_by` keeps the period, it
-    names no parameter `aggregate` does not take, it has no rolling anchor,
-    and its root was minted with no scope member a `get_data` scope does not
-    state."""
+    whose one input is the root node of its one root (`{"frame", "root"}` in
+    `common.recipe`), its `group_by` keeps the period, it names no parameter
+    `aggregate` does not take, it pins no unit but by ref (a change binds the
+    pinned unit on its refetch, `root_facets`), it has no rolling anchor, and
+    its root was minted with no scope member a `get_data` scope does not
+    state, under a stored pair (`frame`) and a served one (`dataset`)."""
     tree, roots = recipe.get("tree"), recipe.get("roots")
     if recipe.get("anchor") is not None or not isinstance(tree, Mapping):
         return None
@@ -186,7 +193,7 @@ def summed_frame(  # noqa: PLR0911 -- one `None` per way a recipe is not one sum
     if not isinstance(inputs, Mapping) or set(inputs) != {"frame_ref"}:
         return None
     read = inputs["frame_ref"]
-    if not isinstance(read, Mapping) or set(read) != {"root"} or read["root"] != 0:
+    if not isinstance(read, Mapping) or set(read) - {"frame"} != {"root"} or read["root"] != 0:
         return None
     parameters = op_spec.get("parameters")
     if not isinstance(parameters, Mapping) or set(parameters) - _AGGREGATE_PARAMETERS:
@@ -194,6 +201,7 @@ def summed_frame(  # noqa: PLR0911 -- one `None` per way a recipe is not one sum
     group_by = parameters.get("group_by")
     if (
         parameters.get("aggregation") != "sum"
+        or not isinstance(parameters.get("unit"), str | None)
         or not isinstance(group_by, list)
         or not all(isinstance(column, str) for column in group_by)
         or TIME_PERIOD_COLUMN not in group_by
@@ -201,10 +209,12 @@ def summed_frame(  # noqa: PLR0911 -- one `None` per way a recipe is not one sum
         return None
     (root,) = roots
     scope = root.get("scope") or {}
-    pair = _pair(root.get("frame"))
-    if pair is None or not isinstance(scope, Mapping) or set(scope) - _ROOT_SCOPE_MEMBERS:
+    pair, served = _pair(root.get("frame")), _pair(root.get("dataset"))
+    if pair is None or served is None or ("frame" in read and _pair(read["frame"]) != pair):
         return None
-    return SummedFrame(frame=frame, root=pair, parameters=dict(parameters))
+    if not isinstance(scope, Mapping) or set(scope) - _ROOT_SCOPE_MEMBERS:
+        return None
+    return SummedFrame(frame=frame, root=pair, served=served, parameters=dict(parameters))
 
 
 async def read_summed_frame(lineage: CardLineage | None) -> SummedFrame | None:
@@ -503,17 +513,31 @@ def facet_values(view: Mapping[str, Any]) -> dict[str, list[str]]:
     return held
 
 
+def _pinned_unit(card: UnitCard) -> str | None:
+    """The unit ref the sum under `card` pins, without the `dcid:` mark;
+    `None` for no pin, and for a converted or composed unit, which binds by
+    no ref."""
+    pinned = card.total.parameters.get("unit") if card.total is not None else None
+    return pinned.removeprefix("dcid:") if isinstance(pinned, str) else None
+
+
 def root_facets(card: UnitCard, view: Mapping[str, Any]) -> dict[str, str] | None:
     """The facets `card`, a card on a sum, binds on a change: the one value
-    each facet axis of its retrieval's frame view (`view`) holds, with the
-    ones the card drew. It returns `None` when the two name different values
-    on an axis. An axis holding several values is left unbound, and a new
-    retrieval that holds several on it is refused (`unlike_series`)."""
+    each facet axis of its retrieval's frame view (`view`) holds, the unit
+    the sum pins (`aggregate` sums that unit's rows alone, so its retrieval
+    may hold others), and the facets the card drew. It returns `None` when
+    two of these name different values on an axis. `aggregate` refuses a
+    retrieval holding several values of any other axis, so a recorded sum's
+    retrieval holds one on each."""
     found = {
         axis: values[0]
         for axis, values in facet_values(view).items()
         if len(set(values)) == 1 and values[0]
     }
+    if (pinned := _pinned_unit(card)) is not None:
+        if found.get("unit", pinned) != pinned:
+            return None
+        found["unit"] = pinned
     drawn = {axis: ref.removeprefix("dcid:") for axis, ref in (card.facets or {}).items()}
     if any(axis in found and found[axis] != ref for axis, ref in drawn.items()):
         return None
@@ -533,9 +557,8 @@ def unlike_series(card: UnitCard, view: Mapping[str, Any]) -> str | None:
     if any(len(set(values)) > 1 for values in held.values()):
         return "mixed"
     expected = {axis: ref.removeprefix("dcid:") for axis, ref in (card.facets or {}).items()}
-    pinned = card.total.parameters.get("unit") if card.total is not None else None
-    if isinstance(pinned, str):
-        expected.setdefault("unit", pinned.removeprefix("dcid:"))
+    if (pinned := _pinned_unit(card)) is not None:
+        expected.setdefault("unit", pinned)
     for axis, values in held.items():
         if values and axis in expected and values[0] != expected[axis]:
             return "other"
@@ -636,13 +659,9 @@ def takes_several(
     select = intent.get("select")
     select = select if isinstance(select, Mapping) else {}
     naming = _role_entries(select, role, refs)
-    # A list of one value draws one series, as the platform draws the party
-    # columns a summed flow's select lists beside its recipient.
-    listed = {
-        name
-        for name, value in select.items()
-        if isinstance(value, list) and (len(value) > 1 or name in naming)
-    }
+    # The platform binds a list of one value as a listed dimension
+    # (`harness.chart_binding.select_binding_ok`).
+    listed = {name for name, value in select.items() if isinstance(value, list)}
     for index, other in enumerate(others):
         named = _role_entries(
             select, other_roles[index] if index < len(other_roles) else None, other

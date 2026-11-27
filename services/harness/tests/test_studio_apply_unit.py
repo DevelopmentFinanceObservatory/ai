@@ -10,6 +10,7 @@ and redraws the card in its slot, with no model call.
 from __future__ import annotations
 
 import ast
+import asyncio
 import contextlib
 import copy
 import hashlib
@@ -1432,6 +1433,84 @@ async def test_after_a_change_of_places_the_years_offered_are_the_new_places(
     ]
 
 
+class _Overlap:
+    """Two calls that each wait, up to a second, until the other has started:
+    both finish only when they run at the same time."""
+
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.finished: list[str] = []
+        self.both = asyncio.Event()
+
+    async def run(self, name: str) -> None:
+        self.started.append(name)
+        if len(self.started) == 2:
+            self.both.set()
+        await asyncio.wait_for(self.both.wait(), timeout=1)
+        self.finished.append(name)
+
+
+class _OverlappingSearch(_ScopedSearch):
+    def __init__(self, overlap: _Overlap) -> None:
+        super().__init__()
+        self.overlap = overlap
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Any, on_progress: ProgressCallback | None = None
+    ) -> ToolCallResult:
+        await self.overlap.run("years")
+        return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+
+
+class _OverlappingChanger(_Changer):
+    def __init__(self, overlap: _Overlap, *, rows: int = 12) -> None:
+        super().__init__(rows=rows)
+        self.overlap = overlap
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        if tool == "get_data":
+            await self.overlap.run("fetch")
+        return await super().__call__(tool=tool, args=args, **kw)
+
+
+@pytest.mark.parametrize("rows", [12, 0], ids=["fetched", "empty"])
+async def test_a_change_of_places_reads_the_new_places_years_while_it_fetches(
+    pg_engine: AsyncEngine, rows: int
+) -> None:
+    """A change of places reads the years Search holds for the new places
+    alongside the data, so both start before either ends. A fetch that comes
+    back empty ends the change as before, and the card keeps its offer."""
+    overlap = _Overlap()
+    search = _OverlappingSearch(overlap)
+    app = _app(
+        *_first_turn(),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(_first_results()),
+        tool_surface=search,  # ty: ignore[invalid-argument-type] -- the one tool a change reads
+        engine=pg_engine,
+    )
+    app.state.studio.place_options = _Places()
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = _OverlappingChanger(overlap, rows=rows)
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)
+        )
+        read = await client.get(
+            "/api/studio/state", params={"conversation_id": CONVERSATION, "since": 0}, headers=AUTH
+        )
+
+    assert sorted(overlap.started) == ["fetch", "years"]
+    assert sorted(overlap.finished) == ["fetch", "years"]
+    if rows:
+        assert _frame(frames, "component.created")["card_changes"]["window"]["first_year"] == 1999
+        return
+    assert _frame(frames, "message.complete")["text"].startswith("The card is unchanged.")
+    (card,) = read.json()["closed_since"][0]["cards"]
+    assert card["component_id"] == "cmp_01unit0001"
+    assert card["card_changes"] == _frame(first, "component.created")["card_changes"]
+
+
 # The facets the data API elected for France's aid to Kenya, as the drawn
 # series' coordinates name them.
 _ELECTED = {
@@ -2536,26 +2615,46 @@ async def test_a_change_never_shrinks_the_years_a_card_offers(pg_engine: AsyncEn
 
 _SUM_OPS = {"spec_id": "ops_" + "c" * 32, "content_version": "ocv_" + "3" * 32}
 _SUM_PARAMETERS = {"aggregation": "sum", "group_by": ["time_period", "financingRecipient"]}
+# The pair the store holds the first retrieval under, minted with extra
+# columns, beside the pair the data API serves it under (`_REF`).
+_STORED = {"spec_id": _SPEC, "content_version": "cv_" + "8" * 32}
 
 
-def _sum_recipe(root: Mapping[str, str]) -> dict[str, Any]:
+def _sum_recipe(
+    stored: Mapping[str, str],
+    served: Mapping[str, str],
+    parameters: Mapping[str, Any] = _SUM_PARAMETERS,
+) -> dict[str, Any]:
     """The recipe dfo-apis' runner stores for the sum by year and recipient
-    of the retrieval `root`."""
+    of the retrieval the store holds as `stored` and the data API serves as
+    `served`, each node naming its frame (`common.recipe`)."""
     return {
         "schema_version": 1,
         "tree": {
+            "frame": dict(_SUM_OPS),
             "op_spec": {
                 "identity_version": "ops1",
                 "verb": "aggregate",
-                "frame_ref": dict(root),
-                "parameters": dict(_SUM_PARAMETERS),
+                "frame_ref": dict(stored),
+                "parameters": dict(parameters),
             },
-            "inputs": {"frame_ref": {"root": 0}},
+            "inputs": {"frame_ref": {"frame": dict(stored), "root": 0}},
         },
-        "roots": [{"schema_version": 1, "frame": dict(root), "dataset": dict(root), "options": {}}],
+        "roots": [
+            {"schema_version": 1, "frame": dict(stored), "dataset": dict(served), "options": {}}
+        ],
         "anchor": None,
         "left_out": None,
     }
+
+
+def _stored_apart(written: dict[str, Any]) -> dict[str, Any]:
+    """`written`, whose one retrieval the store holds as `_STORED`."""
+    lineage = written[CARD_LINEAGE_KEY]
+    (member,) = lineage.lineage
+    stored = ProvenanceInput(_STORED["spec_id"], _STORED["content_version"], member.manifest)
+    written[CARD_LINEAGE_KEY] = replace(lineage, lineage=(stored,))
+    return written
 
 
 def _on_sum(written: dict[str, Any], ops: Mapping[str, str]) -> dict[str, Any]:
@@ -2599,8 +2698,9 @@ class _SummingSearch(_Search):
 
 class _SummedChanger(_Changer):
     """`_Changer` for a card on a sum: each retrieval is kept in `provenance`
-    as the executor keeps one, under the pair it is stored by, and each
-    redraw is on the sum the write names."""
+    as the executor keeps one, stored under a pair of its own beside the one
+    it is served under, as a frame minted with extra columns is, and only a
+    served pair can be described. Each redraw is on the sum the write names."""
 
     def __init__(
         self,
@@ -2617,26 +2717,31 @@ class _SummedChanger(_Changer):
         self.facets = facets
         # The view of a frame by its spec_id, else `view`.
         self.views = dict(views or {})
+        self.stored_only = {_STORED["content_version"]}
 
     async def __call__(self, *, tool: str, args: dict[str, Any], **kw: Any) -> dict[str, Any]:
         if tool == "describe_frame":
             self.calls.append({"tool": tool, "args": args})
+            if args["frame_ref"]["content_version"] in self.stored_only:
+                return {"outcome": "error", "error": {"code": "not_found"}}
             dimensions = self.views.get(args["frame_ref"]["spec_id"], self.view)
             return {"outcome": "ok", "frame_refs": [], "view": {"dimensions": list(dimensions)}}
         answer = await super().__call__(tool=tool, args=args, **kw)
         if tool == "get_data":
             (ref,) = answer["frame_refs"]
+            stored = {"spec_id": ref["spec_id"], "content_version": "cv_" + "9" * 32}
+            self.stored_only.add(stored["content_version"])
             self.conversation = current_conversation_id.get()
             self.provenance.put_retrieval(
                 conversation=self.conversation,
                 manifest={
                     "definition": {"spec_id": ref["spec_id"]},
                     "content_version": ref["content_version"],
-                    "frame_ref": dict(ref),
+                    "frame_ref": stored,
                     "artifacts": [{"rendering": _SUMMED}],
                 },
             )
-            answer["store_refs"] = [dict(ref)]
+            answer["store_refs"] = [stored]
         if tool == "write_component":
             answer = _on_sum(answer, args["intent"]["frame_ref"])
             if self.facets is not None:
@@ -2649,17 +2754,21 @@ def _summed_app(
     monkeypatch: pytest.MonkeyPatch,
     surface: _SummingSearch,
     facets: Mapping[str, str] | None = None,
+    parameters: Mapping[str, Any] = _SUM_PARAMETERS,
 ) -> tuple[Any, ProvenanceStore]:
     """The first turn draws France's aid to Kenya on the sum by year and
-    recipient of its retrieval, whose recipe the runner serves."""
+    recipient of its retrieval, called with `parameters`, whose recipe the
+    runner serves."""
 
     async def recipe_of(ref: Any) -> dict[str, Any] | None:
-        return _sum_recipe(_REF) if ref.spec_id == _SUM_OPS["spec_id"] else None
+        if ref.spec_id != _SUM_OPS["spec_id"]:
+            return None
+        return _sum_recipe(_STORED, _REF, parameters)
 
     monkeypatch.setattr(card_unit, "derived_recipe", recipe_of)
     provenance = ProvenanceStore()
     results = _first_results()
-    results[-1] = _on_sum(results[-1], _SUM_OPS)
+    results[-1] = _on_sum(_stored_apart(results[-1]), _SUM_OPS)
     if facets is not None:
         results[-1] = _faceted(results[-1], facets)
     app = _app(
@@ -2749,7 +2858,8 @@ async def test_a_sum_the_analysis_service_refuses_leaves_the_card(
 
 _SUMMED_CARD = card_unit.SummedFrame(
     frame=(_SUM_OPS["spec_id"], _SUM_OPS["content_version"]),
-    root=(_REF["spec_id"], _REF["content_version"]),
+    root=(_STORED["spec_id"], _STORED["content_version"]),
+    served=(_REF["spec_id"], _REF["content_version"]),
     parameters=dict(_SUM_PARAMETERS),
 )
 
@@ -2803,13 +2913,15 @@ def _facet(axis: str, *values: str) -> dict[str, Any]:
 async def test_a_sum_whose_new_retrieval_is_counted_otherwise_is_refused_before_it_is_summed(
     pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, view: list[dict[str, Any]]
 ) -> None:
-    """The card sums series that share one source, method and unit. A new
-    retrieval holding two units or methods, or one other than the card's,
-    would sum unlike figures or relabel them, so the change is refused
-    before `aggregate` is called, and nothing is written."""
+    """The card sums series that share one source, method and unit, which
+    its retrieval holds alone. A new retrieval holding two units or methods,
+    or one other than the card's, would sum unlike figures or relabel them,
+    so the change is refused once the new retrieval is read, before
+    `aggregate` is called, and nothing is written."""
     surface = _SummingSearch()
     app, provenance = _summed_app(pg_engine, monkeypatch, surface, facets=_ELECTED)
-    changer = _SummedChanger(provenance, view=view)
+    held = [_facet(axis, ref) for axis, ref in _ELECTED.items()]
+    changer = _SummedChanger(provenance, view=view, views={_SPEC: held})
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
         app.state.studio.recorder._executor = changer
@@ -2817,6 +2929,9 @@ async def test_a_sum_whose_new_retrieval_is_counted_otherwise_is_refused_before_
             client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
         )
 
+    assert len(changer.fetched()) == 1
+    described = [c["args"]["frame_ref"] for c in changer.calls if c["tool"] == "describe_frame"]
+    assert described[-1]["spec_id"] != _SPEC
     assert surface.summed == []
     assert "write_component" not in [call["tool"] for call in changer.calls]
     failed = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
@@ -2844,6 +2959,47 @@ async def test_a_sum_binds_the_facets_its_series_share_and_checks_them_again(
     (fetched,) = changer.fetched()
     assert fetched["scope"]["facets"] == {axis: {"ref": ref} for axis, ref in _ELECTED.items()}
     assert len(surface.summed) == 1
+    assert _frame(frames, "component.created")["replaces"] == "cmp_01unit0001"
+
+
+class _UnitBindingChanger(_SummedChanger):
+    """`_SummedChanger` over a retrieval holding `units`, of which a new
+    retrieval holds only the one its fetch binds, else all of them."""
+
+    def __init__(self, provenance: ProvenanceStore, units: list[str]) -> None:
+        super().__init__(provenance, views={_SPEC: [_facet("unit", *units)]})
+        self.units = units
+
+    async def __call__(self, *, tool: str, args: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        if tool == "describe_frame" and self.fetched():
+            bound = ((self.fetched()[-1].get("scope") or {}).get("facets") or {}).get("unit")
+            self.view = [_facet("unit", *([bound["ref"]] if bound else self.units))]
+        return await super().__call__(tool=tool, args=args, **kw)
+
+
+async def test_a_sum_pinned_to_one_unit_binds_it_on_the_new_retrieval(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retrieval holding two units is summed in the one the recipe pins,
+    since `aggregate` sums the pinned unit's rows alone. A change binds the
+    pinned unit on the refetch, so the new retrieval holds it alone and is
+    summed with the pin, as recorded."""
+    units = ["CurrencyEUR", "CurrencyUSD"]
+    pinned = {**_SUM_PARAMETERS, "unit": f"dcid:{units[1]}"}
+    surface = _SummingSearch()
+    app, provenance = _summed_app(pg_engine, monkeypatch, surface, parameters=pinned)
+    changer = _UnitBindingChanger(provenance, units)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+        )
+
+    (fetched,) = changer.fetched()
+    assert fetched["scope"]["facets"]["unit"] == {"ref": units[1]}
+    (summed,) = surface.summed
+    assert summed["unit"] == pinned["unit"]
     assert _frame(frames, "component.created")["replaces"] == "cmp_01unit0001"
 
 
@@ -2932,57 +3088,67 @@ def _recorded_move(name: str, role: str, chosen: list[str], entities: list[str])
         old=tuple(chosen),
         new=tuple(entities),
     )
-    stored = {"type": card["type"], "title": card["title"], "select": card["select"]}
+    stored = {"type": card["type"], "title": card["title"], "select": card["written_select"]}
     return stored, move
 
 
-def test_a_change_of_a_recorded_recipient_rewrites_its_column_as_the_live_redraw_did() -> None:
-    """The recorded debt card for Kenya, changed to Uganda, selects what the
-    recorded redraw for Uganda selected."""
+def test_a_change_of_a_recorded_recipient_writes_the_select_the_live_redraw_wrote() -> None:
+    """The recorded debt card for Kenya writes no recipient in its select,
+    its places being the retrieval's. Changed to Uganda, it writes the select
+    the recorded redraw for Uganda wrote."""
     stored, move = _recorded_move("debt_kenya", "destination", ["country/KEN"], ["country/UGA"])
-    assert stored["select"]["financingRecipient"] == ["country/KEN"]
+    assert "financingRecipient" not in stored["select"]
 
     intent, _ = _redrawn_intent(stored, dict(_REF), move)
 
-    assert intent["select"] == _RECORDED_CARDS["debt_uganda_after_change"]["select"]
+    assert intent["select"] == _RECORDED_CARDS["debt_uganda_after_change"]["written_select"]
 
 
 @pytest.mark.parametrize(
-    ("role", "chosen", "entities", "column"),
+    ("role", "chosen", "entities", "column", "written"),
     [
-        ("destination", ["country/KEN"], ["country/UGA"], "financingRecipient"),
-        ("origin", None, ["country/CAN", "country/GBR"], "financingProvider"),
+        ("destination", ["country/KEN"], ["country/UGA"], "financingRecipient", "country/UGA"),
+        (
+            "origin",
+            None,
+            ["country/CAN", "country/GBR"],
+            "financingProvider",
+            ["country/CAN", "country/GBR"],
+        ),
     ],
     ids=["destination", "origin"],
 )
 def test_a_change_of_one_role_beside_another_listed_dimension_rewrites_its_column_alone(
-    role: str, chosen: list[str] | None, entities: list[str], column: str
+    role: str, chosen: list[str] | None, entities: list[str], column: str, written: Any
 ) -> None:
-    """Health aid to Kenya by provider, recorded, lists eight providers
-    beside its one recipient. A change of either role rewrites that role's
-    column, and the other entry stays as recorded."""
-    recorded = _RECORDED_CARDS["health_aid_kenya_by_provider"]["select"]
+    """Health aid to Kenya by provider, recorded, writes eight providers as a
+    list beside its one recipient as one value. A change of either role
+    rewrites that role's column in its own form, and the other entry stays
+    as recorded."""
+    recorded = _RECORDED_CARDS["health_aid_kenya_by_provider"]["written_select"]
     shown = chosen if chosen is not None else recorded["financingProvider"]
     stored, move = _recorded_move("health_aid_kenya_by_provider", role, shown, entities)
 
     intent, _ = _redrawn_intent(stored, dict(_REF), move)
 
-    assert intent["select"][column] == entities
+    assert intent["select"][column] == written
     assert {k: v for k, v in intent["select"].items() if k != column} == {
         k: v for k, v in recorded.items() if k != column
     }
 
 
 def test_a_change_of_places_leaves_another_role_naming_the_same_place() -> None:
-    """The recorded debt card for Kenya, with Kenya also named as its
+    """Health aid to Kenya by provider, recorded, with Kenya also named as its
     provider: a change of the recipient rewrites `financingRecipient` and
     leaves `financingProvider` naming Kenya."""
-    stored, move = _recorded_move("debt_kenya", "destination", ["country/KEN"], ["country/UGA"])
+    stored, move = _recorded_move(
+        "health_aid_kenya_by_provider", "destination", ["country/KEN"], ["country/UGA"]
+    )
     stored["select"] = {**stored["select"], "financingProvider": ["country/KEN"]}
 
     intent, _ = _redrawn_intent(stored, dict(_REF), move)
 
-    assert intent["select"]["financingRecipient"] == ["country/UGA"]
+    assert intent["select"]["financingRecipient"] == "country/UGA"
     assert intent["select"]["financingProvider"] == ["country/KEN"]
 
 

@@ -1,5 +1,5 @@
 {
-  "_source": "component.created frames recorded from live Studio runs against the dev data API; each entry keeps the card's type, title, the select the platform resolved (its card_selection step's coordinates), its fact summary, its offer and its inputs as recorded.",
+  "_source": "component.created frames recorded from live Studio runs against the dev data API; each entry keeps the card's type, title, the select the platform resolved (its card_selection step's coordinates), the select its stored intent holds as written (written_select), its fact summary, its offer and its inputs as recorded.",
   "debt_kenya": {
     "card_changes": {
       "places": [
@@ -69,7 +69,10 @@
       ]
     },
     "title": "Kenya's total external debt stocks owed to all creditors, 2000 to 2015",
-    "type": "line_chart"
+    "type": "line_chart",
+    "written_select": {
+      "stat_var": "dcid:Amount_FinancialPosition_AmountOutstanding_Nominal"
+    }
   },
   "debt_uganda_after_change": {
     "card_changes": {
@@ -140,7 +143,10 @@
       ]
     },
     "title": "Uganda's total external debt stocks owed to all creditors, 2000 to 2015",
-    "type": "line_chart"
+    "type": "line_chart",
+    "written_select": {
+      "stat_var": "dcid:Amount_FinancialPosition_AmountOutstanding_Nominal"
+    }
   },
   "health_aid_kenya_by_provider": {
     "card_changes": {
@@ -336,7 +342,20 @@
       ]
     },
     "title": "Gross ODA disbursements for health to Kenya by provider, 2006 to 2024 (8 largest of 36 in 2024)",
-    "type": "line_chart"
+    "type": "line_chart",
+    "written_select": {
+      "financingProvider": [
+        "Gavi",
+        "GlobalFund",
+        "InternationalDevelopmentAssociation",
+        "country/CAN",
+        "country/FIN",
+        "country/GBR",
+        "country/JPN",
+        "country/USA"
+      ],
+      "financingRecipient": "country/KEN"
+    }
   },
   "health_aid_kenya_summed": {
     "card_changes": null,
@@ -399,6 +418,9 @@
       ]
     },
     "title": "Gross ODA disbursements to Kenya for health, 1990 to 2024",
-    "type": "line_chart"
+    "type": "line_chart",
+    "written_select": {
+      "stat_var": "dcid:spec_27c3def78c844bfa2f44caa2b9b1598c"
+    }
   }
 }

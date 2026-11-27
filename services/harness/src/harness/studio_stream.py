@@ -570,9 +570,19 @@ class _Owner[E, R]:
                 self._conversation_id,
                 self._segment_id,
             )
-            self._first_seq = self._conversation.seq
             if self._task is not None and not self._task.done():
                 await self._stop(self._task)
+            # The transient frame still goes out, so what the work owes goes
+            # ahead of it, unless taking it is the fault.
+            try:
+                await self._settle()
+            except Exception:
+                logger.exception(
+                    "studio stream: conversation %s segment %s's owed frames could not be sent",
+                    self._conversation_id,
+                    self._segment_id,
+                )
+            self._first_seq = self._conversation.seq
             return Ending(_transient_frame(), Status.UNCLOSED, saved=False)
         finally:
             self._work.close()

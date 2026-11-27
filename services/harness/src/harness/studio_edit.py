@@ -33,6 +33,7 @@ the turn, and writes the card to the canvas (`StudioStore.change_canvas`).
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import logging
@@ -816,61 +817,72 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
     # (`resubmit_unit`); a change of years or places binds them all on the
     # fetch, so the data API elects none of them again.
     card = _changed_card(move, read)
-    if card.total is not None:
-        # A card on a sum keeps the facets its retrieval was counted in,
-        # read from that retrieval's frame, since the sum's own series may
-        # not name them.
-        root = {"spec_id": card.total.root[0], "content_version": card.total.root[1]}
-        viewed = await recorder(tool="describe_frame", args={"frame_ref": root})
-        view = viewed.get("view") if viewed.get("outcome") == "ok" else None
-        kept = root_facets(card, view) if isinstance(view, Mapping) else None
-        if kept is None:
-            refused = _SUM_UNREAD if not isinstance(view, Mapping) else _OTHER_BASIS
-            yield _step("u2", label, failed=refused)
-            for event in _close(f"{_UNIT_UNCHANGED} {refused}"):
-                yield event
-            return
-        card = replace(card, facets=kept or None)
-    facets = (
-        bound_facets(card, stored_block(conversation.turn_specs, conversation.turns, card.spec_id))
-        if isinstance(move, ChangeMove)
-        else None
-    )
-    fetched = await recorder(
-        tool="get_data", args=card.fetch_args(read.spec_id, read.scope, facets=facets)
-    )
-    frame_refs = fetched.get("frame_refs") or []
-    if fetched.get("outcome") != "ok" or not frame_refs:
-        for event in _refused("u2", label, _UNIT_UNCHANGED, fetched):
-            yield event
-        return
-    if fetched.get("rows") == 0:
-        yield _step("u2", label, failed=_NO_DATA)
-        for event in _close(f"{_UNIT_UNCHANGED} {_NO_DATA}"):
-            yield event
-        return
-    frame_ref = frame_refs[0]
-    if card.total is not None:
-        # The new retrieval is summed only when its series share the unit,
-        # source and method the card's sum was drawn with, since `aggregate`
-        # would add two methods' figures, or label a sum of another unit as the
-        # card's.
-        viewed = await recorder(tool="describe_frame", args={"frame_ref": frame_ref})
-        view = viewed.get("view") if viewed.get("outcome") == "ok" else None
-        unlike = unlike_series(card, view) if isinstance(view, Mapping) else "unread"
-        summed = (
-            {"mixed": _MIXED_BASIS, "other": _OTHER_BASIS, "unread": _SUM_UNREAD}[unlike]
-            if unlike is not None
-            else await _summed_again(surface, provenance, card.total, fetched)
+    # The years held over the new places depend on the spec and its scope
+    # alone, so Search reads them while the data is fetched. A change refused
+    # meanwhile drops them with the card.
+    years = asyncio.create_task(_with_years(surface, conversation, card, read))
+    years.add_done_callback(lambda task: task.cancelled() or task.exception())
+    try:
+        if card.total is not None:
+            # A card on a sum keeps the facets its retrieval was counted in,
+            # read from that retrieval's frame, since the sum's own series may
+            # not name them. The frame is described by the pair it is served
+            # under, which the store's pair need not be.
+            root = {"spec_id": card.total.served[0], "content_version": card.total.served[1]}
+            viewed = await recorder(tool="describe_frame", args={"frame_ref": root})
+            view = viewed.get("view") if viewed.get("outcome") == "ok" else None
+            kept = root_facets(card, view) if isinstance(view, Mapping) else None
+            if kept is None:
+                refused = _SUM_UNREAD if not isinstance(view, Mapping) else _OTHER_BASIS
+                yield _step("u2", label, failed=refused)
+                for event in _close(f"{_UNIT_UNCHANGED} {refused}"):
+                    yield event
+                return
+            card = replace(card, facets=kept or None)
+        facets = (
+            bound_facets(
+                card, stored_block(conversation.turn_specs, conversation.turns, card.spec_id)
+            )
+            if isinstance(move, ChangeMove)
+            else None
         )
-        if isinstance(summed, str):
-            yield _step("u2", label, failed=summed)
-            for event in _close(f"{_UNIT_UNCHANGED} {summed}"):
+        fetched = await recorder(
+            tool="get_data", args=card.fetch_args(read.spec_id, read.scope, facets=facets)
+        )
+        frame_refs = fetched.get("frame_refs") or []
+        if fetched.get("outcome") != "ok" or not frame_refs:
+            for event in _refused("u2", label, _UNIT_UNCHANGED, fetched):
                 yield event
             return
-        frame_ref, total = summed
-        card = replace(card, total=total)
-    card = await _with_years(surface, conversation, card, read)
+        if fetched.get("rows") == 0:
+            yield _step("u2", label, failed=_NO_DATA)
+            for event in _close(f"{_UNIT_UNCHANGED} {_NO_DATA}"):
+                yield event
+            return
+        frame_ref = frame_refs[0]
+        if card.total is not None:
+            # The new retrieval is summed only when its series share the unit,
+            # source and method the card's sum was drawn with, since `aggregate`
+            # would add two methods' figures, or label a sum of another unit as the
+            # card's.
+            viewed = await recorder(tool="describe_frame", args={"frame_ref": frame_ref})
+            view = viewed.get("view") if viewed.get("outcome") == "ok" else None
+            unlike = unlike_series(card, view) if isinstance(view, Mapping) else "unread"
+            summed = (
+                {"mixed": _MIXED_BASIS, "other": _OTHER_BASIS, "unread": _SUM_UNREAD}[unlike]
+                if unlike is not None
+                else await _summed_again(surface, provenance, card.total, fetched)
+            )
+            if isinstance(summed, str):
+                yield _step("u2", label, failed=summed)
+                for event in _close(f"{_UNIT_UNCHANGED} {summed}"):
+                    yield event
+                return
+            frame_ref, total = summed
+            card = replace(card, total=total)
+        card = replace(card, years=(await years).years)
+    finally:
+        years.cancel()
     yield _step("u2", label)
 
     # The card left the canvas while its data was read. The change is
@@ -955,7 +967,9 @@ async def _summed_again(  # noqa: PLR0911 -- one sentence per way the sum fails
     refs = fetched.get("store_refs") or fetched.get("frame_refs") or []
     root = refs[0] if refs and isinstance(refs[0], Mapping) else {}
     root_pair = (root.get("spec_id"), root.get("content_version"))
-    if not all(isinstance(part, str) and part for part in root_pair):
+    shown = (fetched.get("frame_refs") or [{}])[0]
+    served = (shown.get("spec_id"), shown.get("content_version"))
+    if not all(isinstance(part, str) and part for part in (*root_pair, *served)):
         return _SUM_UNREAD
     try:
         answer = await surface.call_tool(
@@ -992,6 +1006,7 @@ async def _summed_again(  # noqa: PLR0911 -- one sentence per way the sum fails
     summed = SummedFrame(
         frame=(spec_id, content_version),
         root=(str(root_pair[0]), str(root_pair[1])),
+        served=(str(served[0]), str(served[1])),
         parameters=dict(total.parameters),
     )
     return {"spec_id": spec_id, "content_version": content_version}, summed

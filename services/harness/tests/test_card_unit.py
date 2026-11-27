@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from common.live_apis import LiveApisError
 from data_mcp.get_data_tool import _SUM_STAT_VARS_GROUPBY, Breakdown
-from harness import card_unit, place_options
+from harness import card_unit, chart_binding, derived_frames, place_options
 from harness.card_unit import frame_arguments, retitled, unit_card
 from harness.provenance import CardLineage, ProvenanceInput, lineage_from_json, lineage_json
 from harness.studio import _read_card_change
@@ -567,27 +567,33 @@ async def test_concurrent_reads_of_one_role_make_one_call(fails: bool) -> None:
 
 
 @pytest.mark.parametrize(
-    ("start", "end", "most"),
-    [
-        ("2015", "2024", 24),
-        ("2015-01", "2024-12", 2000 // 120),
-        ("2015-Q1", "2024-Q4", None),
-    ],
+    ("start", "end", "periods"),
+    [("2015", "2024", 10), ("2015-01", "2024-12", 120), ("2015-Q1", "2024-Q4", None)],
     ids=["years", "months", "quarters"],
 )
 def test_a_tables_place_limit_counts_the_periods_it_draws(
-    start: str, end: str, most: int | None
+    start: str, end: str, periods: int | None
 ) -> None:
     """A table draws its places' rows at every period of its window, so the
-    most places it can draw is the row cap over those periods, months
-    counted as months. A window whose periods the harness cannot count
-    states no limit."""
+    most places it can draw is the most whose rows at every period fit the
+    row cap, months counted as months, and no more series than a component
+    draws. A window whose periods the harness cannot count states no
+    limit."""
     card = card_unit.UnitCard(spec_id="spec_x", args={}, roles={"destination": True})
     component = {"fact_summary": {"window": {"start": start, "end": end}}}
 
     drawn = card_unit.encoded(card, None, intent={"type": "table"}, component=component)
 
-    assert (drawn.most or {}).get("destination") == most
+    most = (drawn.most or {}).get("destination")
+    if periods is None:
+        assert most is None
+        return
+    assert most is not None
+    assert most <= chart_binding.MAX_SERIES_PER_COMPONENT
+    assert most * periods <= chart_binding.MAX_TABLE_ROWS
+    assert most == chart_binding.MAX_SERIES_PER_COMPONENT or (
+        (most + 1) * periods > chart_binding.MAX_TABLE_ROWS
+    )
 
 
 async def test_a_read_arriving_as_a_lookup_fails_starts_a_lookup_of_its_own() -> None:
@@ -858,6 +864,7 @@ _SUM = {"aggregation": "sum", "group_by": ["time_period", "financingRecipient"]}
 
 def _sum_node(parameters: Mapping[str, Any], inputs: Mapping[str, Any]) -> dict[str, Any]:
     return {
+        "frame": {"spec_id": _OPS[0], "content_version": _OPS[1]},
         "op_spec": {
             "identity_version": "ops1",
             "verb": "aggregate",
@@ -866,6 +873,12 @@ def _sum_node(parameters: Mapping[str, Any], inputs: Mapping[str, Any]) -> dict[
         },
         "inputs": dict(inputs),
     }
+
+
+# The tree node of the one root a sum reads, as the runner stores it
+# (`common.recipe`).
+_ROOT_NODE = {"frame": {"spec_id": _SPEC, "content_version": _CV}, "root": 0}
+_INPUT = {"frame_ref": _ROOT_NODE}
 
 
 def _root(spec_id: str = _SPEC) -> dict[str, Any]:
@@ -878,7 +891,7 @@ def _sum_recipe(**changed: Any) -> dict[str, Any]:
     retrieval, with the members `changed` names in place."""
     return {
         "schema_version": 1,
-        "tree": _sum_node(_SUM, {"frame_ref": {"root": 0}}),
+        "tree": _sum_node(_SUM, {"frame_ref": _ROOT_NODE}),
         "roots": [_root()],
         "anchor": None,
         "left_out": None,
@@ -896,26 +909,45 @@ def _sum_recipe(**changed: Any) -> dict[str, Any]:
             _sum_recipe(
                 tree=_sum_node(
                     {"aggregation": "sum", "group_by": ["financingRecipient"]},
-                    {"frame_ref": {"root": 0}},
+                    {"frame_ref": _ROOT_NODE},
                 )
             ),
             False,
         ),
         (
-            _sum_recipe(tree=_sum_node(_SUM | {"aggregation": "mean"}, {"frame_ref": {"root": 0}})),
+            _sum_recipe(tree=_sum_node(_SUM | {"aggregation": "mean"}, {"frame_ref": _ROOT_NODE})),
             False,
         ),
         (
             _sum_recipe(
-                tree=_sum_node(_SUM, {"frame_ref": _sum_node(_SUM, {"frame_ref": {"root": 0}})})
+                tree=_sum_node(_SUM, {"frame_ref": _sum_node(_SUM, {"frame_ref": _ROOT_NODE})})
             ),
             False,
         ),
         (
-            _sum_recipe(tree=_sum_node(_SUM | {"anchor_key": "k"}, {"frame_ref": {"root": 0}})),
+            _sum_recipe(tree=_sum_node(_SUM | {"anchor_key": "k"}, {"frame_ref": _ROOT_NODE})),
             False,
         ),
         (_sum_recipe(roots=[_root() | {"scope": {"columns": ["party_kind"]}}]), False),
+        (_sum_recipe(tree=_sum_node(_SUM | {"unit": "dcid:CurrencyUSD"}, _INPUT)), True),
+        (
+            _sum_recipe(
+                tree=_sum_node(_SUM | {"unit": {"base": "CurrencyUSD", "year": 2020}}, _INPUT)
+            ),
+            False,
+        ),
+        (
+            _sum_recipe(
+                tree=_sum_node(
+                    _SUM,
+                    {
+                        "frame_ref": _ROOT_NODE
+                        | {"frame": {"spec_id": _OPS[0], "content_version": _OPS[1]}}
+                    },
+                )
+            ),
+            False,
+        ),
     ],
     ids=[
         "one-sum-by-year",
@@ -926,6 +958,9 @@ def _sum_recipe(**changed: Any) -> dict[str, Any]:
         "two-nodes",
         "unknown-parameter",
         "unknown-root-scope",
+        "unit-ref-pin",
+        "converted-unit-pin",
+        "input-names-another-frame",
     ],
 )
 async def test_only_one_sum_by_year_of_one_retrieval_can_change(
@@ -953,11 +988,54 @@ async def test_only_one_sum_by_year_of_one_retrieval_can_change(
         assert (card.spec_id, card.args, card.total) == (
             _SPEC,
             {},
-            card_unit.SummedFrame(frame=_OPS, root=(_SPEC, _CV), parameters=_SUM),
+            card_unit.SummedFrame(
+                frame=_OPS,
+                root=(_SPEC, _CV),
+                served=(_SPEC, _CV),
+                parameters=recipe["tree"]["op_spec"]["parameters"],
+            ),
         )
         stored = card.as_json()
         assert "args" not in stored
         assert card_unit.UnitCard.from_json(stored) == card
+
+
+_RECORDED_SUM = json.loads(
+    (Path(__file__).parent / "fixtures" / "recorded_summed_manifest.json").read_text()
+)
+
+
+async def test_the_recorded_sum_of_health_aid_to_kenya_reads_as_one_sum_by_year(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manifest dfo-apis served for the live sum by year and recipient of
+    health aid to Kenya. Its tree names each node's frame, the root node's
+    among them, and its root is stored under a pair of its own beside the
+    pair the data API serves (`dataset`). The card reads it as one sum of its
+    stored retrieval, and keeps the served pair to describe it by."""
+    manifest = _RECORDED_SUM
+    tree, (root,) = manifest["recipe"]["tree"], manifest["recipe"]["roots"]
+    assert tree["inputs"]["frame_ref"] == {"root": 0, "frame": root["frame"]}
+    assert root["frame"] != root["dataset"]
+    ops = (manifest["spec_id"], manifest["content_version"])
+    stored = (root["frame"]["spec_id"], root["frame"]["content_version"])
+    served = (root["dataset"]["spec_id"], root["dataset"]["content_version"])
+
+    async def manifest_of(ref: Any) -> dict[str, Any]:
+        assert (ref.spec_id, ref.content_version) == ops
+        return manifest
+
+    monkeypatch.setattr(derived_frames, "read_derived_manifest", manifest_of)
+    retrieval = {"definition": {"spec_id": served[0]}, "content_version": served[1]}
+    lineage = CardLineage(
+        component_id="cmp_1", frame=ops, lineage=(ProvenanceInput(*stored, retrieval),)
+    )
+
+    total = await card_unit.read_summed_frame(lineage)
+
+    assert total == card_unit.SummedFrame(
+        frame=ops, root=stored, served=served, parameters=tree["op_spec"]["parameters"]
+    )
 
 
 async def test_a_card_on_its_retrievals_own_frame_reads_no_recipe(
@@ -993,7 +1071,9 @@ def _summed_card(shown: dict[str, list[str]], *, cut: bool = False) -> card_unit
             first=1978,
             last=2024,
         ),
-        total=card_unit.SummedFrame(frame=_OPS, root=(_SPEC, _CV), parameters=_SUM),
+        total=card_unit.SummedFrame(
+            frame=_OPS, root=(_SPEC, _CV), served=(_SPEC, _CV), parameters=_SUM
+        ),
     )
 
 
@@ -1040,14 +1120,15 @@ _RECORDED_CARDS = [name for name in _RECORDED if not name.startswith("_")]
 
 @pytest.mark.parametrize("name", _RECORDED_CARDS)
 def test_a_recorded_select_is_keyed_by_its_frames_columns(name: str) -> None:
-    """The control every recorded-card test rests on. The select the platform
-    resolved names the columns its series carry, a flow role's places under
-    the party column."""
+    """The control every recorded-card test rests on. The select the card
+    wrote, and the one the platform resolved from it, name the columns its
+    series carry, a flow role's places under the party column."""
     card = _RECORDED[name]
     columns = {key for series in card["fact_summary"]["series"] for key in series["coordinates"]}
 
-    assert set(card["select"]) <= columns
-    assert not {"destination", "origin"} & set(card["select"])
+    for select in (card["select"], card["written_select"]):
+        assert set(select) <= columns
+        assert not {"destination", "origin"} & set(select)
 
 
 def test_a_recorded_card_offers_the_places_its_select_draws() -> None:
@@ -1058,15 +1139,16 @@ def test_a_recorded_card_offers_the_places_its_select_draws() -> None:
     (recorded,) = card["card_changes"]["places"]
     held = {"destination": [place["id"] for place in recorded["chosen"]]}
     assert held == {"destination": ["country/KEN", "country/TZA", "country/UGA"]}
-    assert card["select"]["financingRecipient"] == ["country/KEN"]
+    select = card["written_select"]
+    assert select["financingRecipient"] == "country/KEN"
 
-    shown = card_unit._selected_places(held, {"type": card["type"], "select": card["select"]})
+    shown = card_unit._selected_places(held, {"type": card["type"], "select": select})
 
     assert shown == {"destination": ["country/KEN"]}
 
 
 def test_a_summed_card_keeps_several_places_where_the_sum_adds_up_another_role() -> None:
-    """The recorded sum of health aid to Kenya, its select and type as drawn,
+    """The recorded sum of health aid to Kenya, its written select and type,
     over a frame whose providers (France and Germany) the sum adds up. The
     providers draw no series of their own on the sum, so the recipient takes
     several places as on a line chart of one role."""
@@ -1082,9 +1164,11 @@ def test_a_summed_card_keeps_several_places_where_the_sum_adds_up_another_role()
             }
         },
         labels={"country/KEN": "Kenya", "country/FRA": "France", "country/DEU": "Germany"},
-        total=card_unit.SummedFrame(frame=_OPS, root=(_SPEC, _CV), parameters=_SUM),
+        total=card_unit.SummedFrame(
+            frame=_OPS, root=(_SPEC, _CV), served=(_SPEC, _CV), parameters=_SUM
+        ),
     )
-    intent = {"type": recorded["type"], "select": recorded["select"]}
+    intent = {"type": recorded["type"], "select": recorded["written_select"]}
 
     encoded = card_unit.encoded(card, block, intent=intent, component={"fact_summary": {}})
 
@@ -1094,6 +1178,32 @@ def test_a_summed_card_keeps_several_places_where_the_sum_adds_up_another_role()
     )
     assert offer is not None
     assert [(p.role, p.multiple) for p in offer.places or ()] == [("destination", True)]
+
+
+def test_a_place_role_beside_a_list_of_one_value_takes_one_place() -> None:
+    """A card reads its written select (`stored_intent`), and the recorded
+    health aid to Kenya by provider writes its recipient as one value beside
+    its providers' list. Cut to one provider, as a change of providers writes
+    it, the providers stay a list. The platform binds a line chart's list of
+    one value as a listed dimension, so a second recipient listed beside it
+    would be refused, and the recipient takes one place."""
+    recorded = _RECORDED["health_aid_kenya_by_provider"]
+    written = recorded["written_select"]
+    one = {**written, "financingProvider": written["financingProvider"][:1]}
+    kind = recorded["type"]
+    assert chart_binding.select_binding_ok(type_=kind, select=one, view={}) is None
+    several = {**one, "financingRecipient": ["country/KEN", "country/UGA"]}
+    assert chart_binding.select_binding_ok(type_=kind, select=several, view={}) is not None
+
+    takes = card_unit.takes_several(
+        {"type": kind, "select": one},
+        [written["financingRecipient"]],
+        [one["financingProvider"]],
+        role="destination",
+        other_roles=["origin"],
+    )
+
+    assert takes is False
 
 
 def test_a_truncated_fact_summary_binds_no_facet_and_its_card_offers_no_change() -> None:
@@ -1114,7 +1224,7 @@ def test_a_truncated_fact_summary_binds_no_facet_and_its_card_offers_no_change()
     card = card_unit.encoded(
         card_unit.UnitCard(spec_id=block["spec_id"], args={}),
         block,
-        intent={"type": recorded["type"], "select": recorded["select"]},
+        intent={"type": recorded["type"], "select": recorded["written_select"]},
         component={"fact_summary": cut},
     )
     assert card_unit.card_changes(card, block, fact_summary=cut, places=True) is None
