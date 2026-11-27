@@ -1011,7 +1011,7 @@ class PlacesOffer(_WireModel):
 
 class PlacesOptions(_WireModel):
     """The answer of `GET /api/studio/places`: the places role `role` of card
-    `component_id` can change to, in Search's order, at most 300, `truncated`
+    `component_id` can change to, in label order, at most 300, `truncated`
     when Search listed more. `chosen` places may be among them."""
 
     component_id: str

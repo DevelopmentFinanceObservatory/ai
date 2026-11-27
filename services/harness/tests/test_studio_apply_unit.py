@@ -2226,3 +2226,55 @@ def test_unit_words_keep_their_base_year_on_a_card_whose_unit_cannot_change() ->
         "Aid in constant 2023 prices, 2010 to 2024"
     )
     assert rewrite("y_label", "USD, constant 2023 prices") == "USD, constant 2023 prices"
+
+
+class _NarrowingSearch(_Search):
+    """Search with no `years_with_data`, whose answer serves the window the
+    posted identity requests, as a data API that has not shipped the member
+    answers a narrowed card."""
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Any, on_progress: ProgressCallback | None = None
+    ) -> ToolCallResult:
+        answered = await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        window = (arguments.get("identity") or {}).get("requested_window") or {}
+        if window.get("kind") == "range":
+            (part,) = answered.meta[SEARCH_ENVELOPE_META_KEY]["parts"]
+            part["spec"]["resolved"]["download"]["window"] = {
+                "start_year": window["start_year"],
+                "end_year": window["end_year"],
+            }
+        return answered
+
+
+async def test_a_change_never_shrinks_the_years_a_card_offers(pg_engine: AsyncEngine) -> None:
+    """Narrowed to 2018 to 2020 on an answer that states no years with data,
+    the card still offers 1978 to 2024, and a change back to them is drawn."""
+    app = _app(
+        *_first_turn(),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(_first_results()),
+        tool_surface=_NarrowingSearch(),  # ty: ignore[invalid-argument-type] -- the one tool a change reads
+        engine=pg_engine,
+    )
+    changer = _Changer()
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        narrow = {"kind": "window", "start_year": 2018, "end_year": 2020}
+        narrowed = _frame(
+            await _stream(
+                client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, narrow)
+            ),
+            "component.created",
+        )
+        wide = {"kind": "window", "start_year": 1978, "end_year": 2024}
+        widened = await _stream(
+            client,
+            "/api/studio/turn",
+            _change_body(narrowed["component_id"], narrowed["card_changes"]["spec_id"], wide),
+        )
+
+    window = narrowed["card_changes"]["window"]
+    assert (window["first_year"], window["last_year"]) == (1978, 2024)
+    assert _frame(widened, "component.created")["card_changes"]["window"]["start_year"] == 1978

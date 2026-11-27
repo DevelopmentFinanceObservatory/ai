@@ -634,3 +634,32 @@ def test_a_card_showing_one_value_offers_the_year_it_draws(
 def test_a_single_window_naming_a_range_is_refused_on_the_wire() -> None:
     with pytest.raises(ValidationError):
         WindowOffer(start_year=2016, end_year=2024, first_year=1970, last_year=2024, single=True)
+
+
+async def test_a_roles_places_are_listed_by_label() -> None:
+    """Search lists places by ref; a reader reads them by name, accents and
+    case ignored."""
+    listed = (
+        ("country/ABW", "Aruba"),
+        ("country/AFG", "Afghanistan"),
+        ("country/CIV", "Côte d'Ivoire"),
+        ("country/TUR", "Türkiye"),
+        ("country/TZA", "Tanzania"),
+        ("country/ZAF", "south Africa"),
+        ("country/CMR", "Cameroon"),
+    )
+
+    async def door(**_: Any) -> tuple[tuple[tuple[str, str], ...], bool]:
+        return listed, False
+
+    read = await place_options.read_role_places(door, identity={}, role="destination")
+
+    assert [label for _, label in read.places] == [
+        "Afghanistan",
+        "Aruba",
+        "Cameroon",
+        "Côte d'Ivoire",
+        "south Africa",
+        "Tanzania",
+        "Türkiye",
+    ]

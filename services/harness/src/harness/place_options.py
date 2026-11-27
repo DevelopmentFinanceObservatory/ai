@@ -12,7 +12,7 @@ Search's options door lists the places of the type the role binds
 `common.live_apis.LiveApisClient.read_entity_options`). It reads no model and
 answers from the posted identity, in about 0.3 to 0.6 s on the dev
 deployment. `read_role_places` waits at most `PLACE_OPTIONS_DEADLINE_S` and
-keeps at most `PLACE_OPTIONS_CAP` places. `ApisPlaceOptions` keeps a role's
+keeps at most `PLACE_OPTIONS_CAP` places, sorted by label. `ApisPlaceOptions` keeps a role's
 places for `PLACE_OPTIONS_TTL_S`, so a picker's read and the change applied
 from it make one call.
 
@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 import time
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -73,8 +74,9 @@ class PlacesNotServedError(PlacesUnavailableError):
 
 @dataclass(frozen=True)
 class RolePlaces:
-    """The places a role can change to: `(ref, label)` in Search's order, at
-    most `PLACE_OPTIONS_CAP`, and whether more were listed (`truncated`)."""
+    """The places a role can change to: `(ref, label)` in label order, case
+    and accents ignored, ties by ref, at most `PLACE_OPTIONS_CAP`, and
+    whether more were listed (`truncated`)."""
 
     places: tuple[tuple[str, str], ...]
     truncated: bool
@@ -203,10 +205,18 @@ async def read_role_places(
         (time.monotonic() - started) * 1000,
         len(listed),
     )
+    ordered = sorted(listed, key=lambda place: (_label_key(place[1]), place[0]))
     return RolePlaces(
-        places=tuple(listed[:PLACE_OPTIONS_CAP]),
+        places=tuple(ordered[:PLACE_OPTIONS_CAP]),
         truncated=truncated or len(listed) > PLACE_OPTIONS_CAP,
     )
+
+
+def _label_key(label: str) -> str:
+    """`label` as a reader alphabetises it: case and accents ignored, so
+    "Côte d'Ivoire" sorts among the Cs."""
+    decomposed = unicodedata.normalize("NFKD", label)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
 def places_offered(reader: PlaceOptionsReader | None) -> bool:
