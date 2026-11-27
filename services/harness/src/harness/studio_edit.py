@@ -513,7 +513,7 @@ def _redrawn_intent(
             old = {o.id for o in places.chosen}
             select = intent.get("select")
             if isinstance(select, Mapping):
-                # A select is keyed by the frame's columns: a flow role's
+                # A select is keyed by the frame's columns, so a flow role's
                 # places sit under its party column.
                 entry = select_entry(select, change.role)
                 intent["select"] = {
@@ -612,9 +612,9 @@ def _changed_title(title: Any, move: ChangeMove) -> str:
     read, or a card with no title, is built from the block's facts too.
 
     A card on a sum (`harness.card_unit.UnitCard.total`) is always built from
-    the block's facts, with the new period or the one its title ended on: a
-    title written for the sum can count the members it adds up ("from 32
-    donors"), and other years or places can add up another number."""
+    the block's facts, with the new period or the one its title ended on,
+    since a title written for the sum can count the members it adds up ("from
+    32 donors") and other years or places can add up another number."""
     text = title if isinstance(title, str) else ""
     card = replace(move.card, scope=move.scope)
     summed = move.card.total is not None
@@ -852,8 +852,8 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
     frame_ref = frame_refs[0]
     if card.total is not None:
         # The new retrieval is summed only when its series share the unit,
-        # source and method the card's sum was drawn with: `aggregate` would
-        # add two methods' figures, or label a sum of another unit as the
+        # source and method the card's sum was drawn with, since `aggregate`
+        # would add two methods' figures, or label a sum of another unit as the
         # card's.
         viewed = await recorder(tool="describe_frame", args={"frame_ref": frame_ref})
         view = viewed.get("view") if viewed.get("outcome") == "ok" else None

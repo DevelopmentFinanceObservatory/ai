@@ -1901,7 +1901,7 @@ class _Translator:
         # `composition.updated` is held, to go out beside the next drawing
         # line so the canvas never shows empty while the cards replacing the
         # removed ones are drawn (`_release_removal`). One still held when the
-        # segment ends goes out before its ending frame, whatever that is: the
+        # segment ends goes out before its ending frame, whatever that is. The
         # stream's owner asks for it (`release_removal`).
         self._removal_held = False
 
@@ -3002,10 +3002,9 @@ class _Translator:
         return frames
 
     def _agent_text(self, text: str) -> list[Any]:
-        """Answer text as the model streams it, a held removal's update
-        included: that goes out as the response ends (`_agent_response`),
-        after the text, since only then is it known whether the response
-        draws."""
+        """Answer text as the model streams it. A held removal's update goes
+        out as the response ends (`_agent_response`), after the text, since
+        only then is it known whether the response draws."""
         if not text:
             return []
         frames: list[Any] = [*self._close_status(), *self._narration_break()]

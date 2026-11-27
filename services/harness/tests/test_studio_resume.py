@@ -1419,7 +1419,7 @@ def test_a_stored_card_offers_no_unit_change_it_cannot_make(
     block: dict[str, Any] | None, on_canvas: bool
 ) -> None:
     """A stored card whose spec's block cannot be read gives the card with
-    no `unit_change`, and `apply_unit` refuses it `unit_not_offered`; one off
+    no `unit_change`, and `apply_unit` refuses it `unit_not_offered`. One off
     the canvas gives none either, and `apply_unit` refuses it
     `scope_choice_stale`."""
     state = _stored_state(

@@ -1040,9 +1040,9 @@ _RECORDED_CARDS = [name for name in _RECORDED if not name.startswith("_")]
 
 @pytest.mark.parametrize("name", _RECORDED_CARDS)
 def test_a_recorded_select_is_keyed_by_its_frames_columns(name: str) -> None:
-    """The control every recorded-card test rests on: the select the platform
+    """The control every recorded-card test rests on. The select the platform
     resolved names the columns its series carry, a flow role's places under
-    the party column, never under the role."""
+    the party column."""
     card = _RECORDED[name]
     columns = {key for series in card["fact_summary"]["series"] for key in series["coordinates"]}
 
@@ -1051,8 +1051,8 @@ def test_a_recorded_select_is_keyed_by_its_frames_columns(name: str) -> None:
 
 
 def test_a_recorded_card_offers_the_places_its_select_draws() -> None:
-    """Health aid to Kenya by provider, recorded: its frame holds Kenya,
-    Tanzania and Uganda, and its select draws Kenya under
+    """Health aid to Kenya by provider, as recorded, has a frame holding
+    Kenya, Tanzania and Uganda and a select drawing Kenya under
     `financingRecipient`. The offer names Kenya alone."""
     card = _RECORDED["health_aid_kenya_by_provider"]
     (recorded,) = card["card_changes"]["places"]

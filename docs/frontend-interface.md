@@ -863,7 +863,7 @@ the new cards, so the page can swap the old cards for placeholders in one
 step. If nothing is drawn, it comes when the next response ends, after
 any text that response streamed, or before the stream's last frame, an
 `error` included. A stream cut off because
-another server took the turn over also sends it first; drop any manifest
+another server took the turn over also sends it first. Drop any manifest
 no newer than one you rendered.
 
 **Cards on their way**: the `running` `activity.step` of a `make_charts`

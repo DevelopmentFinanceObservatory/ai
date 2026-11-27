@@ -2452,9 +2452,8 @@ async def test_a_removal_shows_beside_the_next_drawing_line_or_when_nothing_is_d
     the removed cards stay on screen until the cards replacing them are
     announced. It goes out right after the next response's `make_charts`
     line, or as the next response ends when that draws nothing, after the
-    text it streamed delta by delta: the text never waits for the update.
-    When the
-    segment ends first, on `done`, a pause or a failure, the translator
+    text it streamed delta by delta, which never waits for the update. When
+    the segment ends first, on `done`, a pause or a failure, the translator
     still holds it, once, for the stream's owner to send before the ending
     frame (`release_removal`, which the work's `owed` hands over)."""
     _, translator, held = await _held_removal(pg_engine)

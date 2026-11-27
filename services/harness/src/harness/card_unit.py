@@ -506,9 +506,9 @@ def facet_values(view: Mapping[str, Any]) -> dict[str, list[str]]:
 def root_facets(card: UnitCard, view: Mapping[str, Any]) -> dict[str, str] | None:
     """The facets `card`, a card on a sum, binds on a change: the one value
     each facet axis of its retrieval's frame view (`view`) holds, with the
-    ones the card drew; `None` when the two name different values on an axis.
-    An axis holding several values is left unbound, and a new retrieval that
-    holds several on it is refused (`unlike_series`)."""
+    ones the card drew. It returns `None` when the two name different values
+    on an axis. An axis holding several values is left unbound, and a new
+    retrieval that holds several on it is refused (`unlike_series`)."""
     found = {
         axis: values[0]
         for axis, values in facet_values(view).items()
@@ -585,10 +585,10 @@ def _naming(select: Mapping[str, Any], refs: Sequence[str]) -> set[str]:
 
 
 def select_entry(select: Mapping[str, Any], role: str) -> str | None:
-    """The key of `select`, a chart's select, that names `role`'s places: the
-    frame column the role is served in (`role_column`), as a select is keyed
-    by the frame's dimensions, else the role's own name; `None` when the
-    select names neither."""
+    """The key of `select`, a chart's select, that names `role`'s places. A
+    select is keyed by the frame's dimensions, so the key is the frame column
+    the role is served in (`role_column`), else the role's own name. It
+    returns `None` when the select names neither."""
     for key in dict.fromkeys((role_column(role), role)):
         if key in select:
             return key
@@ -763,9 +763,10 @@ _COUNTED_PERIOD = re.compile(r"\d{4}(?:-\d{2}(?:-\d{2})?)?")
 def _drawn_view(component: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """The part of a frame view `chart_draws` reads, for the card `component`
     draws: the first and last period its fact summary states, whole, which a
-    table draws rows at, months and days counted as such; empty when it
-    states none; `None` when it states periods `periods_covered` cannot
-    count, such as quarters, or two of different grains."""
+    table draws rows at, months and days counted as such. It is empty when
+    the summary states none, and `None` when it states periods
+    `periods_covered` cannot count, such as quarters, or two of different
+    grains."""
     window = ((component or {}).get("fact_summary") or {}).get("window") or {}
     start, end = window.get("start"), window.get("end")
     if not isinstance(start, str) or not isinstance(end, str):
@@ -1406,8 +1407,8 @@ def _admitted(
     `scope_choice_stale` with `UNIT_GONE_NOTE` when the card is off the
     canvas and with `stale` when it reads a spec other than `spec_id` (any,
     with `None`), and `unoffered` for a card on the canvas that can change
-    nothing: one that kept nothing a change reads, or whose spec's block no
-    turn kept."""
+    nothing, because it kept nothing a change reads or no turn kept its
+    spec's block."""
     composition = conversation.composition
     blocks = composition.blocks if composition is not None else []
     on_canvas = next((b for b in blocks if b.component_id == component_id), None)
@@ -1519,7 +1520,7 @@ def changeable(
     constraint and detail: `scope_choice_stale` when the card is off the
     canvas or reads a spec other than `spec_id` (any, with `None`), and
     `unoffered` when it offers no change (`/places` answers that
-    `scope_choice_stale` too, as its contract states; `change_move` answers
+    `scope_choice_stale` too, as its contract states, and `change_move` answers
     `CHANGE_UNOFFERED`). `places` says whether Search's places door is on."""
     held = _admitted(
         conversation, component_id, spec_id, stale=CHANGE_STALE_NOTE, unoffered=unoffered
@@ -1543,8 +1544,8 @@ async def change_move(  # noqa: PLR0911 -- one refusal per way a change cannot a
     """The change `pick` asks of `conversation`, or its refusal's constraint
     and detail: `scope_choice_stale` as `changeable` refuses;
     `change_not_offered` for a card that offers no change, years or places
-    outside the card's offer, or the
-    ones it shows; `change_no_data` for years its data holds none of. A change
+    outside the card's offer, or the ones it shows; `change_no_data` for years
+    its data holds none of. A change
     of places reads the places its role can change to from Search through
     `reader` (the places door, `None` when off), or takes them from `listed`
     when the route read them already, and is refused

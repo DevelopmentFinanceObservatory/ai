@@ -393,8 +393,8 @@ class Work[E, R](Protocol):
         ...
 
     def owed(self) -> list[BaseModel]:
-        """The frames the work still owes the stream, numbered, taken once:
-        the owner sends them before the frame that ends the stream, however
+        """The frames the work still owes the stream, numbered, taken once.
+        The owner sends them before the frame that ends the stream, however
         the work ended (`_Owner.run`)."""
         ...
 
