@@ -72,6 +72,7 @@ from harness.graph.plan_done import authored_report, frame_unavailable_reason, p
 from harness.graph.seed import seed_node
 from harness.graph.state import (
     APPROVE_PAUSE,
+    FRAME_PLAN_STEP,
     ORCHESTRATOR_FRAMES_KEY,
     ORCHESTRATOR_KEPT_ASKS_KEY,
     ORCHESTRATOR_PLAN_RECORDS_KEY,
@@ -1888,7 +1889,13 @@ async def test_a_hand_back_recorded_without_store_pairs_registers_its_frames(
 
     await plan_done.run(ctx, node_input)
 
-    assert ctx.state[ORCHESTRATOR_FRAMES_KEY] == {frame_id_for(REF_A): {"ref": REF_A, "view": {}}}
+    assert ctx.state[ORCHESTRATOR_FRAMES_KEY] == {
+        frame_id_for(REF_A): {
+            "ref": REF_A,
+            "view": {},
+            FRAME_PLAN_STEP: _FINAL_RETRIEVAL["step_id"],
+        }
+    }
     entry = ctx.state[ORCHESTRATOR_FRAMES_KEY][frame_id_for(REF_A)]
     assert frame_store_ref(entry) == REF_A
 

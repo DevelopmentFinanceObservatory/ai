@@ -2442,6 +2442,7 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
         skippable=True,
         step_order=("step_b", "step_a"),
         step_labels={"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"},
+        card_steps={"step_b": "step_b", "step_b_history": "step_b", "step_a": "step_a"},
         resuming_segment="seg_1",
         answer={"decision": "approve", "option_id": "spec_a"},
     )
@@ -2498,6 +2499,11 @@ async def test_round_trip_of_every_durable_field(new_store) -> None:
     assert (pending.skippable, pending.legacy) == (True, False)
     assert pending.step_order == ("step_b", "step_a")
     assert pending.step_labels == {"step_b": "Fetch aid to Kenya", "step_a": "Total aid by year"}
+    assert pending.card_steps == {
+        "step_b": "step_b",
+        "step_b_history": "step_b",
+        "step_a": "step_a",
+    }
     assert pending.resuming_segment == "seg_1"
     assert pending.answer == {"decision": "approve", "option_id": "spec_a"}
     assert loaded.awaiting_answer is False  # its only entry is resuming
@@ -4681,7 +4687,7 @@ def test_a_pending_plan_saved_before_step_labels_were_kept_loads_with_none() -> 
     pending = studio_store._deserialize_pending({"int_1": entry})["int_1"]
 
     assert pending.step_order == ("step_a",)
-    assert pending.step_labels == {}
+    assert (pending.step_labels, pending.card_steps) == ({}, {})
     assert (pending.questions, pending.legacy) == ((), False)
 
 
@@ -4698,6 +4704,26 @@ def test_a_turns_choice_baseline_and_plan_frames_reload_on_another_instance() ->
 
     assert reloaded.turn_choice_baseline == state.turn_choice_baseline
     assert reloaded.turn_plan_frames == state.turn_plan_frames
+
+
+def test_a_turn_begun_by_a_release_storing_no_plan_frames_keeps_none_of_the_last_turns() -> None:
+    """A release that stores no map of plan frames merges only the keys it knows
+    into `turn_state` (`turn_state || :scalars`), so a turn it begins leaves the
+    previous turn's map stored. A load of that row holds no plan frame for the
+    new turn, so no card of it names the previous turn's plan."""
+    state = ConversationState(conversation_id=CONVERSATION)
+    state.begin_turn()
+    state.turn_plan_frames = {"f1a2b3c": PlanLink(plan_version_id="plan_a", plan_step_id="s2")}
+    stored = json.loads(json.dumps(studio_store._serialize_durable(state)))
+    state.begin_turn()
+    written = studio_store._serialize_durable(state)
+    older = {key: value for key, value in written.items() if key != "turn_plan_frames"}
+    reloaded = ConversationState(conversation_id=CONVERSATION)
+
+    studio_store._apply_delta(reloaded, json.loads(json.dumps({**stored, **older})))
+
+    assert reloaded.turn_index == state.turn_index
+    assert reloaded.turn_plan_frames == {}
 
 
 def test_a_pending_ask_saved_before_questions_were_kept_loads_as_one_legacy_question() -> None:

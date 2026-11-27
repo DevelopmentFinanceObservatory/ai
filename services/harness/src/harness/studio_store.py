@@ -165,6 +165,7 @@ from harness.wire import (
     CompositionManifest,
     ElicitationInput,
     ErrorCode,
+    PlanLink,
     PlanProposed,
     UnitOffer,
     declared_features,
@@ -222,6 +223,10 @@ _KEY_TURN_CARD_CHANGE = "turn_card_change"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
 _KEY_TURN_APPROVED = "turn_approved"
 _KEY_TURN_PLAN_FRAMES = "turn_plan_frames"
+# The members of the stored map of plan frames: the turn index it was written
+# in and the map itself (`_plan_frames_of`).
+_PLAN_FRAMES_TURN = "turn_index"
+_PLAN_FRAMES_MAP = "frames"
 _KEY_TURN_USAGE = "turn_usage"
 _SCALAR_KEYS = frozenset(
     {
@@ -402,6 +407,7 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
             "legacy": p.legacy,
             "step_order": list(p.step_order),
             "step_labels": dict(p.step_labels),
+            "card_steps": dict(p.card_steps),
             "resuming_segment": p.resuming_segment,
             "answer": p.answer,
             "choices": {
@@ -785,6 +791,7 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
         plan_revision=entry.get("plan_revision"),
         step_order=tuple(entry.get("step_order") or ()),
         step_labels=dict(entry.get("step_labels") or {}),
+        card_steps=dict(entry.get("card_steps") or {}),
         resuming_segment=entry.get("resuming_segment"),
         answer=entry.get("answer"),
         choices={
@@ -867,7 +874,15 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
             f"{_KEY_TURN_APPROVED}_{layer}": approved_added.get(layer, {})
             for layer in _ADDED_MEMBERS
         },
-        _KEY_TURN_PLAN_FRAMES: state.turn_plan_frames,
+        # Stamped with the turn it belongs to: a release that writes no map
+        # leaves the previous turn's in place (`_plan_frames_of`). An empty
+        # map needs no stamp, so a new turn's index alone changes no key here.
+        _KEY_TURN_PLAN_FRAMES: {
+            _PLAN_FRAMES_TURN: state.turn_index,
+            _PLAN_FRAMES_MAP: state.turn_plan_frames,
+        }
+        if state.turn_plan_frames
+        else {},
         _KEY_TURN_USAGE: dataclasses.asdict(state.turn_usage),
     }
     for index, turn in enumerate(state.turns):
@@ -890,6 +905,17 @@ def _set_list_item(items: list[Any], index: int, value: Any) -> None:
     else:
         items.extend([None] * (index - len(items)))
         items.append(value)
+
+
+def _plan_frames_of(stored: Any, *, turn_index: int) -> dict[str, PlanLink]:
+    """The turn's map of plan frames (`ConversationState.turn_plan_frames`)
+    from its stored value, empty unless that value is stamped with
+    `turn_index`. A release that stores no map merges only the keys it knows
+    into `turn_state`, so a turn it began keeps the previous turn's map, whose
+    frames name that turn's plans."""
+    if not isinstance(stored, Mapping) or stored.get(_PLAN_FRAMES_TURN) != turn_index:
+        return {}
+    return dict(stored.get(_PLAN_FRAMES_MAP) or {})
 
 
 def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
@@ -949,7 +975,7 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
         elif key == _KEY_TURN_APPROVED or key in _APPROVED_LAYER_KEYS:
             pass  # after the loop, together
         elif key == _KEY_TURN_PLAN_FRAMES:
-            state.turn_plan_frames = dict(value or {})
+            pass  # after the loop, once `turn_index` holds its value from this delta
         elif key == _KEY_TURN_USAGE:
             pass  # after the loop, once `trace_id` holds its value from this delta
         elif key.startswith(_TURN_ITEM_PREFIX):
@@ -982,6 +1008,12 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
         # the stored mark as it was, so the mark held here is an earlier
         # turn's.
         state.turn_card_change = None
+    if _KEY_TURN_PLAN_FRAMES in delta:
+        state.turn_plan_frames = _plan_frames_of(
+            delta[_KEY_TURN_PLAN_FRAMES], turn_index=state.turn_index
+        )
+    elif state.turn_index != turn_before:
+        state.turn_plan_frames = {}
     if _KEY_TURN_USAGE in delta:
         state.turn_usage = _turn_usage(delta[_KEY_TURN_USAGE], trace_id=state.trace_id)
     elif state.turn_usage.trace_id != (state.trace_id or None):

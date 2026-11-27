@@ -413,6 +413,11 @@ class _PendingInterrupt:
     # `step_order` so a resumed segment's Activity lines carry the plan's
     # own step names. Empty for an interrupt saved before labels were kept.
     step_labels: dict[str, str] = field(default_factory=dict)
+    # The plan card's step each workflow step runs for
+    # (`harness.plan_display.card_steps`), restored beside `step_labels` so a
+    # resumed segment's Activity lines name the card's steps. Empty for an
+    # interrupt saved before it was kept.
+    card_steps: dict[str, str] = field(default_factory=dict)
     # Set by `/interrupt` to the id of the segment resuming this interrupt,
     # instead of deleting the entry outright: a crash between the answer
     # being appended and the resumed segment's own closing write leaves a

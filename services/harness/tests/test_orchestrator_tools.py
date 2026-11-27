@@ -184,6 +184,8 @@ class FakeExecutor:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.landed: list[dict[str, Any]] = []
+        # The plan step each landed card's frame was registered from.
+        self.landed_steps: list[str | None] = []
         # The component every write answers with: a line chart of `NIGERIA`.
         self.written = drawn_cards.write_reply(
             drawn_cards.chart("line_chart", NIGERIA), drawn_cards.stored(NIGERIA)
@@ -230,8 +232,9 @@ class FakeExecutor:
             "resolved_payload": self.written["payload"],
         }
 
-    def land_component(self, component: dict[str, Any]) -> None:
+    def land_component(self, component: dict[str, Any], *, plan_step: str | None = None) -> None:
         self.landed.append(component)
+        self.landed_steps.append(plan_step)
 
 
 def _resolver(digest: dict[str, Any] | Exception):
@@ -2325,6 +2328,41 @@ async def test_make_charts_draws_several_charts_in_one_call():
     assert all("reply_figures" in chart for chart in drawn["charts"])
 
 
+@pytest.mark.parametrize(
+    ("steps", "named"), [(["life"], "life"), (["life", "life_again"], None)], ids=["one", "two"]
+)
+async def test_a_card_names_the_plan_step_its_frame_was_last_registered_from(
+    steps: list[str], named: str | None
+):
+    """A frame one plan step gave hands that step to the card drawn on it, and
+    a frame two steps gave hands neither, since the card draws both. The same
+    fetch made again hands the frame out from no step, so a card drawn on it
+    after that names none."""
+    executor = FakeExecutor()
+    tools, ctx = _tools(executor=executor)
+    await tools["fetch"](SPEC_LIFE, ctx)
+    hand_back = HandBack(executor)
+    for step in steps:
+        await hand_back.describe(REF, tool="get_data", store_ref=None, step_id=step)
+    hand_back.listing(ctx.state, None)
+    frame = frame_id_for(REF)
+    select = json.dumps({"observationAbout": "country/NGA"})
+
+    await tools["make_charts"](
+        [{"frame": frame, "type": "line_chart", "title": "Over time", "select_json": select}],
+        ctx,
+    )
+    await tools["fetch"](SPEC_LIFE, ctx)
+    await tools["make_charts"](
+        [{"frame": frame, "type": "stat_card", "title": "Latest", "select_json": select}],
+        ctx,
+    )
+
+    assert executor.landed_steps == [named, None]
+    # The second fetch read nothing again: it gave back the frames of the first.
+    assert [tool for tool, _ in executor.calls].count("get_data") == 1
+
+
 def _figures(card: dict[str, Any]) -> list[tuple[Any, ...]]:
     """Each of a drawn card's reply figures as (series, value, period), and its mark."""
     return [
@@ -4259,7 +4297,8 @@ class Landing:
         self.cards[component_id] = component
         return written | {"component": component}
 
-    def land_component(self, component: dict[str, Any]) -> None:
+    def land_component(self, component: dict[str, Any], *, plan_step: str | None = None) -> None:
+        del plan_step
         land_component(self.state, component, intent=_intents(self.executor)[-1])
 
 
