@@ -274,7 +274,7 @@ def test_a_card_on_a_scoped_retrieval_reads_its_block_with_the_scope(
     served: dict[str, Any], spec_id: str, scope: dict[str, Any] | None
 ) -> None:
     """A retrieval served under its own spec reads back as the Search block it
-    scoped, with the places and window it changed; one that differs from
+    scoped, with the places and window it changed. One that differs from
     every block elsewhere reads its own spec."""
     lineage = _lineage((_SPEC, _CV))
     (member,) = lineage.lineage
@@ -373,7 +373,7 @@ async def _read(reader: place_options.ApisPlaceOptions, role: str = "destination
 
 
 async def test_an_apis_serving_no_options_door_stops_the_offers_until_the_ttl_runs_out() -> None:
-    """The first 404 reads the capabilities document; with no door listed the
+    """The first 404 reads the capabilities document. With no door listed the
     offers stop and reads are refused without a call, until the TTL runs out
     and the next read finds the door back."""
     now = [0.0]
@@ -527,9 +527,10 @@ def test_a_role_takes_several_places_where_each_draws_its_own_series(
     kind: str, select: dict[str, Any], several: bool
 ) -> None:
     """dfo-apis' assembler draws a line chart over Kenya and Uganda as two
-    series, from a select listing both or leaving the place unbound; refuses a
-    line or bar chart listing two dimensions; and draws a bar chart of two
-    places as one bar each at one period, so a bar chart over time keeps one."""
+    series, from a select listing both or leaving the place unbound. It
+    refuses a line or bar chart listing two dimensions. It draws a bar chart
+    of two places as one bar each at one period, so a bar chart over time
+    keeps one."""
     intent = {"type": kind, "select": select}
 
     assert card_unit.takes_several(intent, ["country/KEN"]) is several
@@ -610,7 +611,7 @@ def test_a_card_showing_one_value_offers_the_year_it_draws(
 ) -> None:
     """Fetched over 2016 to 2024, a card showing one value per series draws
     one year, which its offer names as both bounds, read off the drawn
-    payload, since the platform's fact summary states no window for it; one
+    payload, since the platform's fact summary states no window for it. One
     whose drawn year cannot be read offers no years. Other cards offer the
     years their fact summary states."""
     block = _france_kenya_block()

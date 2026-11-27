@@ -15,7 +15,7 @@ the places it can change to are read from Search only when asked
 (`harness.place_options`).
 
 A unit change resubmits the spec in the new unit
-(`harness.unit_switch.resubmit_unit`); a change of years or places names the
+(`harness.unit_switch.resubmit_unit`). A change of years or places names the
 new `scope`. Either fetches the spec with the arguments that shaped the card's
 frame and its scope, and redraws the card on the new frame in its slot
 (`harness.studio_edit.change_events`).
@@ -89,9 +89,9 @@ class UnitCard:
     `single`, `drawn_year`, `roles` and `cut` are the card's encoding, fixed
     when the card is drawn (`encoded`): whether it shows one value per
     series, so its years change one at a time, and the one year such a card
-    draws, as the platform's drawn payload states it; the roles whose places it can change, each with
-    whether it takes several; and whether its members are the largest ones
-    `make_charts` ranked at one period, so its years cannot change, since
+    draws, as the platform's drawn payload states it; the roles whose places
+    it can change, each with whether it takes several; and whether its
+    members are the largest ones `make_charts` ranked at one period, so its years cannot change, since
     another year has other largest members. A card stored before they were
     kept has `roles` `None`, and reads its roles off the places it shows,
     and `cut` false."""
@@ -186,14 +186,14 @@ def takes_several(
     """Whether a role showing places `refs` on the card drawn from `intent`
     can show several, each drawn as its own series, as dfo-apis' assembler
     draws a select (dfo-data-tools' `assembler/resolve.py` and
-    `pipeline/candidate.py`): a select entry naming a role's places as a list
+    `pipeline/candidate.py`). A select entry naming a role's places as a list
     draws one series per place, and so does a place column the select leaves
-    unbound. A stat card draws one value; a table draws any select. A line
+    unbound. A stat card draws one value, and a table draws any select. A line
     chart takes several unless its select lists another dimension, since the
     platform refuses a line or bar chart listing two, or another place role
     (`others`, the places each shows) already draws several series, being
     unbound or listed over several places. A bar chart takes several only
-    where its listed dimension is the role's, one bar per place: a bar chart
+    where its listed dimension is the role's, one bar per place. A bar chart
     of one series draws its periods, and a second place would turn it into
     one bar per place at one period."""
     if not isinstance(intent, Mapping):
@@ -346,11 +346,11 @@ def unit_card(  # noqa: PLR0911 -- one `None` per way a card fails to draw one r
     places and window: the card reads that block's spec with the places and
     window the served definition names as its scope (`_scope_over`), the
     places as Search resolved them, under the block's own roles, labelled by
-    the names the retrieval resolved them by (`get_data`'s `entity_labels`). The served
-    identity is the one source, since the model's `get_data` arguments name
-    places as spoken, under its own role names, and may name facets the
-    scope cannot carry; a served identity that differs from every block's in
-    anything else, its facets among them, offers no change."""
+    the names the retrieval resolved them by (`get_data`'s `entity_labels`).
+    The served identity is the one source, since the model's `get_data`
+    arguments name places as spoken, under its own role names, and may name
+    facets the scope cannot carry. A served identity that differs from every
+    block's in anything else, its facets among them, offers no change."""
     if lineage is None or len(lineage.lineage) != 1:
         return None
     (member,) = lineage.lineage
@@ -504,8 +504,9 @@ def _year(value: Any) -> int | None:
 
 def _years_held(block: Mapping[str, Any]) -> tuple[int, int, list[int]] | None:
     """The first and last year `block`'s spec holds data, with the years
-    between them it holds none of: `years_with_data` where Search states it,
-    else the window its answer serves, with none missing."""
+    between them it holds none of. They come from `years_with_data` where
+    Search states it, else from the window its answer serves, with none
+    missing."""
     resolved = block.get("resolved") or {}
     held = resolved.get("years_with_data")
     if isinstance(held, Mapping):
@@ -578,7 +579,7 @@ def _places_offers(card: UnitCard, block: Mapping[str, Any]) -> list[PlacesOffer
             roles.items(), key=lambda kv: listed.index(kv[0]) if kv[0] in listed else len(listed)
         )
     )
-    # A place with no name is never shown by its ref: its role offers no
+    # A place with no name is not shown by its ref, so its role offers no
     # change.
     return [
         PlacesOffer(
@@ -930,8 +931,9 @@ def stored_reading(
 def unit_pattern(unit: UnitChoice, offer: UnitOffer | None) -> str:
     """The pattern, read case-insensitively, of each phrase that names `unit`
     (`retitled` lists them): the currency by its code or by the name `offer`
-    gives it (by its code alone with no offer), after an optional price basis; a price basis followed by
-    "prices"; or, for a constant unit, "constant <base year>" alone."""
+    gives it (by its code alone with no offer), after an optional price
+    basis; a price basis followed by "prices"; or, for a constant unit,
+    "constant <base year>" alone."""
     names = {currency.code: currency.name for currency in offer.currencies} if offer else {}
     name = names.get(unit.currency)
     if unit.prices is UnitPrices.CONSTANT:

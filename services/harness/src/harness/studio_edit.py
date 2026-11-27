@@ -334,28 +334,27 @@ async def change_events(
 
     Every change reads the card, reads its data and redraws it
     (`_change_flow`). A unit change has Search read the card's spec in the
-    new unit (`harness.unit_switch.resubmit_unit`, through `surface`); a
+    new unit (`harness.unit_switch.resubmit_unit`, through `surface`). A
     change of years or places reads the card's spec over the new `scope`.
     Either way `get_data` fetches the spec with the arguments that shaped the
     card's frame (`harness.card_unit.UnitCard.args`) and the scope the card
     carries, and the card is written again from its stored intent on the new
     frame and takes its own slot, as an Edit Card recreate does. A unit
     change names the new unit in its title and meta where they named the old
-    (`harness.card_unit.retitled`); a change of years or places builds its
+    (`harness.card_unit.retitled`). A change of years or places builds its
     title again from its parts and drops the meta words that may name the
-    old ones (`_redrawn_intent`). The new card
-    carries fresh offers, places among them where `places` says Search's
-    places door is on, and the scope it was fetched over, so a later change
-    keeps this one.
+    old ones (`_redrawn_intent`). The new card carries fresh offers, places
+    among them where `places` says Search's places door is on, and the scope
+    it was fetched over, so a later change keeps this one.
 
-    The turn's record names the change and the spec_id, with the scope a
-    change of years or places fetched over, which the new card's entry keeps
-    too (`FETCHED_KEY`) (`ConversationState.turn_user_message`), and a unit
-    change's new reading
-    joins the turn's readings with its block, so the next turn's model reads
-    the card as it now is. A step Search or the platform refuses, and a
-    retrieval that holds no figures, ends the turn on its sentence, the card
-    unchanged. Failures serialise as `edit_events`' do."""
+    The turn's record (`ConversationState.turn_user_message`) names the
+    change and the spec_id, with the scope a change of years or places
+    fetched over, which the new card's entry keeps too (`FETCHED_KEY`). A
+    unit change's new reading joins the turn's readings with its block, so
+    the next turn's model reads the card as it is. A step Search or the
+    platform refuses, and a retrieval that holds no figures, ends the turn on
+    its sentence, the card unchanged. Failures serialise as `edit_events`'
+    do."""
     try:
         async for event in _change_flow(
             recorder=recorder,
@@ -399,7 +398,7 @@ class _Read:
 
 async def _read_change(surface: ToolSurface, move: UnitMove | ChangeMove) -> _Read | UnitRefused:
     """What `move` fetches: a unit change resubmits the card's spec in the new
-    unit and keeps the card's scope; a change of years or places reads the
+    unit and keeps the card's scope. A change of years or places reads the
     card's spec over its new scope."""
     if isinstance(move, ChangeMove):
         return _Read(
@@ -515,9 +514,9 @@ def period_words(start: int, end: int) -> str:
 def _unit_said(move: ChangeMove) -> str | None:
     """The pattern of the phrases that name the unit the card is served in
     (`harness.card_unit.unit_pattern`), so the year in "constant 2023 US
-    dollars" reads as no period: the unit offer's words where the unit can
-    change, else the served unit's (`served_unit`) with its currency by code;
-    `None` where the block states no unit."""
+    dollars" reads as no period. It names the unit by the offer's words where
+    the unit can change, else by the served unit's (`served_unit`) with its
+    currency by code. `None` where the block states no unit."""
     change = card_unit_change(move.card, move.block)
     if change is not None:
         return unit_pattern(change.offer.start, change.offer)
@@ -534,7 +533,7 @@ def _names_a_year(text: str, unit: str | None) -> bool:
 
 def _title_subject(title: str, unit: str | None = None) -> str | None:
     """`title` without the period `make_charts` ended it on, or the whole title
-    when it ends on none; `None` when what is left still names a year outside
+    when it ends on none. `None` when what is left still names a year outside
     the unit's words (`unit`, `_unit_said`), such as a cut's suffix or a
     period the title words in its own way."""
     subject = _PERIOD_TAIL.sub("", title, count=1)
@@ -648,7 +647,7 @@ def _composed_title(block: Mapping[str, Any], card: UnitCard, period: str | None
 
 def _fitting(labels: list[str], room: int) -> str | None:
     """`labels` as a reader lists them in at most `room` characters: every one
-    where they fit, else the first ones and "and N others"; `None` when not
+    where they fit, else the first ones and "and N others". `None` when not
     even one fits."""
     whole = joined_words(labels)
     if len(whole) <= room:
@@ -759,7 +758,7 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         return
     yield _step("u2", label)
 
-    # The card left the canvas while its data was read: the change is
+    # The card left the canvas while its data was read. The change is
     # refused as the route refuses a card off the canvas, and nothing is
     # written.
     gone = (_step("u3", "Redraw the card", failed=UNIT_GONE_NOTE), EditClosed(UNIT_GONE_NOTE))
@@ -790,7 +789,7 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         work.turn_user_message = record_line
         work.turn_readings = [*work.turn_readings, *read.readings]
 
-    # The card shows the change; the record keeps the sentence and the
+    # The card shows the change. The record keeps the sentence and the
     # spec_id for the next turn's model, and a state read shows neither.
     closed = EditClosed(f"The card now shows {shown}.", shown=False, user_display=display_line)
     yield _swapped(
@@ -1037,20 +1036,21 @@ def _swapped(
     from `specs` and else from the conversation, places among its offers
     where `places` says Search's places door is on. `card` is the `UnitCard` a
     change fetched the new card as, or the old card's for an Edit Card
-    rebuild, which draws the same frame; without it the card is read off its
+    rebuild, which draws the same frame. Without it the card is read off its
     frame (`unit_card`). Its encoding follows `intent`, the new card's
     written intent (`harness.card_unit.encoded`). A card that a change
     fetched over a scope names its `get_data` arguments in its entry
-    (`FETCHED_KEY`), which the next turn's model reads. `also` makes the write's other changes, and `specs`
-    joins the turn's blocks once it commits. `rewrite` rewrites the words of
-    the slot's card meta for a change of the card in place, and `unit` marks
-    a unit change, which drops the card from a `comparison` hint
-    (`_replace_block`). Given `gone`, the swap needs the old card's slot: a canvas that
-    no longer holds it, read under the write's lock, takes only the new
-    card's write token, so the conversation keeps the card it wrote off the
-    canvas, and the edit ends on `gone`. A `closed` that is shown carries the
-    held line (`_held_line`), `reframed` saying whether the new card draws
-    another window or frame than the old."""
+    (`FETCHED_KEY`), which the next turn's model reads. `also` makes the
+    write's other changes, and `specs` joins the turn's blocks once it
+    commits. `rewrite` rewrites the words of the slot's card meta for a
+    change of the card in place, and `unit` marks a unit change, which drops
+    the card from a `comparison` hint (`_replace_block`). Given `gone`, the
+    swap needs the old card's slot: a canvas that no longer holds it, read
+    under the write's lock, takes only the new card's write token, so the
+    conversation keeps the card it wrote off the canvas, and the edit ends on
+    `gone`. A `closed` that is shown carries the held line (`_held_line`),
+    `reframed` saying whether the new card draws another window or frame than
+    the old."""
     plan = (conversation.components.get(old_component_id) or {}).get(PLAN_LINK_KEY)
     created = component_created(component, step_id=step_id, plan=plan)
     token = recorder.write_token(component)

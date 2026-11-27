@@ -3698,7 +3698,7 @@ async def test_the_state_names_the_cards_make_charts_cut(
     monkeypatch: pytest.MonkeyPatch, cap: int
 ) -> None:
     """A card cut to its largest members is named as cut, so its years are
-    not offered; a card drawn whole is not."""
+    not offered. A card drawn whole is not named."""
     for module in (orchestrator_tools, chart_binding):
         monkeypatch.setattr(module, "MAX_SERIES_PER_COMPONENT", cap)
     monkeypatch.setattr(orchestrator_tools, "get_frame_store", lambda: RowFrames(TEN_PROVIDERS))

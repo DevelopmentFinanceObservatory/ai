@@ -965,13 +965,14 @@ class UnitChange(_WireModel):
 
 class WindowOffer(_WireModel):
     """The years a card can change to: the first and last year it draws
-    (`start_year`, `end_year`, equal on a card showing one year) and the first and last year its data holds
-    (`first_year`, `last_year`), with the years between those two that hold
-    no data (`missing_years`, absent when none is missing or the source
-    states none). `single` is true on a card that shows one value per series,
-    such as a key number, whose years change one at a time: `start_year` and
-    `end_year` both name the one year it draws, and a change names one year
-    as both bounds. Absent on every other card."""
+    (`start_year`, `end_year`, equal on a card showing one year) and the
+    first and last year its data holds (`first_year`, `last_year`), with the
+    years between those two that hold no data (`missing_years`, absent when
+    none is missing or the source states none). `single` is true on a card
+    that shows one value per series, such as a key number, whose years change
+    one at a time. `start_year` and `end_year` both name the one year it
+    draws, and a change names one year as both bounds. Absent on every other
+    card."""
 
     start_year: int
     end_year: int
@@ -1009,7 +1010,7 @@ class PlacesOffer(_WireModel):
 
 
 class PlacesOptions(_WireModel):
-    """GET /api/studio/places -- the places role `role` of card
+    """The answer of `GET /api/studio/places`: the places role `role` of card
     `component_id` can change to, in Search's order, at most 300, `truncated`
     when Search listed more. `chosen` places may be among them."""
 
@@ -1032,8 +1033,8 @@ class CardChanges(_WireModel):
 
 
 class WindowChange(_WireModel):
-    """Draw the card over the years `start_year` to `end_year`, both kept; one
-    year when they are equal."""
+    """Draw the card over the years `start_year` to `end_year`, both kept, or
+    over one year when they are equal."""
 
     kind: Literal["window"]
     start_year: int
@@ -1196,8 +1197,8 @@ class TurnRequest(_WireModel):
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
         """Refuse a request with none of `message`, `apply_choice`,
-        `apply_unit` and `apply_change`, two of those three together, and one
-        beside message text, seeds or a card reference."""
+        `apply_unit` and `apply_change`, two of the three chips together, and
+        a chip beside message text, seeds or a card reference."""
         chips = [
             name
             for name, value in (
@@ -1588,8 +1589,8 @@ class PlanDecisionOption(_WireModel):
 
 # What a plan decision settles, where the harness knows it: the unit (a unit
 # question's row, or a decision fixing the unit or its price basis), the years
-# (`window`, the word `apply_change` and `card_change` use),
-# the places, a scope choice's axis, or how pinned sources' flows are counted.
+# (`window`, the word `apply_change` and `card_change` use), the places, a
+# scope choice's axis, or how pinned sources' flows are counted.
 type DecisionKind = Literal[
     "unit", "window", "places", "sector", "region", "measure_basis", "provider", "count"
 ]
@@ -2289,9 +2290,10 @@ class StoredCard(_WireModel):
     `unit_change`, `card_changes` and `replaces` have `ComponentCreated`'s
     names and shapes. `unit_change` and `card_changes` are the card's offers
     now, as `apply_unit` and `apply_change` read them from what the
-    conversation keeps with the card, set while the card is on the canvas. `replaces` names the card whose canvas slot this one took,
-    on the closed turn that swapped it in. A card an earlier release stored
-    carries no `replaces`."""
+    conversation keeps with the card, set while the card is on the canvas.
+    `replaces` names the card whose canvas slot this one took, on the closed
+    turn that swapped it in. A card an earlier release stored carries no
+    `replaces`."""
 
     component_id: str
     type: str

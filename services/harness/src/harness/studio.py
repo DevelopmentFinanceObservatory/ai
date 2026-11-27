@@ -669,10 +669,10 @@ async def _card_move(
     when an earlier check read them, and a door that cannot be read refuses
     it 503 `transient_unavailable`, `place_options_unavailable`, to retry;
     an apis that serves no places door refuses it 503 `capability_unavailable`,
-    as `/places` does, and so is any change of places while `places_gated`
-    says the deployment learnt apis serves none and stopped the offers
-    (`harness.place_options.places_offered`). `detail` is copy the client
-    shows."""
+    as `/places` does. Any change of places is refused the same way while
+    `places_gated` says the deployment learnt apis serves none and stopped
+    the offers (`harness.place_options.places_offered`). `detail` is copy the
+    client shows."""
     if body.apply_unit is not None:
         move: UnitMove | ChangeMove | tuple[str, str] = unit_move(conversation, body.apply_unit)
     elif body.apply_change is not None:

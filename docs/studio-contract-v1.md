@@ -816,7 +816,7 @@ After the user answers a unit question, the plan card states the unit in one row
   "choice_id": "decision/user_unit_spec_5c1e…",
   "option_id": "USD-constant-2015",
   "plan_revision": "rev_01j9ze2k7d",
-  "unit": {"currency": "USD", "prices": "constant", "base_year": 2015}
+  "unit": { "currency": "USD", "prices": "constant", "base_year": 2015 }
 }
 ```
 
@@ -835,7 +835,12 @@ After the user answers a unit question, the plan card states the unit in one row
 A release from before this delta refuses `turn_index` with a 422, as it refuses any member it does not name. A page that gets a 422 for a Stop carrying `turn_index` sends the Stop again without it.
 
 ```json
-{"kind": "turn.cancel", "schema_version": 1, "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E", "turn_index": 2}
+{
+  "kind": "turn.cancel",
+  "schema_version": 1,
+  "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E",
+  "turn_index": 2
+}
 ```
 
 ### A stored card's unit and slot
@@ -854,7 +859,13 @@ Each is left out when it has no value. `schema_version` stays 1.
 A release from before this delta refuses `prompt_source` with a 422, as it refuses any member it does not name, so the harness deploys before a page that sends it. `schema_version` stays 1.
 
 ```json
-{"kind": "turn.request", "schema_version": 1, "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E", "message": "How much aid did Kenya receive in 2023?", "prompt_source": "example"}
+{
+  "kind": "turn.request",
+  "schema_version": 1,
+  "conversation_id": "conv_01J9ZC3AB4YT9Q6WGX0S6H2K9E",
+  "message": "How much aid did Kenya receive in 2023?",
+  "prompt_source": "example"
+}
 ```
 
 ## Plan steps on cards, activity lines and choices (delta 34, v1.19)
@@ -872,7 +883,7 @@ A replan or a second plan in the turn can reuse step ids, so a page keys a plan 
 
 A card drawn from one retrieval can change its years and its places with no model call, through the flow a unit change runs (delta 30), and the changes compose: each change starts from the card's arguments, years and places as the last change left them.
 
-- `component.created` and a state read's stored card gain `card_changes`, `{spec_id, window?, places?}`, set while the card is on the canvas and offers at least one change. `spec_id` is the spec a change names. `window` is `{start_year, end_year, first_year, last_year, missing_years?, single?}`: the years the card draws, and the first and last years the spec holds, with the years inside them that hold no figures (Search's `years_with_data`, else the window its answer serves, with none missing). `start_year` equals `end_year` on a card that shows one year, including one asked for its latest year. `single: true` marks a card that shows one value per series, a key number or a bar chart of one year: `start_year` and `end_year` both name the one year it draws, read from its drawn payload (a key number's `period`, a bar chart's `category_axis.period`), so the picker starts on that year; its years change one at a time, and a change names one year as both `start_year` and `end_year`. Such a card whose drawn year cannot be read offers no `window`. Other cards leave it out. It is set when the spec holds more than one year. `places` lists one entry per role whose places the card binds, `{role, multiple, chosen[]}`, each place `{id, label}`: the places the card shows and whether the role takes more than one. Each place carries a name; a role showing a place with no name (one the card's retrieval resolved without naming) is left out. `multiple` is fixed by the card's encoding, whatever number of places it shows: a role takes several where each place draws its own series, on a table, on a line chart whose `select` lists no other dimension, and on a bar chart whose listed dimension is the role's (one bar per place). It takes one on a key number, on a line or bar chart listing another dimension, on a line or bar chart where another place role already draws several series, and on a bar chart of one series over time, which a second place would turn into one bar per place at one period. It is set only where the deployment reads Search's places door: `STUDIO_PLACE_OPTIONS` is on (the default) and apis serves the `options` door. When the door answers 404 or outside its contract and Search's capabilities document lists no live `options` door, cards offer no places for 60 s, and `/places` answers `capability_unavailable` during that time. A card cut to its largest members at one period ("10 largest of 70 in 2023") has no `window`, since another year has other largest members. A card drawn on a derived frame, such as a share or a ranking, has no `card_changes`.
+- `component.created` and a state read's stored card gain `card_changes`, `{spec_id, window?, places?}`, set while the card is on the canvas and offers at least one change. `spec_id` is the spec a change names. `window` is `{start_year, end_year, first_year, last_year, missing_years?, single?}`: the years the card draws, and the first and last years the spec holds, with the years inside them that hold no figures (Search's `years_with_data`, else the window its answer serves, with none missing). `start_year` equals `end_year` on a card that shows one year, including one asked for its latest year. `single: true` marks a card that shows one value per series, a key number or a bar chart of one year: `start_year` and `end_year` both name the one year it draws, read from its drawn payload (a key number's `period`, a bar chart's `category_axis.period`), so the picker starts on that year. Its years change one at a time, and a change names one year as both `start_year` and `end_year`. Such a card whose drawn year cannot be read offers no `window`. Other cards leave it out. It is set when the spec holds more than one year. `places` lists one entry per role whose places the card binds, `{role, multiple, chosen[]}`, each place `{id, label}`: the places the card shows and whether the role takes more than one. Each place carries a name, and a role showing a place with no name (one the card's retrieval resolved without naming) is left out. `multiple` is fixed by the card's encoding, whatever number of places it shows: a role takes several where each place draws its own series, on a table, on a line chart whose `select` lists no other dimension, and on a bar chart whose listed dimension is the role's (one bar per place). It takes one on a key number, on a line or bar chart listing another dimension, on a line or bar chart where another place role already draws several series, and on a bar chart of one series over time, which a second place would turn into one bar per place at one period. It is set only where the deployment reads Search's places door, that is, where `STUDIO_PLACE_OPTIONS` is on (the default) and apis serves the `options` door. When the door answers 404 or outside its contract and Search's capabilities document lists no live `options` door, cards offer no places for 60 s, and `/places` answers `capability_unavailable` during that time. A card cut to its largest members at one period ("10 largest of 70 in 2023") has no `window`, since another year has other largest members. A card drawn on a derived frame, such as a share or a ranking, has no `card_changes`.
 - `GET /api/studio/places?conversation_id=…&component_id=…&role=…` answers the places the role can change to, read from Search when asked, `{component_id, role, options[], truncated}`: at most 300 places `{id, label}` in Search's order, `truncated` when Search listed more. It is read with no lease, as `/state` is. It refuses an unknown conversation 404 `not_found`, a card off the canvas or offering no change 422 `scope_choice_stale` (pointer `/component_id`), a role the card does not offer 422 `change_not_offered` (pointer `/role`), Search's door failing, taking more than 2 s or answering outside its contract 503 `transient_unavailable` with `constraint_id` `place_options_unavailable` and `retry_after_seconds`, and a deployment with the door off 503 `capability_unavailable`. A role's places are kept for 60 s, so a change applied from an open picker reads none again.
 - `turn.request` gains `apply_change: {component_id, spec_id, change}`, which comes alone, as `apply_unit` does. `change` is `{kind: "window", start_year, end_year}`, with `end_year` equal to or after `start_year` (one year when equal), or `{kind: "places", role, entities[]}`, the place ids for that role, 1 to 50. A places change replaces that role's places and keeps the others.
 - The server refuses a change it cannot apply before the stream starts, `pointer` `/apply_change`: 422 `constraint_violation` with `scope_choice_stale` when the card has left the canvas or no longer reads `spec_id`, `change_not_offered` for years outside `first_year` to `last_year`, the years the card already draws, a range on a card whose `window` is `single`, a role it does not offer, two places for a role whose `multiple` is false, the places the card already shows (in any order), or a place Search does not list for the role, and `change_no_data` for years that all fall in `missing_years`; and 503 `transient_unavailable`, `place_options_unavailable`, when Search's list for a places change cannot be read, which the server checks every place against, or 503 `capability_unavailable` when apis serves no places door, as `/places` answers, including for the 60 s the offers stay stopped after the server learnt it.
@@ -883,7 +894,16 @@ A card drawn from one retrieval can change its years and its places with no mode
 Each member is left out when it has no value. `schema_version` stays 1.
 
 ```json
-{"kind": "turn.request", "schema_version": 1, "conversation_id": "sess_01j9zc0000", "apply_change": {"component_id": "cmp_01j9zc3aqw", "spec_id": "spec_8f3a1c5e9d2b4a7c6e0f1a2b3c4d5e6f", "change": {"kind": "window", "start_year": 2010, "end_year": 2024}}}
+{
+  "kind": "turn.request",
+  "schema_version": 1,
+  "conversation_id": "sess_01j9zc0000",
+  "apply_change": {
+    "component_id": "cmp_01j9zc3aqw",
+    "spec_id": "spec_8f3a1c5e9d2b4a7c6e0f1a2b3c4d5e6f",
+    "change": { "kind": "window", "start_year": 2010, "end_year": 2024 }
+  }
+}
 ```
 
 ## Sample fixture values (delta 10)

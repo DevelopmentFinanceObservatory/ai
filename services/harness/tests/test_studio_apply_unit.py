@@ -1428,7 +1428,7 @@ async def test_a_change_of_places_whose_door_cannot_be_read_is_refused(
     pg_engine: AsyncEngine,
 ) -> None:
     """The places a change names are checked against Search's list before
-    the stream: a door that cannot be read refuses the change, to retry."""
+    the stream, and a door that cannot be read refuses the change, to retry."""
     app = _changes_app(pg_engine)
     app.state.studio.place_options = _Places()
     async with _client(app) as client:
@@ -1628,9 +1628,9 @@ async def test_a_change_of_years_or_places_drops_the_card_meta_that_may_name_the
     """The model's subtitle and description, written about the old years or
     places, are dropped, and an axis label is kept only when it names no year
     and no place the card showed, so the chart shows what it derives from its
-    data there. A `comparison` hint, which
-    aligns its members' units, keeps a card whose unit did not change. The
-    state read's card states the new card's facts."""
+    data there. A `comparison` hint, which aligns its members' units, keeps a
+    card whose unit did not change. The state read's card states the new
+    card's facts."""
     app = _two_cards_app(pg_engine)
     app.state.studio.place_options = _Places()
     changer = _Changer()
@@ -1778,7 +1778,7 @@ async def test_a_card_showing_one_value_refuses_a_range_and_one_place_too_many(
 
 async def test_a_chart_cut_to_one_place_can_add_places_back(pg_engine: AsyncEngine) -> None:
     """Whether a role takes several places is the chart's, fixed when it is
-    drawn: a chart of one recipient cut to another keeps `multiple`, and a
+    drawn. A chart of one recipient cut to another keeps `multiple`, and a
     change adding a place back is drawn, its `select` naming every place."""
     app = _changes_app(pg_engine)
     app.state.studio.place_options = _Places()
@@ -1935,7 +1935,7 @@ async def test_an_edit_card_rebuild_keeps_the_places_a_change_set(pg_engine: Asy
 
 async def test_a_bar_chart_over_time_keeps_one_place(pg_engine: AsyncEngine) -> None:
     """A bar chart of one series draws its periods, and a second place would
-    turn it into one bar per place at one period: it offers one place per
+    turn it into one bar per place at one period. It offers one place per
     role, and a change adding a place is refused."""
     app = _app(
         search_call("aid from France to Kenya"),
@@ -1982,7 +1982,7 @@ async def test_a_bar_chart_over_time_keeps_one_place(pg_engine: AsyncEngine) -> 
     assert (refused.status_code, refused.json()["constraint_id"]) == (422, "change_not_offered")
 
 
-# A retrieval scoped to Togo: the model named the place as spoken under its
+# A retrieval scoped to Togo. The model named the place as spoken under its
 # own role name, and Search served the spec's identity with Togo's ref under
 # the block's own role.
 _TOGO_REF = {"spec_id": "spec_" + "7" * 32, "content_version": "cv_" + "7" * 32}
@@ -2072,7 +2072,7 @@ async def test_a_card_fetched_with_facets_offers_no_change(pg_engine: AsyncEngin
 
 def test_a_changed_cards_unit_words_keep_their_base_year() -> None:
     """On a card served in constant 2023 US dollars, the year in the unit's
-    words is no period: a change of years keeps them in the title, and keeps
+    words is no period. A change of years keeps them in the title, and keeps
     an axis label that names only the unit."""
     move = _move("x", WindowChange(kind="window", start_year=2010, end_year=2024))
     block = copy.deepcopy(move.block)
@@ -2118,7 +2118,7 @@ async def test_a_card_cut_to_its_largest_members_offers_no_years(
     pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Its members are the largest at one period, so another year would draw
-    them under a ranking that year does not hold: it offers places and no
+    them under a ranking that year does not hold. It offers places and no
     years, a change of years is refused, and the stored card keeps the mark."""
     monkeypatch.setattr(
         "harness.studio_translate.cut_cards", lambda state: frozenset({"cmp_01unit0001"})
@@ -2141,7 +2141,7 @@ async def test_a_card_cut_to_its_largest_members_offers_no_years(
 async def test_a_place_with_no_name_is_never_shown_by_its_ref(pg_engine: AsyncEngine) -> None:
     """A card whose retrieval named no label for Togo offers no change of
     Togo's role, and a title built after a change of its other role names
-    no ref: it leaves the places out."""
+    no ref and leaves the places out."""
     app = _togo_app(pg_engine, _TOGO_IDENTITY, labels={}, title="Aid in 2023 to Togo")
     app.state.studio.place_options = _Places()
     changer = _Changer()
@@ -2195,8 +2195,8 @@ async def test_a_places_change_while_the_offers_are_stopped_is_capability_unavai
     ids=["two-long-labels", "longer-still"],
 )
 def test_long_places_give_way_before_the_subject(origin: str, destination: str) -> None:
-    """The subject stays whole and the title opens on it: the flow falls back
-    to a count of its places."""
+    """The subject stays whole and the title opens on it, and the flow falls
+    back to a count of its places."""
     block = copy.deepcopy(_ENVELOPE["parts"][0]["spec"])
     block["resolved"]["concept_label"] = "Official development assistance"
     card = UnitCard(

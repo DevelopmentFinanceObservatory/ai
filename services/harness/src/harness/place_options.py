@@ -148,8 +148,8 @@ class ApisPlaceOptions:
     async def _door_listed(self) -> bool:
         """Whether Search's capabilities document lists a live options door.
         A document that cannot be read raises a retryable failure, so the read
-        ends on a retryable refusal and the offers stay; any other reads as
-        listed, so the read's own failure stands."""
+        ends on a retryable refusal and the offers stay. Any other failure
+        reads as listed, so the read's own failure stands."""
         try:
             doors = await self._client.read_search_doors()
         except LiveApisError as exc:

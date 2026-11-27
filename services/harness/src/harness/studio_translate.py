@@ -2040,7 +2040,7 @@ class _Translator:
         node's `output` hands back (`frame_refs`, with `frame_ref_steps`
         beside them), in the turn's map of plan frames
         (`ConversationState.turn_plan_frames`), so a card drawn on one names
-        them. The plan is the wire id of the run's `plan_version`; a run
+        them. The plan is the wire id of the run's `plan_version`. A run
         whose version the turn gave no card keeps nothing, and so does an
         output whose two lists differ in length, which is logged."""
         plan_version_id = self._conversation.plan_version_ids.get(output.get("plan_version"))

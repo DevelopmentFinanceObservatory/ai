@@ -709,7 +709,7 @@ class ConversationState:
     # from, by the frame's id (`harness.graph.state.frame_id_for`), written as
     # the `execute` node hands a run back (`harness.studio_translate`). A card
     # drawn on one of these frames names that plan step in its
-    # `created_from`. Kept for the turn only: a frame id names the frame's
+    # `created_from`. Kept for the turn only, since a frame id names the frame's
     # content, which a later turn can fetch outside any plan. No model reads it.
     turn_plan_frames: dict[str, PlanLink] = field(default_factory=dict)
     turn_recorded: bool = False
@@ -2309,10 +2309,10 @@ def _replace_block(
     each by name, for a card changed in place: a unit change names the new
     unit where they named the old (`harness.card_unit.retitled`), and a
     change of years or places drops the words that may name the old ones
-    (`harness.studio_edit._changed_meta`). `unit` marks a unit change, whose
-    card a `comparison` hint, which aligns its members' units, drops, a hint
-    left with fewer than two members going with it. A `row` hint keeps the
-    card.
+    (`harness.studio_edit._changed_meta`). `unit` marks a unit change: a
+    `comparison` hint, which aligns its members' units, drops the card, and a
+    hint left with fewer than two members goes with it. A `row` hint keeps
+    the card.
 
     True iff the canvas shows `component` in the slot: a block was
     replaced, or the canvas already held `component`'s block. A card that
