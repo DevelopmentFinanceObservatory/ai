@@ -42,13 +42,17 @@ from enum import StrEnum
 from typing import Any, cast
 
 import pytest
+from google.genai import types
 from harness import studio_stream
+from harness.conversation import current_conversation_id
 from harness.fatal_codes import wire_error
 from harness.studio_relay import Channel, StudioStream
 from harness.studio_state import (
     ConversationState,
     SegmentLost,
     _PendingInterrupt,
+    land_component,
+    remove_cards,
 )
 from harness.studio_store import SegmentClose, closed_turn_error
 from harness.studio_stream import (
@@ -60,7 +64,12 @@ from harness.studio_stream import (
     ending,
     own_segment,
 )
-from harness.studio_translate import recorded_fatal
+from harness.studio_translate import (
+    _RecordingExecutor,
+    _stream_fatal,
+    _Translator,
+    recorded_fatal,
+)
 from harness.tool_contracts import HarnessCode, harness_refusal
 from harness.turn.loop import Outcome
 from harness.turn.store import Cursor, TurnStatus
@@ -76,10 +85,13 @@ from harness.wire import (
     StepStatus,
     ToolError,
 )
+from orchestrator.run import ModelResponded, ToolsAnswered
 from pydantic import BaseModel
 from starlette.types import Message
 
 from .failure_text import classed_sentence, is_user_sentence
+from .translating import translated
+from .turn_driver import unconnected_store
 
 PRINCIPAL = "principal"
 CONVERSATION = "conversation"
@@ -609,6 +621,9 @@ class FakeWork:
             error=ToolError(error=code, retry=RetryMode.DO_NOT_RETRY, detail="failed"),
         )
 
+    def owed(self) -> list[BaseModel]:
+        return []
+
     def fatal(self, error: BaseException) -> ErrorFrame:
         del error
         return self._fatal(ErrorCode.CAPABILITY_UNAVAILABLE)
@@ -937,6 +952,9 @@ class _ScriptedWork:
     async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
         return cast(Outcome, result), []
 
+    def owed(self) -> list[BaseModel]:
+        return []
+
     def fatal(self, error: BaseException) -> ErrorFrame:
         raise AssertionError("the work does not fail") from error
 
@@ -982,6 +1000,135 @@ async def _owned(
     while (frame := channel.get_nowait()) is not None:
         frames.append(json.loads(frame.model_dump_json(exclude_none=True)))
     return frames
+
+
+class _RemovingWork(_ScriptedWork):
+    """Work over a real translator whose agent removed `cmp_01` of two cards,
+    and whose drive then raises (`raises`), ends `ends`, or runs until it is
+    cancelled."""
+
+    def __init__(
+        self,
+        conversation: ConversationState,
+        *,
+        remove: bool,
+        raises: bool,
+        ends: Outcome | None = None,
+    ) -> None:
+        super().__init__(
+            [], Outcome.DONE, raises=RuntimeError("the drive failed") if raises else None
+        )
+        self.conversation = conversation
+        self.translator = _Translator(
+            conversation=conversation,
+            recorder=_RecordingExecutor(_never_called, store=unconnected_store()),
+        )
+        self._remove = remove
+        self._ends = ends
+        self._responded = asyncio.Event()
+
+    async def drive(self, emit: Emit) -> Outcome:
+        call = types.FunctionCall(id="r", name="remove_cards", args={})
+        emit(ModelResponded(parts=(types.Part(function_call=call),)))
+        # The call runs once its response is translated, as the agent's does.
+        await self._responded.wait()
+        if self._remove:
+            remove_cards(self.conversation, ["cmp_01"], all_cards=False)
+        answer = types.FunctionResponse(
+            id="r", name="remove_cards", response={"removed": ["cmp_01"]}
+        )
+        emit(ToolsAnswered(answers=(answer,), state={}))
+        if self._raises is not None:
+            raise self._raises
+        if self._ends is not None:
+            return self._ends
+        await asyncio.Event().wait()
+        return Outcome.DONE
+
+    async def frames(self, event: object) -> list[BaseModel]:
+        frames = await translated(self.translator, cast(Any, event))
+        self._responded.set()
+        return frames
+
+    def owed(self) -> list[BaseModel]:
+        return [*self.translator.release_removal()]
+
+    def fatal(self, error: BaseException) -> ErrorFrame:
+        return _stream_fatal(self.conversation, cast(Exception, error))
+
+
+async def _never_called(*, tool: str, args: dict[str, object]) -> dict[str, object]:
+    raise AssertionError(f"no tool call expected, got {tool}")
+
+
+def _two_cards() -> ConversationState:
+    conversation = ConversationState(conversation_id=CONVERSATION, trace_id="tr")
+    conversation.begin_turn()
+    for cid in ("cmp_01", "cmp_02"):
+        land_component(
+            conversation, {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"}
+        )
+    return conversation
+
+
+@pytest.mark.parametrize(
+    ("remove", "ends"),
+    [(True, None), (False, None), (True, Outcome.ABANDONED), (True, Outcome.LOST)],
+    ids=["removal-held", "nothing-held", "abandoned", "lost"],
+)
+async def test_a_drive_that_raises_sends_the_held_removal_before_its_error(
+    spans: Spans, remove: bool, ends: Outcome | None
+) -> None:
+    """The drive raises, its turn is abandoned, or another instance takes its
+    lease, while the translator holds a removal's canvas update: the stream
+    sends that update once, then the `error` frame. With nothing held, it
+    sends the error alone."""
+    current_conversation_id.set(CONVERSATION)
+    conversation = _two_cards()
+    work = _RemovingWork(conversation, remove=remove, raises=ends is None, ends=ends)
+
+    frames = await _owned(work, conversation, _LandingStore())
+
+    events = [f["event"] for f in frames if f["event"] != "activity.step"]
+    assert events == (["composition.updated", "error"] if remove else ["error"])
+    if remove:
+        (update,) = [f for f in frames if f["event"] == "composition.updated"]
+        assert [b["component_id"] for b in update["manifest"]["blocks"]] == ["cmp_02"]
+    assert work.owed() == []
+
+
+async def test_a_client_that_leaves_leaves_no_held_removal_for_the_next_stream(
+    spans: Spans,
+) -> None:
+    """The client leaves while a removal's update is held. The owner takes it
+    from the work as the segment ends, so neither the translator nor the
+    conversation holds it for a later stream."""
+    current_conversation_id.set(CONVERSATION)
+    conversation = _two_cards()
+    work = _RemovingWork(conversation, remove=True, raises=False)
+    channel: Channel = asyncio.Queue()
+    gone = asyncio.Event()
+    await conversation.lock.acquire()
+    owner = asyncio.ensure_future(
+        own_segment(
+            work,
+            store=_LandingStore(),
+            conversation=conversation,
+            principal=PRINCIPAL,
+            conversation_id=CONVERSATION,
+            segment_id=SEGMENT,
+            channel=channel,
+            gone=gone,
+            hold=LockHold(conversation.lock),
+        )
+    )
+    while not work.translator._removal_held:
+        await asyncio.sleep(0)
+    gone.set()
+    await owner
+
+    assert work.translator.release_removal() == []
+    assert not conversation.take_unreported_removal()
 
 
 def _running(conversation: ConversationState, step_id: str, **fields: Any) -> ActivityStep:

@@ -567,6 +567,54 @@ async def test_concurrent_reads_of_one_role_make_one_call(fails: bool) -> None:
 
 
 @pytest.mark.parametrize(
+    ("start", "end", "most"),
+    [
+        ("2015", "2024", 24),
+        ("2015-01", "2024-12", 2000 // 120),
+        ("2015-Q1", "2024-Q4", None),
+    ],
+    ids=["years", "months", "quarters"],
+)
+def test_a_tables_place_limit_counts_the_periods_it_draws(
+    start: str, end: str, most: int | None
+) -> None:
+    """A table draws its places' rows at every period of its window, so the
+    most places it can draw is the row cap over those periods, months
+    counted as months. A window whose periods the harness cannot count
+    states no limit."""
+    card = card_unit.UnitCard(spec_id="spec_x", args={}, roles={"destination": True})
+    component = {"fact_summary": {"window": {"start": start, "end": end}}}
+
+    drawn = card_unit.encoded(card, None, intent={"type": "table"}, component=component)
+
+    assert (drawn.most or {}).get("destination") == most
+
+
+async def test_a_read_arriving_as_a_lookup_fails_starts_a_lookup_of_its_own() -> None:
+    """A read woken in the same loop pass as the lookup that fails, after it
+    but before any callback the failure schedules, starts a new lookup and
+    never receives the old failure."""
+    client = _Client()
+    client.held = asyncio.Event()
+    client.fails = _NOT_FOUND
+    reader = _reader(client, [0.0])
+    first = asyncio.create_task(reader(identity=_BASE_IDENTITY, role="destination"))
+    await asyncio.sleep(0)
+
+    async def late() -> object:
+        assert client.held is not None
+        await client.held.wait()
+        return await reader(identity=_BASE_IDENTITY, role="destination")
+
+    second = asyncio.create_task(late())
+    await asyncio.sleep(0)
+    client.held.set()
+    await asyncio.gather(first, second, return_exceptions=True)
+
+    assert client.asked == 2
+
+
+@pytest.mark.parametrize(
     ("noun", "nouns"),
     [
         (
@@ -980,3 +1028,93 @@ def test_a_sum_cut_to_its_largest_members_offers_nothing() -> None:
     card = _summed_card({"destination": ["country/KEN"], "origin": ["country/FRA"]}, cut=True)
 
     assert card_unit.card_changes(card, block, fact_summary=_FETCHED_2016_2024, places=True) is None
+
+
+# --- recorded cards: a select is keyed by the frame's columns ----------------
+
+_RECORDED = json.loads(
+    (Path(__file__).parent / "fixtures" / "recorded_card_selects.json").read_text()
+)
+_RECORDED_CARDS = [name for name in _RECORDED if not name.startswith("_")]
+
+
+@pytest.mark.parametrize("name", _RECORDED_CARDS)
+def test_a_recorded_select_is_keyed_by_its_frames_columns(name: str) -> None:
+    """The control every recorded-card test rests on: the select the platform
+    resolved names the columns its series carry, a flow role's places under
+    the party column, never under the role."""
+    card = _RECORDED[name]
+    columns = {key for series in card["fact_summary"]["series"] for key in series["coordinates"]}
+
+    assert set(card["select"]) <= columns
+    assert not {"destination", "origin"} & set(card["select"])
+
+
+def test_a_recorded_card_offers_the_places_its_select_draws() -> None:
+    """Health aid to Kenya by provider, recorded: its frame holds Kenya,
+    Tanzania and Uganda, and its select draws Kenya under
+    `financingRecipient`. The offer names Kenya alone."""
+    card = _RECORDED["health_aid_kenya_by_provider"]
+    (recorded,) = card["card_changes"]["places"]
+    held = {"destination": [place["id"] for place in recorded["chosen"]]}
+    assert held == {"destination": ["country/KEN", "country/TZA", "country/UGA"]}
+    assert card["select"]["financingRecipient"] == ["country/KEN"]
+
+    shown = card_unit._selected_places(held, {"type": card["type"], "select": card["select"]})
+
+    assert shown == {"destination": ["country/KEN"]}
+
+
+def test_a_summed_card_keeps_several_places_where_the_sum_adds_up_another_role() -> None:
+    """The recorded sum of health aid to Kenya, its select and type as drawn,
+    over a frame whose providers (France and Germany) the sum adds up. The
+    providers draw no series of their own on the sum, so the recipient takes
+    several places as on a line chart of one role."""
+    recorded = _RECORDED["health_aid_kenya_summed"]
+    block = _france_kenya_block()
+    card = card_unit.UnitCard(
+        spec_id=block["spec_id"],
+        args={},
+        scope={
+            "entities": {
+                "destination": ["dcid:country/KEN"],
+                "origin": ["dcid:country/FRA", "dcid:country/DEU"],
+            }
+        },
+        labels={"country/KEN": "Kenya", "country/FRA": "France", "country/DEU": "Germany"},
+        total=card_unit.SummedFrame(frame=_OPS, root=(_SPEC, _CV), parameters=_SUM),
+    )
+    intent = {"type": recorded["type"], "select": recorded["select"]}
+
+    encoded = card_unit.encoded(card, block, intent=intent, component={"fact_summary": {}})
+
+    assert encoded.roles is not None and encoded.roles["destination"] is True
+    offer = card_unit.card_changes(
+        encoded, block, fact_summary=recorded["fact_summary"], places=True
+    )
+    assert offer is not None
+    assert [(p.role, p.multiple) for p in offer.places or ()] == [("destination", True)]
+
+
+def test_a_truncated_fact_summary_binds_no_facet_and_its_card_offers_no_change() -> None:
+    """The recorded health aid to Kenya by provider lists every series it
+    draws. Marked truncated, the facets its listed series share may not be
+    the cut ones', so none is bound, the redraw cannot be checked, and a card
+    on the retrieval's own frame offers no change."""
+    recorded = _RECORDED["health_aid_kenya_by_provider"]
+    whole = recorded["fact_summary"]
+    cut = {**whole, "series_truncated": {"showing": len(whole["series"]), "total": 36}}
+    assert card_unit.drawn_facets(whole) == {
+        "provenance": "provenance/OECDCreditorReportingSystem",
+        "unit": "CurrencyUSD",
+    }
+
+    assert card_unit.drawn_facets(cut) == {}
+    block = _france_kenya_block()
+    card = card_unit.encoded(
+        card_unit.UnitCard(spec_id=block["spec_id"], args={}),
+        block,
+        intent={"type": recorded["type"], "select": recorded["select"]},
+        component={"fact_summary": cut},
+    )
+    assert card_unit.card_changes(card, block, fact_summary=cut, places=True) is None

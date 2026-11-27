@@ -279,7 +279,14 @@ class UnitCard:
 
     `total` is the sum the card's frame is, for a card on a sum of its one
     retrieval (`SummedFrame`), `None` for a card on the retrieval's own
-    frame."""
+    frame.
+
+    `facets_unread` marks a card whose fact summary listed only some of its
+    series when it was drawn, so the facets it was counted in are not known
+    (`drawn_facets`). A card on the retrieval's own frame then offers no
+    change of years or places, since nothing would keep a change on those
+    facets. A card on a sum reads them from its retrieval's frame when it
+    changes (`harness.studio_edit`)."""
 
     spec_id: str
     args: dict[str, Any]
@@ -295,6 +302,7 @@ class UnitCard:
     most: dict[str, int] | None = None
     nouns: dict[str, dict[str, str]] | None = None
     total: SummedFrame | None = None
+    facets_unread: bool = False
 
     def as_json(self) -> dict[str, Any]:
         stored: dict[str, Any] = {"spec_id": self.spec_id, "args": dict(self.args)}
@@ -320,6 +328,8 @@ class UnitCard:
             stored["most"] = dict(self.most)
         if self.nouns:
             stored["nouns"] = {role: dict(forms) for role, forms in self.nouns.items()}
+        if self.facets_unread:
+            stored["facets_unread"] = True
         if self.total is not None:
             stored["summed"] = {"args": stored.pop("args"), **self.total.as_json()}
         return stored
@@ -367,6 +377,7 @@ class UnitCard:
             else None,
             nouns=_read_nouns(stored.get("nouns")),
             total=total,
+            facets_unread=stored.get("facets_unread") is True,
         )
 
     def fetch_args(
@@ -463,7 +474,11 @@ def drawn_facets(fact_summary: Mapping[str, Any] | None) -> dict[str, str]:
     as the series' coordinates name it, by axis: the facets the data API
     elected for the card. An axis the series name more than one value of, as
     a series continuing across methods does, and one they name none of, is
-    left out, since binding it would drop part of what the card draws."""
+    left out, since binding it would drop part of what the card draws. A
+    summary that lists only some series (`series_truncated`) gives none,
+    since a series it leaves out may name another facet."""
+    if (fact_summary or {}).get("series_truncated"):
+        return {}
     series = [s for s in (fact_summary or {}).get("series") or () if isinstance(s, Mapping)]
     found: dict[str, str] = {}
     for axis in FACET_AXES:
@@ -471,6 +486,60 @@ def drawn_facets(fact_summary: Mapping[str, Any] | None) -> dict[str, str]:
         if len(values) == 1 and isinstance(ref := next(iter(values)), str) and ref:
             found[axis] = ref
     return found
+
+
+def facet_values(view: Mapping[str, Any]) -> dict[str, list[str]]:
+    """The values a frame view (`describe_frame`) lists on each axis of
+    `FACET_AXES` it states, by axis, refs without the `dcid:` mark, with an
+    empty value for each one its `total_count` counts beyond those listed."""
+    held: dict[str, list[str]] = {}
+    for dimension in view.get("dimensions") or ():
+        if isinstance(dimension, Mapping) and dimension.get("name") in FACET_AXES:
+            values = [str(v).removeprefix("dcid:") for v in dimension.get("values") or ()]
+            count = dimension.get("total_count")
+            if type(count) is int and count > len(values):
+                values += [""] * (count - len(values))
+            held[str(dimension["name"])] = values
+    return held
+
+
+def root_facets(card: UnitCard, view: Mapping[str, Any]) -> dict[str, str] | None:
+    """The facets `card`, a card on a sum, binds on a change: the one value
+    each facet axis of its retrieval's frame view (`view`) holds, with the
+    ones the card drew; `None` when the two name different values on an axis.
+    An axis holding several values is left unbound, and a new retrieval that
+    holds several on it is refused (`unlike_series`)."""
+    found = {
+        axis: values[0]
+        for axis, values in facet_values(view).items()
+        if len(set(values)) == 1 and values[0]
+    }
+    drawn = {axis: ref.removeprefix("dcid:") for axis, ref in (card.facets or {}).items()}
+    if any(axis in found and found[axis] != ref for axis, ref in drawn.items()):
+        return None
+    return {**found, **(card.facets or {})}
+
+
+def unlike_series(card: UnitCard, view: Mapping[str, Any]) -> str | None:
+    """Why the retrieval whose frame view is `view` cannot be summed as the
+    card on a sum `card` was: `"mixed"` when an axis of `FACET_AXES` holds
+    more than one value, so the sum would add unlike figures; `"other"` when
+    it holds one value other than the one `card` was drawn with on that axis
+    (`UnitCard.facets`), or than the unit the recorded sum pins, so the sum
+    would carry another label. `None` when every axis holds at most one value
+    and each is the card's. An axis the view lists no value of passes, and
+    `aggregate` still refuses several units it was given no pin for."""
+    held = facet_values(view)
+    if any(len(set(values)) > 1 for values in held.values()):
+        return "mixed"
+    expected = {axis: ref.removeprefix("dcid:") for axis, ref in (card.facets or {}).items()}
+    pinned = card.total.parameters.get("unit") if card.total is not None else None
+    if isinstance(pinned, str):
+        expected.setdefault("unit", pinned.removeprefix("dcid:"))
+    for axis, values in held.items():
+        if values and axis in expected and values[0] != expected[axis]:
+            return "other"
+    return None
 
 
 def strayed_facets(card: UnitCard, fact_summary: Mapping[str, Any] | None) -> list[str]:
@@ -515,10 +584,34 @@ def _naming(select: Mapping[str, Any], refs: Sequence[str]) -> set[str]:
     }
 
 
+def select_entry(select: Mapping[str, Any], role: str) -> str | None:
+    """The key of `select`, a chart's select, that names `role`'s places: the
+    frame column the role is served in (`role_column`), as a select is keyed
+    by the frame's dimensions, else the role's own name; `None` when the
+    select names neither."""
+    for key in dict.fromkeys((role_column(role), role)):
+        if key in select:
+            return key
+    return None
+
+
+def _role_entries(select: Mapping[str, Any], role: str | None, refs: Sequence[str]) -> set[str]:
+    """The `select` entries naming a role's places: the role's own entry
+    (`select_entry`), none where the select leaves its column unbound, and,
+    for a role not named, every entry naming any of `refs`."""
+    if role is None:
+        return _naming(select, refs)
+    key = select_entry(select, role)
+    return {key} if key is not None else set()
+
+
 def takes_several(
     intent: Mapping[str, Any] | None,
     refs: Sequence[str],
     others: Sequence[Sequence[str]] = (),
+    *,
+    role: str | None = None,
+    other_roles: Sequence[str] = (),
 ) -> bool:
     """Whether a role showing places `refs` on the card drawn from `intent`
     can show several, each drawn as its own series, as dfo-apis' assembler
@@ -542,10 +635,18 @@ def takes_several(
         return True
     select = intent.get("select")
     select = select if isinstance(select, Mapping) else {}
-    naming = _naming(select, refs)
-    listed = {name for name, value in select.items() if isinstance(value, list)}
-    for other in others:
-        named = _naming(select, other)
+    naming = _role_entries(select, role, refs)
+    # A list of one value draws one series, as the platform draws the party
+    # columns a summed flow's select lists beside its recipient.
+    listed = {
+        name
+        for name, value in select.items()
+        if isinstance(value, list) and (len(value) > 1 or name in naming)
+    }
+    for index, other in enumerate(others):
+        named = _role_entries(
+            select, other_roles[index] if index < len(other_roles) else None, other
+        )
         if len(other) > 1 and (not named or named & listed):
             return False
     if kind == "bar_chart":
@@ -604,24 +705,44 @@ def encoded(
         bound: list[str] = list(card.roles)
     else:
         bound = [role for role, refs in shown.items() if refs]
+    # A role the card's sum adds up draws no series of its own.
+    drawing = {
+        other: refs
+        for other, refs in shown.items()
+        if refs and (card.total is None or role_column(other) in card.total.group_by)
+    }
     roles = {
         role: takes_several(
             intent,
             shown.get(role) or (),
-            [refs for other, refs in shown.items() if other != role and refs],
+            [refs for other, refs in drawing.items() if other != role],
+            role=role,
+            other_roles=[other for other in drawing if other != role],
         )
         for role in bound
     }
     single = one_value(intent)
     year = (drawn_year(component) if component is not None else card.drawn_year) if single else None
+    summary = (component or {}).get("fact_summary") or {}
     facets = {
         **(card.facets or {}),
-        **(drawn_facets(component.get("fact_summary")) if component is not None else {}),
+        **(drawn_facets(summary) if component is not None else {}),
     }
+    unread = bool(summary.get("series_truncated")) if component is not None else card.facets_unread
     most = card.most
     if intent is not None:
-        draws = chart_draws(type_=str(intent.get("type") or ""), view=_drawn_view(component))
-        most = {role: draws if several else 1 for role, several in roles.items()}
+        type_ = str(intent.get("type") or "")
+        view = _drawn_view(component)
+        # A table draws rows at each period, so one whose periods cannot be
+        # counted states no limit for a role that takes several places.
+        draws = (
+            None if view is None and type_ == "table" else chart_draws(type_=type_, view=view or {})
+        )
+        most = {
+            role: draws if several else 1
+            for role, several in roles.items()
+            if draws is not None or not several
+        }
     return replace(
         card,
         single=single,
@@ -631,23 +752,31 @@ def encoded(
         shown=shown if block is not None else card.shown,
         facets=facets or None,
         most=most,
+        facets_unread=unread,
     )
 
 
-def _drawn_view(component: Mapping[str, Any] | None) -> dict[str, Any]:
+# A period `harness.chart_binding.periods_covered` counts: a year, a month or a day.
+_COUNTED_PERIOD = re.compile(r"\d{4}(?:-\d{2}(?:-\d{2})?)?")
+
+
+def _drawn_view(component: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """The part of a frame view `chart_draws` reads, for the card `component`
-    draws: the first and last period its fact summary states, which a table
-    draws rows at; empty when it states none."""
+    draws: the first and last period its fact summary states, whole, which a
+    table draws rows at, months and days counted as such; empty when it
+    states none; `None` when it states periods `periods_covered` cannot
+    count, such as quarters, or two of different grains."""
     window = ((component or {}).get("fact_summary") or {}).get("window") or {}
     start, end = window.get("start"), window.get("end")
+    if not isinstance(start, str) or not isinstance(end, str):
+        return {}
     if (
-        isinstance(start, str)
-        and isinstance(end, str)
-        and start[:4].isdigit()
-        and end[:4].isdigit()
+        _COUNTED_PERIOD.fullmatch(start)
+        and _COUNTED_PERIOD.fullmatch(end)
+        and len(start) == len(end)
     ):
-        return {"coverage": [start[:4], end[:4]]}
-    return {}
+        return {"coverage": [start, end]}
+    return None
 
 
 def _selected_places(
@@ -660,7 +789,8 @@ def _selected_places(
     select = select if isinstance(select, Mapping) else {}
     shown: dict[str, list[str]] = {}
     for role, refs in held.items():
-        value = select.get(role)
+        key = select_entry(select, role)
+        value = select.get(key) if key is not None else None
         named = [
             v.removeprefix("dcid:")
             for v in (value if isinstance(value, list) else [value])
@@ -983,7 +1113,7 @@ def card_changes(
     card draws. A card cut to its largest members at one period
     (`UnitCard.cut`) offers neither, since other years or places have other
     largest members."""
-    if block is None:
+    if block is None or (card.facets_unread and card.total is None):
         return None
     held = _years_of(card, block)
     window = (
@@ -1258,17 +1388,26 @@ class UnitMove:
 # shows it in the reply.
 UNIT_STALE_NOTE = "This card has changed since its unit menu opened, so nothing changed."
 UNIT_GONE_NOTE = "This card is no longer on the canvas, so nothing changed."
+# The refusal of a unit change of a card on the canvas that offers none.
+UNIT_UNOFFERED = ("unit_not_offered", "This card's unit cannot change.")
 
 
 def _admitted(
-    conversation: ConversationState, component_id: str, spec_id: str | None, *, stale: str
+    conversation: ConversationState,
+    component_id: str,
+    spec_id: str | None,
+    *,
+    stale: str,
+    unoffered: tuple[str, str],
 ) -> tuple[UnitCard, dict[str, Any], Mapping[str, Any], str] | tuple[str, str]:
     """Card `component_id` of `conversation` as a unit change or a change of
     years or places reads it: what it reads, its spec's Search block, its
-    digest entry and its title; or the `scope_choice_stale` refusal's
-    constraint and detail, `UNIT_GONE_NOTE` when the card is off the canvas
-    and `stale` when it reads a spec other than `spec_id` (any, with `None`)
-    or no turn kept its spec's block."""
+    digest entry and its title; or its refusal's constraint and detail:
+    `scope_choice_stale` with `UNIT_GONE_NOTE` when the card is off the
+    canvas and with `stale` when it reads a spec other than `spec_id` (any,
+    with `None`), and `unoffered` for a card on the canvas that can change
+    nothing: one that kept nothing a change reads, or whose spec's block no
+    turn kept."""
     composition = conversation.composition
     blocks = composition.blocks if composition is not None else []
     on_canvas = next((b for b in blocks if b.component_id == component_id), None)
@@ -1276,28 +1415,36 @@ def _admitted(
         return "scope_choice_stale", UNIT_GONE_NOTE
     entry = conversation.components.get(component_id) or {}
     card = UnitCard.from_json(entry.get(CARD_UNIT_KEY))
-    if card is None or (spec_id is not None and card.spec_id != spec_id):
+    if card is None:
+        return unoffered
+    if spec_id is not None and card.spec_id != spec_id:
         return "scope_choice_stale", stale
     block = stored_block(conversation.turn_specs, conversation.turns, card.spec_id)
     if block is None:
-        return "scope_choice_stale", stale
+        return unoffered
     return card, block, entry, str(entry.get("title") or on_canvas.title or "The card")
 
 
 def unit_move(conversation: ConversationState, pick: ApplyUnit) -> UnitMove | tuple[str, str]:
     """The change `pick` asks of `conversation`, or its refusal's constraint
-    and detail: `scope_choice_stale` when the card is off the canvas, when its
-    `provenance.inputs[0]` names a spec other than `pick.spec_id`, or when no
-    turn kept that spec's Search block; `unit_not_offered` for a unit the
+    and detail: `scope_choice_stale` when the card is off the canvas or its
+    `provenance.inputs[0]` names a spec other than `pick.spec_id`;
+    `unit_not_offered` for a card that offers no unit change, a unit the
     card's offer does not hold or the one it already shows. `pick.turn` plays
     no part."""
-    held = _admitted(conversation, pick.component_id, pick.spec_id, stale=UNIT_STALE_NOTE)
+    held = _admitted(
+        conversation,
+        pick.component_id,
+        pick.spec_id,
+        stale=UNIT_STALE_NOTE,
+        unoffered=UNIT_UNOFFERED,
+    )
     if len(held) == 2:
         return held
     card, block, _, title = held
     change = card_unit_change(card, block)
     if change is None:
-        return "scope_choice_stale", UNIT_STALE_NOTE
+        return UNIT_UNOFFERED
     offer, served = change.offer, change.offer.start
     if (refused := offered_unit_refusal(offer, pick.unit)) is not None:
         return "unit_not_offered", f"That unit is not offered for this card: {refused}."
@@ -1342,6 +1489,11 @@ class ChangeMove:
 
 
 CHANGE_STALE_NOTE = "This card has changed since its menu opened, so nothing changed."
+# The refusal of a change of years or places of a card on the canvas that
+# offers none.
+CHANGE_UNOFFERED = ("change_not_offered", "This card's years and places cannot change.")
+# How `/places` refuses a card on the canvas that offers no change.
+PLACES_UNOFFERED = ("scope_choice_stale", CHANGE_STALE_NOTE)
 
 
 # The refusal of a change of places on a deployment whose apis serves no
@@ -1355,21 +1507,29 @@ PLACES_UNREAD_NOTE = "The places this card can show cannot be read now."
 
 
 def changeable(
-    conversation: ConversationState, component_id: str, spec_id: str | None, *, places: bool
+    conversation: ConversationState,
+    component_id: str,
+    spec_id: str | None,
+    *,
+    places: bool,
+    unoffered: tuple[str, str] = PLACES_UNOFFERED,
 ) -> tuple[UnitCard, dict[str, Any], CardChanges, str] | tuple[str, str]:
     """The card `component_id` of `conversation` as a change reads it: what it
-    reads, its spec's Search block, its offer and its title; or the
-    `scope_choice_stale` refusal's constraint and detail when the card is off
-    the canvas, reads a spec other than `spec_id` (any, with `None`), no turn
-    kept its spec's block or it offers no change. `places` says whether
-    Search's places door is on."""
-    held = _admitted(conversation, component_id, spec_id, stale=CHANGE_STALE_NOTE)
+    reads, its spec's Search block, its offer and its title; or its refusal's
+    constraint and detail: `scope_choice_stale` when the card is off the
+    canvas or reads a spec other than `spec_id` (any, with `None`), and
+    `unoffered` when it offers no change (`/places` answers that
+    `scope_choice_stale` too, as its contract states; `change_move` answers
+    `CHANGE_UNOFFERED`). `places` says whether Search's places door is on."""
+    held = _admitted(
+        conversation, component_id, spec_id, stale=CHANGE_STALE_NOTE, unoffered=unoffered
+    )
     if len(held) == 2:
         return held
     card, block, entry, title = held
     offer = card_changes(card, block, fact_summary=entry.get("fact_summary"), places=places)
     if offer is None:
-        return "scope_choice_stale", CHANGE_STALE_NOTE
+        return unoffered
     return card, block, offer, title
 
 
@@ -1382,13 +1542,20 @@ async def change_move(  # noqa: PLR0911 -- one refusal per way a change cannot a
 ) -> ChangeMove | tuple[str, str]:
     """The change `pick` asks of `conversation`, or its refusal's constraint
     and detail: `scope_choice_stale` as `changeable` refuses;
-    `change_not_offered` for years or places outside the card's offer, or the
+    `change_not_offered` for a card that offers no change, years or places
+    outside the card's offer, or the
     ones it shows; `change_no_data` for years its data holds none of. A change
     of places reads the places its role can change to from Search through
     `reader` (the places door, `None` when off), or takes them from `listed`
     when the route read them already, and is refused
     `place_options_unavailable` when they cannot be read."""
-    held = changeable(conversation, pick.component_id, pick.spec_id, places=reader is not None)
+    held = changeable(
+        conversation,
+        pick.component_id,
+        pick.spec_id,
+        places=reader is not None,
+        unoffered=CHANGE_UNOFFERED,
+    )
     if len(held) == 2:
         return held
     card, block, offer, title = held

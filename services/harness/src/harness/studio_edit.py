@@ -63,11 +63,14 @@ from harness.card_unit import (
     joined_words,
     place_labels,
     retitled,
+    root_facets,
     scope_needs_years,
+    select_entry,
     stored_block,
     strayed_facets,
     unit_card,
     unit_pattern,
+    unlike_series,
 )
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.graph.state import ORCHESTRATOR_SEARCHES_KEY, store_search
@@ -391,6 +394,11 @@ async def change_events(
 # card shows.
 FETCHED_KEY = "fetched_with"
 
+# The key of the digest entry of a card on a sum naming the analysis step that
+# made its frame from that fetch, with the arguments it was called with
+# besides the frame, which the model reads beside `FETCHED_KEY`.
+SUMMED_KEY = "summed_with"
+
 
 # What a closing message says before the reason for a change that did not land.
 _UNIT_UNCHANGED = "The card is unchanged."
@@ -400,6 +408,9 @@ _NO_DATA = "The data holds no figures for that choice."
 # The closing sentence of a redraw whose data counts another source, method or
 # unit than the card did, which binding the card's facets rules out.
 _OTHER_BASIS = "The data for that choice is counted another way."
+# The step and closing sentence of a sum whose new retrieval holds two units,
+# sources or methods, which the sum would add together.
+_MIXED_BASIS = "The data for that choice is counted more than one way, so it cannot be totalled."
 # The step and closing sentence of a sum that could not be worked out again
 # over the new data: analysis-mcp unreachable, or its answer or the
 # retrieval's lineage unread.
@@ -492,20 +503,29 @@ def _redrawn_intent(
             intent.pop("window", None)
             intent["title"] = _changed_title(title, move)
             rewrite = functools.partial(
-                _changed_meta, shown=_shown_labels(move), unit=_unit_said(move)
+                _changed_meta,
+                shown=_shown_labels(move),
+                unit=_unit_said(move),
+                summed=move.card.total is not None,
             )
         case ChangeMove(change=PlacesChange() as change):
             places = next(p for p in move.offer.places or () if p.role == change.role)
             old = {o.id for o in places.chosen}
             select = intent.get("select")
             if isinstance(select, Mapping):
+                # A select is keyed by the frame's columns: a flow role's
+                # places sit under its party column.
+                entry = select_entry(select, change.role)
                 intent["select"] = {
-                    key: _reselected(value, old, change.entities) if key == change.role else value
+                    key: _reselected(value, old, change.entities) if key == entry else value
                     for key, value in select.items()
                 }
             intent["title"] = _changed_title(title, move)
             rewrite = functools.partial(
-                _changed_meta, shown=_shown_labels(move), unit=_unit_said(move)
+                _changed_meta,
+                shown=_shown_labels(move),
+                unit=_unit_said(move),
+                summed=move.card.total is not None,
             )
     held = intent.get("order")
     if isinstance(held, dict) and "period" in held:
@@ -589,16 +609,22 @@ def _changed_title(title: Any, move: ChangeMove) -> str:
     (`_renamed_places`), else builds the title from the Search block's
     facts (`_composed_title`) with the period the title ended on, or the
     card's years where it ended on none (its offer's, else the ones it draws). A title whose subject cannot be
-    read, or a card with no title, is built from the block's facts too."""
+    read, or a card with no title, is built from the block's facts too.
+
+    A card on a sum (`harness.card_unit.UnitCard.total`) is always built from
+    the block's facts, with the new period or the one its title ended on: a
+    title written for the sum can count the members it adds up ("from 32
+    donors"), and other years or places can add up another number."""
     text = title if isinstance(title, str) else ""
     card = replace(move.card, scope=move.scope)
+    summed = move.card.total is not None
     if isinstance(move.change, WindowChange):
         period = period_words(move.change.start_year, move.change.end_year)
-        subject = _title_subject(text, _unit_said(move)) if text else None
+        subject = _title_subject(text, _unit_said(move)) if text and not summed else None
         if subject:
             return f"{_cut_words(subject, _TITLE_CHARS - len(period) - 2)}, {period}"
         return _composed_title(move.block, card, period)
-    renamed = _renamed_places(text, move)
+    renamed = None if summed else _renamed_places(text, move)
     if renamed is not None:
         return renamed
     tail = _PERIOD_TAIL.search(text)
@@ -733,13 +759,20 @@ def _shown_labels(move: ChangeMove) -> set[str]:
     return {o.label for p in move.offer.places or () for o in p.chosen} | set(move.old)
 
 
-def _changed_meta(name: str, text: str, *, shown: set[str], unit: str | None = None) -> str | None:
+def _changed_meta(
+    name: str, text: str, *, shown: set[str], unit: str | None = None, summed: bool = False
+) -> str | None:
     """A word of the card's meta after a change of years or places: the
     subtitle and the description, which the model wrote about the old years
     and places, are dropped, and an axis label is kept only when it names no
     year outside the unit's words (`unit`, `_unit_said`) and none of the
-    places in `shown`, the ones the card showed."""
+    places in `shown`, the ones the card showed. On a card on a sum
+    (`summed`) an axis label naming any number outside the unit's words is
+    dropped too, since it can count the members the old sum added up."""
     if name in {"subtitle", "description"}:
+        return None
+    bare = re.sub(unit, " ", text, flags=re.IGNORECASE) if unit is not None else text
+    if summed and re.search(r"\d", bare):
         return None
     if _names_a_year(text, unit) or any(
         re.search(rf"(?<!\w){re.escape(label)}(?!\w)", text) for label in shown if label
@@ -783,6 +816,21 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
     # (`resubmit_unit`); a change of years or places binds them all on the
     # fetch, so the data API elects none of them again.
     card = _changed_card(move, read)
+    if card.total is not None:
+        # A card on a sum keeps the facets its retrieval was counted in,
+        # read from that retrieval's frame, since the sum's own series may
+        # not name them.
+        root = {"spec_id": card.total.root[0], "content_version": card.total.root[1]}
+        viewed = await recorder(tool="describe_frame", args={"frame_ref": root})
+        view = viewed.get("view") if viewed.get("outcome") == "ok" else None
+        kept = root_facets(card, view) if isinstance(view, Mapping) else None
+        if kept is None:
+            refused = _SUM_UNREAD if not isinstance(view, Mapping) else _OTHER_BASIS
+            yield _step("u2", label, failed=refused)
+            for event in _close(f"{_UNIT_UNCHANGED} {refused}"):
+                yield event
+            return
+        card = replace(card, facets=kept or None)
     facets = (
         bound_facets(card, stored_block(conversation.turn_specs, conversation.turns, card.spec_id))
         if isinstance(move, ChangeMove)
@@ -803,7 +851,18 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         return
     frame_ref = frame_refs[0]
     if card.total is not None:
-        summed = await _summed_again(surface, provenance, card.total, fetched)
+        # The new retrieval is summed only when its series share the unit,
+        # source and method the card's sum was drawn with: `aggregate` would
+        # add two methods' figures, or label a sum of another unit as the
+        # card's.
+        viewed = await recorder(tool="describe_frame", args={"frame_ref": frame_ref})
+        view = viewed.get("view") if viewed.get("outcome") == "ok" else None
+        unlike = unlike_series(card, view) if isinstance(view, Mapping) else "unread"
+        summed = (
+            {"mixed": _MIXED_BASIS, "other": _OTHER_BASIS, "unread": _SUM_UNREAD}[unlike]
+            if unlike is not None
+            else await _summed_again(surface, provenance, card.total, fetched)
+        )
         if isinstance(summed, str):
             yield _step("u2", label, failed=summed)
             for event in _close(f"{_UNIT_UNCHANGED} {summed}"):
@@ -1267,6 +1326,8 @@ def _swapped(
             entry[CARD_UNIT_KEY] = kept
         if card is not None and card.scope:
             entry[FETCHED_KEY] = card.fetch_args(card.spec_id, card.scope, facets=fetched_facets)
+        if card is not None and card.total is not None:
+            entry[SUMMED_KEY] = {"tool": "aggregate", "arguments": dict(card.total.parameters)}
         if plan is not None:
             entry[PLAN_LINK_KEY] = plan
         work.components[created.component_id] = entry

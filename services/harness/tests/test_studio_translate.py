@@ -103,7 +103,7 @@ from harness.wire import (
 )
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR
-from orchestrator.run import ModelResponded, ToolsAnswered
+from orchestrator.run import ModelResponded, TextDelta, ToolsAnswered
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
@@ -2444,21 +2444,38 @@ async def _held_removal(engine: AsyncEngine) -> tuple[StudioStore, _Translator, 
     return store, translator, frames
 
 
-@pytest.mark.parametrize("ending", ["draws", "answers", "done", "pause", "error"])
+@pytest.mark.parametrize(
+    "ending", ["draws", "narrates-and-draws", "answers", "done", "pause", "error"]
+)
 async def test_a_removal_shows_beside_the_next_drawing_line_or_when_nothing_is_drawn(
     pg_engine: AsyncEngine, ending: str
 ) -> None:
     """The canvas update of a removal waits through the removal's answer, so
     the removed cards stay on screen until the cards replacing them are
     announced. It goes out right after the next response's `make_charts`
-    line, and otherwise before the next response draws nothing, the turn
-    ends, pauses or fails, once."""
+    line, or ahead of the next response's first frame, its text included,
+    when that draws nothing: the response's text is held with it until the
+    response ends, then sent whole after the update, or before the drawing
+    line that the update follows. When the
+    segment ends first, on `done`, a pause or a failure, the translator
+    still holds it, once, for the stream's owner to send before the ending
+    frame (`release_removal`, which the work's `owed` hands over)."""
     _, translator, held = await _held_removal(pg_engine)
     match ending:
         case "draws":
             frames = await translated(translator, _DRAWING)
+        case "narrates-and-draws":
+            parts = (types.Part(text="Drawing it."), *_DRAWING.parts)
+            frames = [
+                *await translated(translator, TextDelta("Drawing it.")),
+                *await translated(translator, ModelResponded(parts=parts)),
+            ]
         case "answers":
-            frames = await translated(translator, ModelResponded(parts=(types.Part(text="Done."),)))
+            frames = [
+                *await translated(translator, TextDelta("Do")),
+                *await translated(translator, TextDelta("ne.")),
+                *await translated(translator, ModelResponded(parts=(types.Part(text="Done."),))),
+            ]
         case "done":
             frames = await translator.finish()
         case "pause":
@@ -2467,20 +2484,26 @@ async def test_a_removal_shows_beside_the_next_drawing_line_or_when_nothing_is_d
             frames = await translated(
                 translator, TurnFailed(node="orchestrate", error=RuntimeError("boom"))
             )
-    frames += await translator.finish() if ending in {"draws", "answers"} else []
+    owed = translator.release_removal()
 
     assert "composition.updated" not in [f.event for f in held]
     events = [
         f"{f.tool}:{f.status.value}" if f.event == "activity.step" else f.event for f in frames
     ]
-    updates = [f.manifest for f in frames if f.event == "composition.updated"]
-    assert [[b.component_id for b in manifest.blocks] for manifest in updates] == [["cmp_02"]]
-    shown = events.index("composition.updated")
-    if ending == "draws":
-        assert events[shown - 1] == "make_charts:running"
-    else:
-        later = {"answers": "message.delta", "pause": "elicitation.request", "error": "error"}
-        assert ending == "done" or shown < events.index(later[ending])
+    sent = [f.manifest for f in [*frames, *owed] if f.event == "composition.updated"]
+    assert [[b.component_id for b in manifest.blocks] for manifest in sent] == [["cmp_02"]]
+    assert translator.release_removal() == []
+    texts = [f.text for f in frames if f.event == "message.delta"]
+    match ending:
+        case "draws" | "narrates-and-draws":
+            shown = events.index("composition.updated")
+            assert events[shown - 1] == "make_charts:running"
+            assert texts == ([] if ending == "draws" else ["Drawing it."])
+        case "answers":
+            assert events[0] == "composition.updated"
+            assert texts == ["Done."]
+        case _:
+            assert "composition.updated" not in events
 
 
 async def test_a_held_removal_shows_a_canvas_edit_made_while_it_was_held(

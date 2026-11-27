@@ -1900,7 +1900,9 @@ class _Translator:
         # Whether a `remove_cards` changed the canvas and its
         # `composition.updated` is held, to go out beside the next drawing
         # line so the canvas never shows empty while the cards replacing the
-        # removed ones are drawn (`_release_removal`).
+        # removed ones are drawn (`_release_removal`). One still held when the
+        # segment ends goes out before its ending frame, whatever that is: the
+        # stream's owner asks for it (`release_removal`).
         self._removal_held = False
 
     async def translate_recorded(self, event: SegmentEvent, marks: RecordMarks) -> list[Any]:
@@ -1938,7 +1940,6 @@ class _Translator:
                 # a plan step's among them, show before the turn's error.
                 return [
                     *await self._record_frames(records),
-                    *self._release_removal(),
                     _stream_fatal(self._conversation, error),
                 ]
             case ToolsAnswered(answers=answers, state=state):
@@ -1969,7 +1970,6 @@ class _Translator:
         frames: list[Any] = []
         match event:
             case Paused():
-                frames.extend(self._release_removal())
                 frames.extend(self._close_status())
                 if event.kind == APPROVE_PAUSE:
                     frames.extend(self._recover(_retry_key("plan", {}), _PLAN_MADE))
@@ -2573,8 +2573,9 @@ class _Translator:
         return self._composition_update()
 
     def release_removal(self) -> list[CompositionUpdated]:
-        """`_release_removal` for a segment that ends with no `finish`, on a
-        failure the turn's cursor records or a Stop."""
+        """The held removal's `composition.updated`, once (`_release_removal`),
+        which the work's `owed` hands the stream's owner as the segment ends
+        (`harness.studio_stream.Work.owed`)."""
         return self._release_removal()
 
     def _composition_update(self) -> list[CompositionUpdated]:
@@ -3001,8 +3002,12 @@ class _Translator:
         return frames
 
     def _agent_text(self, text: str) -> list[Any]:
-        """Answer text as the model streams it."""
-        if not text:
+        """Answer text as the model streams it. While a removal's update is
+        held, the text waits for the response's end (`_agent_response`
+        sends it whole): only then is it known whether the response draws,
+        and so whether the update goes ahead of the text or after the
+        response's drawing line."""
+        if not text or self._removal_held:
             return []
         frames: list[Any] = [*self._close_status(), *self._narration_break()]
         self._streamed_text = True
@@ -3466,7 +3471,6 @@ class _Translator:
         frames: list[Any] = [
             *self._take_restored(),
             *await self._drain_recorder(),
-            *self._release_removal(),
             *self._close_status(),
         ]
         # A held refusal no later call corrected is a failed step after all.

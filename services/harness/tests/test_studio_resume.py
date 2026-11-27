@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from google.genai import types
 from harness import studio as studio_module
+from harness.card_unit import unit_move
 from harness.scripted import ScriptedSurface
 from harness.studio import (
     _answer_again,
@@ -52,6 +53,7 @@ from harness.turn.store import TurnStatus, TurnStore
 from harness.wire import (
     MAX_INTERRUPT_TEXT_CHARS,
     TURN_INDEX_HEADER,
+    ApplyUnit,
     CompositionManifest,
     MessageComplete,
     TextAnswer,
@@ -1403,6 +1405,9 @@ def test_a_card_names_the_card_it_replaced_only_on_the_turn_that_swapped_it() ->
     assert [card.replaces for card in revised.cards] == [None]
 
 
+_CURRENT_USD = {"currency": "USD", "prices": "current"}
+
+
 @pytest.mark.parametrize(
     ("block", "on_canvas"),
     [
@@ -1414,8 +1419,9 @@ def test_a_stored_card_offers_no_unit_change_it_cannot_make(
     block: dict[str, Any] | None, on_canvas: bool
 ) -> None:
     """A stored card whose spec's block cannot be read gives the card with
-    no `unit_change`, and so does one off the canvas, which `apply_unit`
-    refuses `scope_choice_stale`."""
+    no `unit_change`, and `apply_unit` refuses it `unit_not_offered`; one off
+    the canvas gives none either, and `apply_unit` refuses it
+    `scope_choice_stale`."""
     state = _stored_state(
         [{"component_id": "cmp_new", "action": "created"}],
         entry={"unit_card": {"spec_id": "spec_1", "args": {}}},
@@ -1424,8 +1430,12 @@ def test_a_stored_card_offers_no_unit_change_it_cannot_make(
     state.turn_specs = {"spec_1": block if block is not None else _converted_block()}
 
     (card,) = studio_module._closed_turn(1, state).cards
+    pick = ApplyUnit(component_id="cmp_new", spec_id="spec_1", turn=1, unit=_CURRENT_USD)
 
     assert (card.component_id, card.unit_change) == ("cmp_new", None)
+    # A block that reads but converts no unit.
+    state.turn_specs = {"spec_1": {"definition": {"spec_id": "spec_1", "identity": {}}}}
+    assert unit_move(state, pick)[0] == ("unit_not_offered" if on_canvas else "scope_choice_stale")
 
 
 async def _cursor_statuses(engine: AsyncEngine) -> list[str]:

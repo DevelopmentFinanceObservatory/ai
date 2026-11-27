@@ -131,26 +131,34 @@ class ApisPlaceOptions:
         if running is None:
             running = asyncio.ensure_future(self._lookup(key, identity=identity, role=role))
             self._running[key] = running
-            running.add_done_callback(lambda done: self._landed(key, done))
+            running.add_done_callback(self._landed)
         # A read that gives up, at its deadline say, leaves the lookup to the
         # reads still waiting on it.
         return await asyncio.shield(running)
 
-    def _landed(
-        self, key: tuple[str, str], done: asyncio.Task[tuple[tuple[tuple[str, str], ...], bool]]
-    ) -> None:
-        """Forget `done`, the lookup of `key`, once it ends. Its failure is
-        read here too, so one no read waits on any longer is not reported as
-        never retrieved."""
-        if self._running.get(key) is done:
-            del self._running[key]
+    @staticmethod
+    def _landed(done: asyncio.Task[tuple[tuple[tuple[str, str], ...], bool]]) -> None:
+        """Read the failure of `done`, a lookup that ended, so one no read
+        waits on any longer is not reported as never retrieved."""
         if not done.cancelled():
             done.exception()
 
     async def _lookup(
         self, key: tuple[str, str], *, identity: Mapping[str, Any], role: str
     ) -> tuple[tuple[tuple[str, str], ...], bool]:
-        """Read `role`'s places of `identity` from apis and keep them under `key`."""
+        """Read `role`'s places of `identity` from apis and keep them under
+        `key`. The lookup leaves `_running` in the step that ends it, before
+        any callback runs, so a read arriving after it ends, however it
+        ended, starts a lookup of its own."""
+        try:
+            return await self._read(key, identity=identity, role=role)
+        finally:
+            if self._running.get(key) is asyncio.current_task():
+                del self._running[key]
+
+    async def _read(
+        self, key: tuple[str, str], *, identity: Mapping[str, Any], role: str
+    ) -> tuple[tuple[tuple[str, str], ...], bool]:
         now = self._clock()
         try:
             answer = await self._client.read_entity_options(identity=identity, role=role)

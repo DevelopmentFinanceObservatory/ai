@@ -1291,15 +1291,17 @@ class _SegmentWork:
             case Outcome.PAUSED:
                 return outcome, await self._translator.finish()
             case Outcome.FAILED if not self._failed:
-                return outcome, [
-                    *self._translator.release_removal(),
-                    recorded_fatal(conversation, segment.cursor.error or {}),
-                ]
+                return outcome, [recorded_fatal(conversation, segment.cursor.error or {})]
             case Outcome.UNCLOSED if not self._failed:
-                return Outcome.CANCELLED, [*self._translator.release_removal()]
+                return Outcome.CANCELLED, []
             case Outcome.ABANDONED if self._failed:
                 return Outcome.FAILED, []
         return outcome, []
+
+    def owed(self) -> list[BaseModel]:
+        """The canvas update of a removal the translator still holds
+        (`_Translator.release_removal`)."""
+        return [*self._translator.release_removal()]
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`), which
@@ -1342,6 +1344,9 @@ class _RejectWork:
     async def end(self, result: None) -> tuple[Outcome, list[BaseModel]]:
         """`done`, with the reply's frames."""
         return Outcome.DONE, self._frames
+
+    def owed(self) -> list[BaseModel]:
+        return []
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`)."""
@@ -1440,6 +1445,9 @@ class _EditWork:
     async def end(self, result: Outcome) -> tuple[Outcome, list[BaseModel]]:
         """How the edit ended; its frames are the events' own."""
         return result, []
+
+    def owed(self) -> list[BaseModel]:
+        return []
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`), which

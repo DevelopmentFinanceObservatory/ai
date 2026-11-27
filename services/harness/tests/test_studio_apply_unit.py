@@ -1682,7 +1682,7 @@ async def test_a_change_of_places_whose_door_cannot_be_read_is_refused(
 async def test_a_card_offers_no_places_with_the_door_off(pg_engine: AsyncEngine) -> None:
     """With the places door off by the deployment's setting, a card offers no
     places, and a change of places answers as the picker does, 503
-    `capability_unavailable`."""
+    `capability_unavailable`, with the conversation and its card as they were."""
     app = _changes_app(pg_engine)
     async with _client(app) as client:
         first = await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
@@ -1692,6 +1692,9 @@ async def test_a_card_offers_no_places_with_the_door_off(pg_engine: AsyncEngine)
 
     assert "places" not in _frame(first, "component.created")["card_changes"]
     assert (response.status_code, response.json()["error"]) == (503, "capability_unavailable")
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert len(conversation.turns) == 1
+    assert [b.component_id for b in conversation.composition.blocks] == ["cmp_01unit0001"]
 
 
 @pytest.mark.parametrize(
@@ -1707,7 +1710,8 @@ async def test_a_change_of_places_outside_the_offer_is_refused(
     pg_engine: AsyncEngine, entities: list[str], read: list[str]
 ) -> None:
     """A place Search does not list is refused once its list is read; the
-    places the card shows, and more than its chart draws, before any read."""
+    places the card shows, and more than its chart draws, before any read.
+    The conversation and its card stay as they were."""
     app = _changes_app(pg_engine)
     places = _Places()
     app.state.studio.place_options = places
@@ -1725,6 +1729,9 @@ async def test_a_change_of_places_outside_the_offer_is_refused(
         "/apply_change",
     )
     assert places.asked == read
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    assert len(conversation.turns) == 1
+    assert [b.component_id for b in conversation.composition.blocks] == ["cmp_01unit0001"]
 
 
 @pytest.mark.parametrize(
@@ -2359,8 +2366,8 @@ async def test_a_card_cut_to_its_largest_members_offers_no_years_or_places(
 ) -> None:
     """Its members are the largest at one period, so another year or other
     places would draw them under a ranking they do not hold. It offers
-    neither, a change of either is refused, and the stored card keeps the
-    mark."""
+    neither, a change of either is refused as one it does not offer, and the
+    stored card keeps the mark."""
     monkeypatch.setattr(
         "harness.studio_translate.cut_cards", lambda state: frozenset({"cmp_01unit0001"})
     )
@@ -2377,7 +2384,7 @@ async def test_a_card_cut_to_its_largest_members_offers_no_years_or_places(
 
     assert "card_changes" not in _frame(first, "component.created")
     assert [(r.status_code, r.json()["constraint_id"]) for r in refused] == [
-        (422, "scope_choice_stale")
+        (422, "change_not_offered")
     ] * 2
     stored = app.state.studio.store.current(PRINCIPAL, CONVERSATION).components["cmp_01unit0001"]
     assert stored["unit_card"]["cut"] is True
@@ -2595,12 +2602,27 @@ class _SummedChanger(_Changer):
     as the executor keeps one, under the pair it is stored by, and each
     redraw is on the sum the write names."""
 
-    def __init__(self, provenance: ProvenanceStore) -> None:
+    def __init__(
+        self,
+        provenance: ProvenanceStore,
+        *,
+        view: list[dict[str, Any]] | None = None,
+        facets: Mapping[str, str] | None = None,
+        views: Mapping[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
         super().__init__()
         self.provenance = provenance
         self.conversation: str | None = None
+        self.view = view or []
+        self.facets = facets
+        # The view of a frame by its spec_id, else `view`.
+        self.views = dict(views or {})
 
     async def __call__(self, *, tool: str, args: dict[str, Any], **kw: Any) -> dict[str, Any]:
+        if tool == "describe_frame":
+            self.calls.append({"tool": tool, "args": args})
+            dimensions = self.views.get(args["frame_ref"]["spec_id"], self.view)
+            return {"outcome": "ok", "frame_refs": [], "view": {"dimensions": list(dimensions)}}
         answer = await super().__call__(tool=tool, args=args, **kw)
         if tool == "get_data":
             (ref,) = answer["frame_refs"]
@@ -2617,11 +2639,16 @@ class _SummedChanger(_Changer):
             answer["store_refs"] = [dict(ref)]
         if tool == "write_component":
             answer = _on_sum(answer, args["intent"]["frame_ref"])
+            if self.facets is not None:
+                answer = _faceted(answer, self.facets)
         return answer
 
 
 def _summed_app(
-    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, surface: _SummingSearch
+    pg_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: _SummingSearch,
+    facets: Mapping[str, str] | None = None,
 ) -> tuple[Any, ProvenanceStore]:
     """The first turn draws France's aid to Kenya on the sum by year and
     recipient of its retrieval, whose recipe the runner serves."""
@@ -2633,6 +2660,8 @@ def _summed_app(
     provenance = ProvenanceStore()
     results = _first_results()
     results[-1] = _on_sum(results[-1], _SUM_OPS)
+    if facets is not None:
+        results[-1] = _faceted(results[-1], facets)
     app = _app(
         *_first_turn(),
         resolver=CannedSearch(_ENVELOPE),
@@ -2716,3 +2745,284 @@ async def test_a_sum_the_analysis_service_refuses_leaves_the_card(
     (card,) = read.json()["closed_since"][0]["cards"]
     assert card["component_id"] == "cmp_01unit0001"
     assert card["card_changes"] == _frame(first, "component.created")["card_changes"]
+
+
+_SUMMED_CARD = card_unit.SummedFrame(
+    frame=(_SUM_OPS["spec_id"], _SUM_OPS["content_version"]),
+    root=(_REF["spec_id"], _REF["content_version"]),
+    parameters=dict(_SUM_PARAMETERS),
+)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        WindowChange(kind="window", start_year=2010, end_year=2024),
+        PlacesChange(kind="places", role="destination", entities=["country/UGA"]),
+    ],
+    ids=["years", "places"],
+)
+def test_a_changed_sums_title_and_labels_count_no_members(change: Any) -> None:
+    """A sum's title may count the members it adds up, which a change can
+    alter. Its redrawn title is always built from the measure, places and
+    period, and an axis label stating a count is dropped, so neither states
+    a count the new sum may not have."""
+    title = "Total ODA from 32 donors to Kenya, 2015 to 2023"
+    move = _move(title, change)
+    move = replace(move, card=replace(move.card, total=_SUMMED_CARD))
+    stored = {"title": title, "type": "line_chart", "frame_ref": dict(_SUM_OPS)}
+
+    intent, rewrite = _redrawn_intent(stored, dict(_SUM_OPS), move)
+
+    assert "32" not in intent["title"]
+    assert intent["title"].startswith("Gross disbursements")
+    assert rewrite("y_label", "Sum over 32 donors") is None
+    assert rewrite("y_label", "USD, current prices") == "USD, current prices"
+
+
+def _facet(axis: str, *values: str) -> dict[str, Any]:
+    """A frame view's dimension of facet `axis`, holding `values`."""
+    return {
+        "name": axis,
+        "values": list(values),
+        "plural": len(values) > 1,
+        "total_count": len(values),
+    }
+
+
+@pytest.mark.parametrize(
+    "view",
+    [
+        [_facet("unit", "CurrencyUSD", "CurrencyEUR")],
+        [_facet("unit", "CurrencyEUR")],
+        [_facet("measurementMethod", "GrantEquivalent", "Flows")],
+        [_facet("provenance", "provenance/OECDCRS")],
+    ],
+    ids=["two-units", "another-unit", "two-methods", "another-source"],
+)
+async def test_a_sum_whose_new_retrieval_is_counted_otherwise_is_refused_before_it_is_summed(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, view: list[dict[str, Any]]
+) -> None:
+    """The card sums series that share one source, method and unit. A new
+    retrieval holding two units or methods, or one other than the card's,
+    would sum unlike figures or relabel them, so the change is refused
+    before `aggregate` is called, and nothing is written."""
+    surface = _SummingSearch()
+    app, provenance = _summed_app(pg_engine, monkeypatch, surface, facets=_ELECTED)
+    changer = _SummedChanger(provenance, view=view)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+        )
+
+    assert surface.summed == []
+    assert "write_component" not in [call["tool"] for call in changer.calls]
+    failed = [f for f in frames if f["event"] == "activity.step" and f["status"] == "failed"]
+    assert [f["step_id"] for f in failed] == ["u2"]
+    assert _frame(frames, "message.complete")["text"].startswith("The card is unchanged.")
+
+
+async def test_a_sum_binds_the_facets_its_series_share_and_checks_them_again(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every series under the sum shares one source, method and unit, which
+    the sum's own series name. The refetch binds all three, a new retrieval
+    holding them alone is summed, and the redrawn sum is checked for them."""
+    surface = _SummingSearch()
+    app, provenance = _summed_app(pg_engine, monkeypatch, surface, facets=_ELECTED)
+    view = [_facet(axis, ref) for axis, ref in _ELECTED.items()]
+    changer = _SummedChanger(provenance, view=view, facets=_ELECTED)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+        )
+
+    (fetched,) = changer.fetched()
+    assert fetched["scope"]["facets"] == {axis: {"ref": ref} for axis, ref in _ELECTED.items()}
+    assert len(surface.summed) == 1
+    assert _frame(frames, "component.created")["replaces"] == "cmp_01unit0001"
+
+
+def _ending(frames: list[dict[str, Any]]) -> list[tuple[str, ...]]:
+    """What the page reads off a change's stream: each frame's event, with a
+    step's id and status."""
+    return [
+        (f["event"], f["step_id"], f["status"]) if f["event"] == "activity.step" else (f["event"],)
+        for f in frames
+    ]
+
+
+async def test_a_refused_sum_ends_as_a_plain_cards_refused_change(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The site gives a change's prompt back on what the harness answers: a
+    refusal before the stream, or a stream ending with no card. A sum refused
+    in the stream ends on the frames a plain card's empty retrieval ends on,
+    and a change refused before the stream answers the plain card's 422, so
+    the reader's allowance is given back alike."""
+    plain_app = _changes_app(pg_engine)
+    async with _client(plain_app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        plain_app.state.studio.recorder._executor = _Changer(rows=0)
+        plain = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+        )
+        plain_early = await client.post(
+            "/api/studio/turn",
+            json=_change_body("cmp_01unit0001", _SPEC, {**_YEARS, "start_year": 1900}),
+            headers=AUTH,
+        )
+
+    surface = _SummingSearch(refuse=True)
+    app, provenance = _summed_app(pg_engine, monkeypatch, surface)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = _SummedChanger(provenance)
+        summed = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+        )
+        summed_early = await client.post(
+            "/api/studio/turn",
+            json=_change_body("cmp_01unit0001", _SPEC, {**_YEARS, "start_year": 1900}),
+            headers=AUTH,
+        )
+
+    assert len(surface.summed) == 1
+    assert _ending(summed) == _ending(plain)
+    assert (summed_early.status_code, summed_early.json()) == (
+        plain_early.status_code,
+        plain_early.json(),
+    )
+
+
+# --- recorded cards: a change of places rewrites the role's own column -------
+
+_RECORDED_CARDS = json.loads(
+    (Path(__file__).parent / "fixtures" / "recorded_card_selects.json").read_text()
+)
+
+
+def _recorded_move(name: str, role: str, chosen: list[str], entities: list[str]) -> Any:
+    """A change of the places `role` shows on the recorded card `name`, from
+    `chosen` to `entities`, with the card's recorded type, title and select
+    as its stored intent."""
+    card = _RECORDED_CARDS[name]
+    change = PlacesChange(kind="places", role=role, entities=entities)
+    offer = CardChanges(
+        spec_id=_SPEC,
+        places=[
+            PlacesOffer(
+                role=role, multiple=True, chosen=[PlaceOption(id=ref, label=ref) for ref in chosen]
+            )
+        ],
+    )
+    move = ChangeMove(
+        "cmp_01unit0001",
+        card["title"],
+        UnitCard(spec_id=_SPEC, args={}),
+        change,
+        {},
+        "",
+        offer,
+        _ENVELOPE["parts"][0]["spec"],
+        old=tuple(chosen),
+        new=tuple(entities),
+    )
+    stored = {"type": card["type"], "title": card["title"], "select": card["select"]}
+    return stored, move
+
+
+def test_a_change_of_a_recorded_recipient_rewrites_its_column_as_the_live_redraw_did() -> None:
+    """The recorded debt card for Kenya, changed to Uganda, selects what the
+    recorded redraw for Uganda selected."""
+    stored, move = _recorded_move("debt_kenya", "destination", ["country/KEN"], ["country/UGA"])
+    assert stored["select"]["financingRecipient"] == ["country/KEN"]
+
+    intent, _ = _redrawn_intent(stored, dict(_REF), move)
+
+    assert intent["select"] == _RECORDED_CARDS["debt_uganda_after_change"]["select"]
+
+
+@pytest.mark.parametrize(
+    ("role", "chosen", "entities", "column"),
+    [
+        ("destination", ["country/KEN"], ["country/UGA"], "financingRecipient"),
+        ("origin", None, ["country/CAN", "country/GBR"], "financingProvider"),
+    ],
+    ids=["destination", "origin"],
+)
+def test_a_change_of_one_role_beside_another_listed_dimension_rewrites_its_column_alone(
+    role: str, chosen: list[str] | None, entities: list[str], column: str
+) -> None:
+    """Health aid to Kenya by provider, recorded, lists eight providers
+    beside its one recipient. A change of either role rewrites that role's
+    column, and the other entry stays as recorded."""
+    recorded = _RECORDED_CARDS["health_aid_kenya_by_provider"]["select"]
+    shown = chosen if chosen is not None else recorded["financingProvider"]
+    stored, move = _recorded_move("health_aid_kenya_by_provider", role, shown, entities)
+
+    intent, _ = _redrawn_intent(stored, dict(_REF), move)
+
+    assert intent["select"][column] == entities
+    assert {k: v for k, v in intent["select"].items() if k != column} == {
+        k: v for k, v in recorded.items() if k != column
+    }
+
+
+def test_a_change_of_places_leaves_another_role_naming_the_same_place() -> None:
+    """The recorded debt card for Kenya, with Kenya also named as its
+    provider: a change of the recipient rewrites `financingRecipient` and
+    leaves `financingProvider` naming Kenya."""
+    stored, move = _recorded_move("debt_kenya", "destination", ["country/KEN"], ["country/UGA"])
+    stored["select"] = {**stored["select"], "financingProvider": ["country/KEN"]}
+
+    intent, _ = _redrawn_intent(stored, dict(_REF), move)
+
+    assert intent["select"]["financingRecipient"] == ["country/UGA"]
+    assert intent["select"]["financingProvider"] == ["country/KEN"]
+
+
+_CRS = _RECORDED_CARDS["health_aid_kenya_summed"]["fact_summary"]["series"][0]["coordinates"][
+    "provenance"
+]
+
+
+@pytest.mark.parametrize(("source", "summed"), [(_CRS, True), ("provenance/OECDDAC2A", False)])
+async def test_a_sum_keeps_the_source_its_retrieval_was_counted_in(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch, source: str, summed: bool
+) -> None:
+    """The sum's own series name no source, as a sum whose frame carries no
+    facet column draws them. The source is read from the retrieval's frame
+    (the recorded CRS source of the live sum of health aid to Kenya), bound
+    on the refetch, and a new retrieval counted from another source is
+    refused before it is summed. A changed sum's canvas entry names the
+    `aggregate` step beside the `get_data` arguments."""
+    surface = _SummingSearch()
+    app, provenance = _summed_app(pg_engine, monkeypatch, surface)
+    changer = _SummedChanger(
+        provenance,
+        views={_REF["spec_id"]: [_facet("provenance", _CRS)]},
+        view=[_facet("provenance", source)],
+    )
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _YEARS)
+        )
+
+    (fetched,) = changer.fetched()
+    assert fetched["scope"]["facets"]["provenance"] == {"ref": _CRS}
+    assert len(surface.summed) == (1 if summed else 0)
+    if not summed:
+        assert _frame(frames, "message.complete")["text"].startswith("The card is unchanged.")
+        return
+    created = _frame(frames, "component.created")
+    entry = app.state.studio.store.current(PRINCIPAL, CONVERSATION).components[
+        created["component_id"]
+    ]
+    assert entry["summed_with"] == {"tool": "aggregate", "arguments": _SUM_PARAMETERS}
