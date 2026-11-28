@@ -11,6 +11,8 @@ The routes (`docs/studio-contract-v1.md`):
 * `POST /api/studio/composition`: applies canvas mutations and returns the
   new manifest as plain JSON.
 * `GET /api/studio/state`: the conversation as stored, read with no lease.
+* `GET /api/studio/places`: the places one role of a card can change to,
+  read from Search's options door (`harness.place_options`), with no lease.
 
 A turn runs on the turn loop (`harness.turn`) over the graph
 `harness.graph.workflow.studio_graph` builds: `/turn` opens it at the
@@ -79,7 +81,18 @@ from starlette.types import Receive, Scope
 
 from harness.approval import ApprovalDecision, ApprovalRecord
 from harness.auth import principal_for
-from harness.card_unit import UnitMove, stored_unit_change, unit_move
+from harness.card_unit import (
+    PLACES_NOT_SERVED,
+    PLACES_UNREAD_NOTE,
+    ChangeMove,
+    UnitMove,
+    change_move,
+    changeable,
+    effective_identity,
+    stored_card_changes,
+    stored_unit_change,
+    unit_move,
+)
 from harness.conversation import (
     ModelCall,
     TurnHistory,
@@ -102,18 +115,28 @@ from harness.graph.state import (
     CarriedRef,
     TurnInput,
 )
+from harness.place_options import (
+    PlaceOptionsReader,
+    PlacesNotServedError,
+    PlacesRefusedError,
+    PlacesUnavailableError,
+    RolePlaces,
+    places_offered,
+    read_role_places,
+)
 from harness.provenance import ProvenanceStore
 from harness.run_ledger import ApprovedRun, StudioRunLedger
 from harness.seeds import seeds_slot
 from harness.settings import HistorySettings, Settings
 from harness.studio_edit import (
     CardSwap,
+    ChangeRecorded,
     EditClosed,
     EditEvent,
     EditFailed,
+    change_events,
     edit_event_frames,
     edit_events,
-    unit_events,
 )
 from harness.studio_state import (
     HEARTBEAT_INTERVAL_S,
@@ -208,9 +231,9 @@ from harness.wire import (
     STORED_INTERRUPT,
     AddOp,
     ApplyChoice,
-    ApplyUnit,
     CancelRequest,
     CancelSkipped,
+    CardChangeMark,
     ClosedTurn,
     ComponentRefIntent,
     CompositionActor,
@@ -227,6 +250,9 @@ from harness.wire import (
     OptionAnswer,
     OptionsAnswer,
     PendingPause,
+    PlaceOption,
+    PlacesChange,
+    PlacesOptions,
     PlanApproved,
     PlanProposed,
     PlanRevisionStaleError,
@@ -660,31 +686,98 @@ def _count_chip_refusal(
     return other.label
 
 
-def _unit_move(conversation: ConversationState, pick: ApplyUnit) -> UnitMove | JSONResponse:
-    """The unit change `pick` asks of `conversation` (`harness.card_unit.unit_move`),
-    or its HTTP refusal: 422 `scope_choice_stale` for a card off the canvas or
-    reading a spec other than `pick.spec_id`, and 422 `unit_not_offered` for a unit
-    its offer does not hold. `detail` is copy the client shows, and the
-    pointer is `/apply_unit`."""
-    move = unit_move(conversation, pick)
-    if isinstance(move, UnitMove):
+async def _card_move(
+    conversation: ConversationState,
+    body: TurnRequest,
+    *,
+    places: PlaceOptionsReader | None,
+    listed: RolePlaces | None = None,
+    places_gated: bool = False,
+) -> UnitMove | ChangeMove | JSONResponse | None:
+    """The card change `body` asks of `conversation`, `None` when it asks none,
+    or its HTTP refusal. A unit change (`harness.card_unit.unit_move`) is
+    refused 422 `scope_choice_stale` for a card off the canvas or reading a
+    spec other than the one named, and `unit_not_offered` for a unit its
+    offer does not hold, pointer `/apply_unit`. A change of years or places
+    (`harness.card_unit.change_move`) is refused 422 `scope_choice_stale` the
+    same way, `change_not_offered` for a value outside the card's offer and
+    `change_no_data` for years its data holds none of, pointer
+    `/apply_change`. A change of places reads the places its role can change
+    to through `places`, Search's places door, or takes them from `listed`
+    when an earlier check read them, and a door that cannot be read refuses
+    it 503 `transient_unavailable`, `place_options_unavailable`, to retry;
+    an apis that serves no places door refuses it 503 `capability_unavailable`,
+    as `/places` does. Any change of places is refused the same way while
+    `places_gated` says cards offer no places, by the deployment's setting or
+    because it learnt apis serves none (`harness.place_options.places_offered`).
+    `detail` is copy the client shows."""
+    if body.apply_unit is not None:
+        move: UnitMove | ChangeMove | tuple[str, str] = unit_move(conversation, body.apply_unit)
+    elif body.apply_change is not None:
+        if places_gated and isinstance(body.apply_change.change, PlacesChange):
+            return _places_not_served_response()
+        move = await change_move(conversation, body.apply_change, reader=places, listed=listed)
+    else:
+        return None
+    if isinstance(move, UnitMove | ChangeMove):
         return move
     constraint, detail = move
+    if constraint == PLACES_NOT_SERVED:
+        return _places_not_served_response()
+    if constraint == "place_options_unavailable":
+        return _places_unavailable_response(detail, pointer="/apply_change")
+    if body.apply_change is not None:
+        pointer = "/apply_change"
+    else:
+        pointer = "/apply_unit/unit" if constraint == "unit_not_offered" else "/apply_unit"
     return _tool_error_response(
         ToolError(
             error=ErrorCode.CONSTRAINT_VIOLATION,
             retry=RetryMode.DO_NOT_RETRY,
             constraint_id=constraint,
             detail=detail,
-            pointer="/apply_unit/unit" if constraint == "unit_not_offered" else "/apply_unit",
+            pointer=pointer,
         ),
         status_code=422,
     )
 
 
-def _unit_request_line(move: UnitMove) -> str:
-    """The history record's text for a unit change until it lands:
-    "Change Aid to Kenya to constant 2023 US dollars."."""
+def _places_unavailable_response(detail: str, *, pointer: str) -> JSONResponse:
+    """The 503 for a read of Search's places door that failed or missed its
+    deadline (`harness.place_options.read_role_places`): retry shortly."""
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.TRANSIENT_UNAVAILABLE,
+            retry=RetryMode.RETRY_AFTER_DELAY,
+            constraint_id="place_options_unavailable",
+            detail=detail,
+            pointer=pointer,
+            retry_after_seconds=2,
+        ),
+        status_code=503,
+    )
+
+
+def _places_refusal(constraint: str, detail: str, *, pointer: str) -> JSONResponse:
+    """A 422 refusal of `GET /api/studio/places`."""
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CONSTRAINT_VIOLATION,
+            retry=RetryMode.DO_NOT_RETRY,
+            constraint_id=constraint,
+            detail=detail,
+            pointer=pointer,
+        ),
+        status_code=422,
+    )
+
+
+def _change_request_line(move: UnitMove | ChangeMove) -> str:
+    """The history record's text for a card change until it lands:
+    "Change Aid to Kenya to constant 2023 US dollars.", "Change Aid to Kenya
+    to 2010 to 2024."."""
+    if isinstance(move, ChangeMove):
+        return f"Change {move.title} to {move.words}."
     words = unit_words(move.unit, move.offer)
     return f"Change {move.title} to {words[:1].lower()}{words[1:]}."
 
@@ -1020,15 +1113,22 @@ class StudioRunner:
         early_mints: EarlyMints | None = None,
         heartbeat_seconds: float = HEARTBEAT_INTERVAL_S,
         run_ledger: StudioRunLedger | None = None,
+        place_options: PlaceOptionsReader | None = None,
         history: HistorySettings,
         model_name: str,
     ) -> None:
         self.history = history
         self.model_name = model_name
         self.edit_model = edit_model
+        # What a drawn card reads the places its roles can change to through
+        # (`harness.place_options`); `None` offers no change of places.
+        self.place_options = place_options
         # The bare surface a card's unit change re-reads its spec through
-        # (`harness.studio_edit.unit_events`), off the Activity feed.
+        # (`harness.studio_edit.change_events`), off the Activity feed.
         self.definition_surface = tool_surface
+        # Where a card's change on a sum writes the new sum's lineage
+        # (`harness.studio_edit.change_events`), the store the executor reads.
+        self.provenance = provenance
         self.run_ledger = run_ledger
         self.early_mints = early_mints
         self.store = store
@@ -1153,6 +1253,7 @@ class _SegmentWork:
         approving: PlanProposed | None = None,
         restored: Sequence[PlanApproved] = (),
         replay: bool = False,
+        hold_removals: bool = False,
     ) -> None:
         self._runner = runner
         self._principal = principal
@@ -1168,6 +1269,8 @@ class _SegmentWork:
             surface_recorder=runner.surface_recorder,
             approving=approving,
             restored=restored,
+            places=places_offered(runner.place_options),
+            hold_removals=hold_removals,
         )
         # The drive's half of the translation: it marks each event with the
         # calls recorded before it, and reads nothing else.
@@ -1266,6 +1369,12 @@ class _SegmentWork:
                 return Outcome.FAILED, []
         return outcome, []
 
+    def owed(self) -> list[BaseModel]:
+        """The canvas update of a removal no frame reported, held by the
+        translator or marked on the conversation, on a stream with
+        `hold_removals`, and nothing on any other (`_Translator.release_removal`)."""
+        return [*self._translator.release_removal()]
+
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`), which
         records the turn failed on it. A cancellation of the work's own is a
@@ -1308,6 +1417,9 @@ class _RejectWork:
         """`done`, with the reply's frames."""
         return Outcome.DONE, self._frames
 
+    def owed(self) -> list[BaseModel]:
+        return []
+
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`)."""
         if not isinstance(error, Exception):
@@ -1328,11 +1440,13 @@ class _EditWork:
     `conversation.renew_now` is the heartbeat's, so a Stop posted on this
     instance reaches it at once.
 
-    A card's unit change (`harness.studio_edit.unit_events`) runs as this
+    A card's change in place (`harness.studio_edit.change_events`) runs as this
     work too, `events` giving its events in place of the edit's.
 
     The edit ends on its reply and `done`, a card swap
-    (`harness.studio_edit.CardSwap`) carrying its reply, or on a stream-fatal `error`
+    (`harness.studio_edit.CardSwap`) carrying its reply, the
+    `harness.studio_edit.ChangeRecorded` that follows a swap that does not
+    close it, or on a stream-fatal `error`
     frame that records the turn failed, and the work ends `done` or
     `failed`. A heartbeat that reads a Stop first cancels the edit and the
     work ends `cancelled`. One that finds the lease another's, or cannot
@@ -1371,7 +1485,9 @@ class _EditWork:
             nonlocal ended
             async for event in self._events():
                 emit(event)
-                if isinstance(event, (EditClosed, EditFailed, CardSwap)):
+                if isinstance(event, (EditClosed, EditFailed, ChangeRecorded)) or (
+                    isinstance(event, CardSwap) and event.closes
+                ):
                     ended = event
 
         editing = asyncio.create_task(edit())
@@ -1405,6 +1521,9 @@ class _EditWork:
     async def end(self, result: Outcome) -> tuple[Outcome, list[BaseModel]]:
         """How the edit ended; its frames are the events' own."""
         return result, []
+
+    def owed(self) -> list[BaseModel]:
+        return []
 
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for `error` (`_stream_fatal`), which
@@ -1668,12 +1787,18 @@ def _resume_conflict(detail: str) -> JSONResponse:
 
 
 def _stored_card(
-    component_id: str, entry: Mapping[str, Any], state: ConversationState, *, swapped: bool
+    component_id: str,
+    entry: Mapping[str, Any],
+    state: ConversationState,
+    *,
+    swapped: bool,
+    places: bool,
 ) -> StoredCard | None:
     """The card `entry`, a stored component of `state`
     (`ConversationState.components`), for the state read. A card on the
     canvas carries the unit its stored `UnitCard` can change within
-    (`stored_unit_change`), as `apply_unit`, which refuses a card off the
+    (`stored_unit_change`) and the changes it offers (`stored_card_changes`),
+    as `apply_unit` and `apply_change`, which refuse a card off the
     canvas, reads it. A card `swapped` in by the turn being read names the
     card whose slot it took (`REPLACED_CARD_KEY`), and a card drawn on a plan
     step's frame names that plan and step (`PLAN_LINK_KEY`). A `fact_summary`
@@ -1694,13 +1819,14 @@ def _stored_card(
             exc_info=True,
         )
         summary = None
-    unit_change = None
+    unit_change = card_changes = None
     if _on_canvas(state, component_id):
         try:
             unit_change = stored_unit_change(entry, state.turn_specs, state.turns)
+            card_changes = stored_card_changes(entry, state.turn_specs, state.turns, places=places)
         except Exception:
             logger.warning(
-                "studio state: component %s's stored unit offer cannot be read",
+                "studio state: component %s's stored offers cannot be read",
                 component_id,
                 exc_info=True,
             )
@@ -1718,6 +1844,7 @@ def _stored_card(
         revision=int(entry.get("revision") or 1),
         fact_summary=summary,
         unit_change=unit_change,
+        card_changes=card_changes,
         replaces=replaces if isinstance(replaces, str) else None,
         plan_version_id=plan["plan_version_id"] if linked else None,
         plan_step_id=plan["plan_step_id"] if linked else None,
@@ -1740,7 +1867,7 @@ def _open_user_message(state: ConversationState) -> str:
     return state.turn_user_message
 
 
-def _closed_turn(turn_index: int, state: ConversationState) -> ClosedTurn:
+def _closed_turn(turn_index: int, state: ConversationState, *, places: bool = False) -> ClosedTurn:
     """Turn `turn_index` of `state` as its stored record holds it, with the
     stored card of each card it made (`_stored_card`). The reply is the
     answer the user was shown with the notes and the basis line the stream
@@ -1764,7 +1891,11 @@ def _closed_turn(turn_index: int, state: ConversationState) -> ClosedTurn:
         card
         for component_id in component_ids
         if (entry := state.components.get(component_id)) is not None
-        and (card := _stored_card(component_id, entry, state, swapped=component_id in swapped))
+        and (
+            card := _stored_card(
+                component_id, entry, state, swapped=component_id in swapped, places=places
+            )
+        )
         is not None
     ]
     return ClosedTurn(
@@ -1776,7 +1907,59 @@ def _closed_turn(turn_index: int, state: ConversationState) -> ClosedTurn:
         approved=_approved_plans(record.get("approved")),
         error=record.get("error"),
         new_question=record.get("new_question"),
+        card_change=_read_card_change(record.get("card_change")),
     )
+
+
+def _card_change_mark(move: UnitMove | ChangeMove | None) -> dict[str, Any] | None:
+    """The `CardChangeMark` a turn changing a card in place keeps, as JSON."""
+    match move:
+        case UnitMove():
+            return {"component_id": move.component_id, "kind": "unit"}
+        case ChangeMove(change=PlacesChange() as change):
+            return {"component_id": move.component_id, "kind": "places", "role": change.role}
+        case ChangeMove():
+            return {"component_id": move.component_id, "kind": "window"}
+    return None
+
+
+def _offering(studio: StudioRunner) -> PlaceOptionsReader | None:
+    """The places reader while cards offer places (`places_offered`), else `None`."""
+    reader = studio.place_options
+    return reader if places_offered(reader) else None
+
+
+def _places_gated(studio: StudioRunner) -> bool:
+    """Whether cards offer no change of places: the deployment turned them off
+    (`STUDIO_PLACE_OPTIONS=false`), or stopped the offers on learning apis
+    serves no places door (`places_offered`). A change of places then answers
+    as `/places` does."""
+    return not places_offered(studio.place_options)
+
+
+def _places_not_served_response() -> JSONResponse:
+    """The 503 `capability_unavailable` of a deployment whose cards offer no
+    change of places, by its setting or because apis serves no options door."""
+    return _tool_error_response(
+        ToolError(
+            error=ErrorCode.CAPABILITY_UNAVAILABLE,
+            retry=RetryMode.DO_NOT_RETRY,
+            detail="Changing a card's places is not enabled on this deployment.",
+        ),
+        status_code=503,
+    )
+
+
+def _read_card_change(stored: Any) -> CardChangeMark | None:
+    """The `CardChangeMark` a turn record or the open turn keeps, `None` for
+    none or one that does not validate, which is logged."""
+    if not isinstance(stored, Mapping):
+        return None
+    try:
+        return CardChangeMark.model_validate(stored)
+    except ValidationError:
+        logger.warning("studio state: a stored card change mark does not validate", exc_info=True)
+        return None
 
 
 def _approved_plans(stored: Any) -> list[PlanApproved] | None:
@@ -1842,10 +2025,13 @@ def _read_status(standing: TurnStanding) -> TurnStatusName:
             return TurnStatusName.RUNNING
 
 
-def _conversation_read(stored: StoredConversation, *, since: int | None) -> ConversationRead:
+def _conversation_read(
+    stored: StoredConversation, *, since: int | None, places: bool = False
+) -> ConversationRead:
     """`GET /api/studio/state`'s answer for `stored`: the turn, the closed
     turns after `since` (none when it is `None`), the open pause, and the
-    canvas. A conversation's records are kept one per turn in turn order
+    canvas, its cards offering their places where `places` says Search's
+    places door is on. A conversation's records are kept one per turn in turn order
     (`ConversationState.close_turn`), so record `n - 1` is turn `n`'s."""
     state = stored.state
     standing = _stored_standing(stored) if state.turn_index else None
@@ -1861,6 +2047,7 @@ def _conversation_read(stored: StoredConversation, *, since: int | None) -> Conv
                 if status in (TurnStatusName.RUNNING, TurnStatusName.PAUSED)
                 else None
             ),
+            card_change=_read_card_change(state.turn_card_change),
             lease_live=stored.lease_seconds is not None,
             retry_after_seconds=(
                 math.ceil(stored.lease_seconds) if stored.lease_seconds is not None else None
@@ -1870,7 +2057,7 @@ def _conversation_read(stored: StoredConversation, *, since: int | None) -> Conv
         else None
     )
     indexes = range(since + 1, len(state.turns) + 1) if since is not None else range(0)
-    closed = [_closed_turn(index, state) for index in indexes[:MAX_CLOSED_SINCE]]
+    closed = [_closed_turn(index, state, places=places) for index in indexes[:MAX_CLOSED_SINCE]]
     pause = None
     if standing is not None and standing.standing is Standing.AWAITING_ANSWER:
         found = pause_entry(state.pending, stored.pause_id)
@@ -2383,6 +2570,7 @@ async def _replay_pause(
     hold: LockHold,
     settings: Settings,
     turn: ConversationState | None,
+    hold_removals: bool,
     stale: JSONResponse | None = None,
 ) -> Response:
     """Stream the later pause the paused `cursor` holds to a retry of the
@@ -2424,6 +2612,7 @@ async def _replay_pause(
             cursor=cursor,
             segment_id=segment_id,
             replay=True,
+            hold_removals=hold_removals,
         ),
         owners=studio.owners,
         store=studio.store,
@@ -2591,6 +2780,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     body.component_ref is not None
                     or body.apply_choice is not None
                     or body.apply_unit is not None
+                    or body.apply_change is not None
                 ):
                     # The client refers to state (a card to edit, to follow up
                     # on or to change the unit of, or a chip under an answer)
@@ -2625,7 +2815,9 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if isinstance(checked, JSONResponse):
                 hold.release()
                 return checked
-            moved = _unit_move(conversation, body.apply_unit) if body.apply_unit else None
+            moved = await _card_move(
+                conversation, body, places=_offering(studio), places_gated=_places_gated(studio)
+            )
             if isinstance(moved, JSONResponse):
                 hold.release()
                 return moved
@@ -2633,7 +2825,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             pick = body.apply_choice
             user_message = body.message if pick is None else f"count {chip_label}"
             if moved is not None:
-                user_message = _unit_request_line(moved)
+                user_message = _change_request_line(moved)
             # The conversation's identity, set in the request task's context
             # (`_set_turn_context` sets it again with the rest of the turn's)
             # before the turn begins, so the turn records the caller its MCP
@@ -2753,7 +2945,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     studio.store, principal, body.conversation_id, hold, claimed, turn=begun
                 )
                 return checked
-            moved = _unit_move(work, body.apply_unit) if body.apply_unit else None
+            moved = await _card_move(
+                work,
+                body,
+                places=_offering(studio),
+                listed=moved.listed if isinstance(moved, ChangeMove) else None,
+                places_gated=_places_gated(studio),
+            )
             if isinstance(moved, JSONResponse):
                 await _release_claim(
                     studio.store, principal, body.conversation_id, hold, claimed, turn=begun
@@ -2762,7 +2960,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             chip_label = checked
             user_message = body.message if pick is None else f"count {chip_label}"
             if moved is not None:
-                user_message = _unit_request_line(moved)
+                user_message = _change_request_line(moved)
             left_open = await studio.turns.open_cursor(principal, body.conversation_id)
             if left_open is not None:
                 if not work.turn_recorded:
@@ -2790,6 +2988,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             if body.client_features is not None:
                 work.client_features = declared_features(body.client_features)
             work.turn_user_message = user_message
+            work.turn_card_change = _card_change_mark(moved)
             if moved is not None:
                 # The change is the user's pick, not words Search should read.
                 work.turn_user_words = ""
@@ -2859,8 +3058,8 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
             assert conversation is not None
             _set_turn_context(principal, body.conversation_id, conversation, settings)
             if moved is not None:
-                # A card's unit change runs in code as an edit does: no graph,
-                # no model, the card redrawn in its slot.
+                # A card's change of unit, years or places runs in code as an
+                # edit does: no graph, no model, the card redrawn in its slot.
                 return open_stream(
                     _EditWork(
                         studio,
@@ -2868,11 +3067,13 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                         conversation=conversation,
                         segment_id=segment_id,
                         events=functools.partial(
-                            unit_events,
+                            change_events,
                             recorder=studio.recorder,
                             surface=studio.definition_surface,
                             conversation=conversation,
                             move=moved,
+                            places=places_offered(studio.place_options),
+                            provenance=studio.provenance,
                         ),
                     ),
                     owners=studio.owners,
@@ -2902,6 +3103,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                             conversation=conversation,
                             component_id=body.component_ref.component_id,
                             message=body.message,
+                            places=places_offered(studio.place_options),
                         ),
                     ),
                     owners=studio.owners,
@@ -2921,6 +3123,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     conversation=conversation,
                     cursor=cursor,
                     segment_id=segment_id,
+                    hold_removals=body.hold_removals,
                 ),
                 owners=studio.owners,
                 store=studio.store,
@@ -3398,6 +3601,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     segment_id=segment_id,
                     hold=hold,
                     settings=settings,
+                    hold_removals=body.hold_removals,
                     turn=claiming,
                 )
             pending = work.pending[body.interrupt_id]
@@ -3606,6 +3810,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     ),
                     approving=None if taken is not None else approving,
                     restored=() if taken is None else (taken,),
+                    hold_removals=body.hold_removals,
                 ),
                 owners=studio.owners,
                 store=studio.store,
@@ -3847,6 +4052,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     cursor=claimed,
                     segment_id=segment_id,
                     hold=hold,
+                    hold_removals=body.hold_removals,
                     settings=settings,
                     turn=claiming,
                     stale=_resume_conflict("the conversation changed before this resume was saved"),
@@ -3897,6 +4103,7 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
                     segment_id=segment_id,
                     approving=None if taken is not None else approving,
                     restored=_turn_approvals(conversation, taken),
+                    hold_removals=body.hold_removals,
                 ),
                 owners=studio.owners,
                 store=studio.store,
@@ -3992,8 +4199,74 @@ def create_studio_router(studio: StudioRunner, *, settings: Settings) -> APIRout
         stored = await studio.store.peek(principal, conversation_id)
         if stored is None:
             return _unknown_conversation_response(conversation_id)
-        read = _conversation_read(stored, since=since)
+        read = _conversation_read(stored, since=since, places=places_offered(studio.place_options))
         return JSONResponse(content=json.loads(read.model_dump_json(exclude_none=True)))
+
+    @router.get("/places")
+    async def places(  # noqa: PLR0911 -- one distinct refusal per documented answer
+        conversation_id: str,
+        component_id: str,
+        role: str,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        """The places role `role` of card `component_id` can change to
+        (`harness.wire.PlacesOptions`), read from Search's places door
+        (`harness.place_options.read_role_places`) for the identity the card
+        reads now, its Search block's with the places and years its scope names
+        (`harness.card_unit.effective_identity`), read with no lock and no
+        lease, as `/state` reads.
+
+        An unknown conversation answers 404 `not_found`; a card off the
+        canvas or offering no change 422 `scope_choice_stale`, pointer
+        `/component_id`; a role the card does not offer 422
+        `change_not_offered`, pointer `/role`, and so does a role whose
+        places Search refuses to list (a 400 or 422); a door that fails or
+        misses its deadline 503 `transient_unavailable`
+        (`place_options_unavailable`), to retry; and a deployment with the
+        door off (`STUDIO_PLACE_OPTIONS=false`), or an apis learnt to serve
+        no options door (`harness.place_options.places_offered`), 503
+        `capability_unavailable`."""
+        principal = principal_for(authorization, settings=settings)
+        stored = await studio.store.peek(principal, conversation_id)
+        if stored is None:
+            return _unknown_conversation_response(conversation_id)
+        reader = _offering(studio)
+        if reader is None:
+            return _places_not_served_response()
+        held = changeable(stored.state, component_id, None, places=True)
+        if len(held) == 2:
+            constraint, detail = held
+            return _places_refusal(constraint, detail, pointer="/component_id")
+        card, block, offer, _ = held
+        if not any(p.role == role for p in offer.places or ()):
+            return _places_refusal(
+                "change_not_offered",
+                "The places of this card cannot change there.",
+                pointer="/role",
+            )
+        try:
+            listed = await read_role_places(
+                reader,
+                identity=effective_identity(card, block),
+                role=role,
+                conversation_id=conversation_id,
+                component_id=component_id,
+            )
+        except PlacesNotServedError:
+            return _places_not_served_response()
+        except PlacesRefusedError:
+            return _places_refusal(
+                "change_not_offered", "The places of this card cannot change.", pointer="/role"
+            )
+        except PlacesUnavailableError:
+            return _places_unavailable_response(PLACES_UNREAD_NOTE, pointer="/role")
+        answer = PlacesOptions(
+            component_id=component_id,
+            role=role,
+            options=[PlaceOption(id=ref, label=label) for ref, label in listed.places],
+            truncated=listed.truncated,
+        )
+        return JSONResponse(content=answer.model_dump(mode="json"))
 
     # Each body is bounded before it is parsed (`_BoundedRoute`).
     router.add_api_route(

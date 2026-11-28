@@ -392,6 +392,12 @@ class Work[E, R](Protocol):
         `abandoned`, with no ending frame."""
         ...
 
+    def owed(self) -> list[BaseModel]:
+        """The frames the work still owes the stream, numbered, taken once.
+        The owner sends them before the frame that ends the stream, however
+        the work ended (`_Owner.run`)."""
+        ...
+
     def fatal(self, error: BaseException) -> ErrorFrame:
         """The stream-fatal frame for work that raised `error`, or that ended
         with no ending frame its outcome needs. It records the turn failed
@@ -552,6 +558,7 @@ class _Owner[E, R]:
         """Run the segment to its end and close it; return how it ended."""
         try:
             finish = await self._work_to_end()
+            await self._settle()
             close = await self._close(finish)
             return ending(WorkEnd(finish, self._held), close)
         except Exception:
@@ -563,12 +570,38 @@ class _Owner[E, R]:
                 self._conversation_id,
                 self._segment_id,
             )
-            self._first_seq = self._conversation.seq
             if self._task is not None and not self._task.done():
                 await self._stop(self._task)
+            # The transient frame goes out in every case, so what the work owes
+            # goes ahead of it. A failure to take it is logged.
+            try:
+                await self._settle()
+            except Exception:
+                logger.exception(
+                    "studio stream: conversation %s segment %s's owed frames could not be sent",
+                    self._conversation_id,
+                    self._segment_id,
+                )
+            self._first_seq = self._conversation.seq
             return Ending(_transient_frame(), Status.UNCLOSED, saved=False)
         finally:
             self._work.close()
+
+    async def _settle(self) -> None:
+        """Take the frames the work still owes (`Work.owed`) and put them on
+        the channel ahead of the held ending frame, which `closing_frames`
+        sends after the closing write. Every way the work ends comes through
+        here, and every one sends them: `done`, `paused`, `failed`,
+        `unclosed` (a raised drive or a missing ending frame, on the work's
+        fatal frame), `cancelled`, `abandoned`, `lost` and `left` (where no
+        client reads them, and the work keeps none).
+
+        A lost segment sends them too. The removal they report is process
+        state (`ConversationState._removal_unreported`), so the instance that
+        took the lease cannot report it. They carry a manifest this instance
+        committed, so it is never newer than the stored one, and a page drops
+        a manifest no newer than one it rendered."""
+        await self._take(self._work.owed())
 
     async def _work_to_end(self) -> Finish:
         """Translate the drive's events until it ends, the client leaves, or

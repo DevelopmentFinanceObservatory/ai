@@ -3145,10 +3145,10 @@ def test_each_workflow_step_runs_for_a_step_the_card_shows(
     decision: DecisionFactory, name: str
 ) -> None:
     """Every step `card_steps` names is a row of the card, so an Activity line
-    naming one links to a step the reader sees: each row's step runs for
+    naming one links to a step the reader sees. Each row's step runs for
     itself, and the rolling copy `debt_history`, which has no row, for `debt`,
-    the step it copies. The split plan and the three plans a live harness
-    proposed (`_recorded_plan`)."""
+    the step it copies. The plans checked are the split plan and the three
+    plans a live harness proposed (`_recorded_plan`)."""
     plan = stored_split_plan(decision) if name == "split" else _recorded_plan(name)
     assert plan.workflow is not None
 

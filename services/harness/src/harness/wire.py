@@ -47,11 +47,13 @@ from pydantic import (
     ConfigDict,
     Field,
     JsonValue,
+    SerializerFunctionWrapHandler,
     TypeAdapter,
     ValidationError,
     ValidationInfo,
     ValidatorFunctionWrapHandler,
     WrapValidator,
+    model_serializer,
     model_validator,
 )
 from pydantic.json_schema import WithJsonSchema
@@ -963,6 +965,143 @@ class UnitChange(_WireModel):
     offer: UnitOffer
 
 
+class WindowOffer(_WireModel):
+    """The years a card can change to: the first and last year it draws
+    (`start_year`, `end_year`, equal on a card showing one year) and the
+    first and last year its data holds (`first_year`, `last_year`), with the
+    years between those two that hold no data (`missing_years`, absent when
+    none is missing or the source states none). `single` is true on a card
+    that shows one value per series, such as a key number, whose years change
+    one at a time. `start_year` and `end_year` both name the one year it
+    draws, and a change names one year as both bounds. Absent on every other
+    card."""
+
+    start_year: int
+    end_year: int
+    first_year: int
+    last_year: int
+    missing_years: list[int] | None = None
+    single: Literal[True] | None = None
+
+    @model_validator(mode="after")
+    def _a_single_offer_names_one_year(self) -> WindowOffer:
+        if self.single and self.start_year != self.end_year:
+            raise ValueError("a single window names the one year the card draws")
+        return self
+
+
+class PlaceOption(_WireModel):
+    """One place a card can show: `id`, the entity's ref as Search states it,
+    which `apply_change` names, and its `label`."""
+
+    id: str = Field(min_length=1)
+    label: str
+
+
+class RoleLabel(_WireModel):
+    """What the served data calls one and several of a role's places, such
+    as `debtor` and `debtors`, in the data's own words and case. The data
+    may name one form only, so either member may be absent, never both."""
+
+    singular: str | None = Field(default=None, min_length=1)
+    plural: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _names_one_form(self) -> RoleLabel:
+        if self.singular is None and self.plural is None:
+            raise ValueError("a role label names its singular, its plural or both")
+        return self
+
+
+class PlacesOffer(_WireModel):
+    """A role of a card whose places can change: the role (`role`, as the
+    card's spec names it, such as `observationAbout`, `origin` or
+    `destination`), the places it shows now (`chosen`), and whether it takes
+    several at once (`multiple`, true where the role's places are the card's
+    series; false where the card shows one place and a change swaps it). The
+    places it can change to are read on demand (`PlacesOptions`).
+
+    `max` is the most places the card can draw for the role, from the
+    chart's own limit (`harness.chart_binding.chart_draws`): 1 where
+    `multiple` is false. A change naming more is refused before any fetch.
+    A card stored before it was kept has none.
+
+    `label` is what the card's served data calls the role's places
+    (`RoleLabel`), read from its retrieval's coverage; absent where the data
+    names none."""
+
+    role: str = Field(min_length=1)
+    multiple: bool
+    chosen: list[PlaceOption] = Field(min_length=1)
+    max: int | None = Field(default=None, ge=1)
+    label: RoleLabel | None = None
+
+
+class PlacesOptions(_WireModel):
+    """The answer of `GET /api/studio/places`: the places role `role` of card
+    `component_id` can change to, in label order, at most 300, `truncated`
+    when Search listed more. `chosen` places may be among them."""
+
+    component_id: str
+    role: str
+    options: list[PlaceOption]
+    truncated: bool
+
+
+class CardChanges(_WireModel):
+    """Set on a `component.created` or `component.revised` frame, and on a
+    stored card, whose card draws one retrieval's own frame: the spec the
+    card reads (`spec_id`, the one `apply_change` names) and each change it
+    offers besides its unit: other years (`window`) and other places, one
+    entry per role (`places`).
+    A member is absent when the card cannot change that axis."""
+
+    spec_id: str = Field(min_length=1)
+    window: WindowOffer | None = None
+    places: list[PlacesOffer] | None = None
+
+
+class WindowChange(_WireModel):
+    """Draw the card over the years `start_year` to `end_year`, both kept, or
+    over one year when they are equal."""
+
+    kind: Literal["window"]
+    start_year: int
+    end_year: int
+
+    @model_validator(mode="after")
+    def _a_range(self) -> WindowChange:
+        if self.end_year < self.start_year:
+            raise ValueError("end_year must not come before start_year")
+        return self
+
+
+class PlacesChange(_WireModel):
+    """Show the places `entities`, ids from the card's `PlacesOffer`, in role `role`."""
+
+    kind: Literal["places"]
+    role: str = Field(min_length=1)
+    entities: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1, max_length=50)
+
+
+type CardChange = Annotated[WindowChange | PlacesChange, Field(discriminator="kind")]
+
+
+class ApplyChange(_WireModel):
+    """A card's change of years or places, with no message text: the card
+    (`component_id`) and the spec its `card_changes` names (`spec_id`), and
+    the change (`change`). The route refuses it 422 with pointer
+    `/apply_change`: `scope_choice_stale` when the card is off the canvas or
+    reads another spec, `change_not_offered` for a value outside the card's
+    offer or the one it shows, and `change_no_data` for years the card's data
+    holds none of. Every change replaces the card under a new id, so the
+    card's id is what tells a stale request."""
+
+    component_id: str = Field(min_length=1)
+    spec_id: str = Field(min_length=1)
+    change: CardChange
+
+
 class ApplyUnit(_WireModel):
     """A card's unit change, with no message text: the conversation turn
     that drew the card as the client counts it (`turn`, from 1), the card
@@ -1034,8 +1173,9 @@ class TurnRequest(_WireModel):
     answer used, with no
     search (`harness.graph.switch.apply_stored_choice`). It cannot come with
     a message, seeds or a card reference. `apply_unit` is the same for a
-    card's unit change (`ApplyUnit`) and cannot come with `apply_choice`. A
-    request carries `message`, `apply_choice` or `apply_unit`.
+    card's unit change (`ApplyUnit`), and `apply_change` for a change of its
+    years or places (`ApplyChange`). A request carries exactly one of
+    `message`, `apply_choice`, `apply_unit` and `apply_change`.
 
     `client_features` names the question forms the client renders
     (`ClientFeature`); a value the harness does not know is ignored. The
@@ -1057,6 +1197,15 @@ class TurnRequest(_WireModel):
     `turn_moved` when the conversation's latest turn is another, checked
     under the row lock every turn's claim takes, so of two pages sending the
     same follow-up after turn N at most one begins a turn.
+
+    `hold_removals` asks the stream to hold the `composition.updated` of a
+    card removal until the first of three points in the segment: right
+    after the next `make_charts` running line that announces a card in
+    `coming`, ahead of the next card that lands from any step, or the
+    segment's end. Absent or false, the update goes out as the removal's
+    answer is translated, ahead of the removal's closing line. It applies
+    to the stream this request opens, and `InterruptResponse` and
+    `ResumeRequest` carry it the same way.
     """
 
     kind: Literal["turn.request"]
@@ -1074,6 +1223,7 @@ class TurnRequest(_WireModel):
     auto_add: bool = True
     apply_choice: ApplyChoice | None = None
     apply_unit: ApplyUnit | None = None
+    apply_change: ApplyChange | None = None
     after_turn: int | None = Field(default=None, ge=0)
     client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
     prompt_source: Annotated[
@@ -1081,26 +1231,30 @@ class TurnRequest(_WireModel):
         BeforeValidator(_known_prompt_source),
         WithJsonSchema({"enum": [*(source.value for source in PromptSource), None]}),
     ] = None
+    hold_removals: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def _a_chip_comes_alone(self) -> TurnRequest:
-        """Refuse a request with none of `message`, `apply_choice` and
-        `apply_unit`, two chips together, and a chip beside message text,
-        seeds or a card reference."""
+        """Refuse a request with none of `message`, `apply_choice`,
+        `apply_unit` and `apply_change`, two of the three chips together, and
+        a chip beside message text, seeds or a card reference."""
         chips = [
             name
             for name, value in (
                 ("apply_choice", self.apply_choice),
                 ("apply_unit", self.apply_unit),
+                ("apply_change", self.apply_change),
             )
             if value is not None
         ]
         if not chips:
             if "message" not in self.model_fields_set:
-                raise ValueError("turn.request requires message, apply_choice or apply_unit")
+                raise ValueError(
+                    "turn.request requires message, apply_choice, apply_unit or apply_change"
+                )
             return self
         if len(chips) > 1:
-            raise ValueError("apply_choice and apply_unit do not come together")
+            raise ValueError(f"{' and '.join(chips)} do not come together")
         stated = [
             name
             for name, value in (
@@ -1241,6 +1395,8 @@ class InterruptResponse(_WireModel):
     # A `switch` of a row offering a unit: the unit the user picked.
     unit: UnitChoice | None = None
     client_features: list[str] | None = Field(default=None, max_length=MAX_CLIENT_FEATURES)
+    # Whether the stream holds a removal's canvas update (`TurnRequest`).
+    hold_removals: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def _switch_members_come_with_switch(self) -> InterruptResponse:
@@ -1408,6 +1564,8 @@ class ResumeRequest(_WireModel):
     schema_version: Literal[1]
     conversation_id: str
     turn_index: int = Field(ge=1)
+    # Whether the stream holds a removal's canvas update (`TurnRequest`).
+    hold_removals: bool = Field(default=False, strict=True)
 
 
 StudioRequest = Annotated[
@@ -1472,6 +1630,15 @@ class PlanDecisionOption(_WireModel):
     years: list[tuple[int, int]] | None = None
 
 
+# What a plan decision settles, where the harness knows it: the unit (a unit
+# question's row, or a decision fixing the unit or its price basis), the years
+# (`window`, the word `apply_change` and `card_change` use), the places, a
+# scope choice's axis, or how pinned sources' flows are counted.
+type DecisionKind = Literal[
+    "unit", "window", "places", "sector", "region", "measure_basis", "provider", "count"
+]
+
+
 class PlanDecision(_WireModel):
     """One choice made on the user's behalf, with its alternatives and a
     one-line reason -- what makes the plan reviewable.
@@ -1504,6 +1671,10 @@ class PlanDecision(_WireModel):
     decision no requirement cites applies to the whole plan and names every
     step. A replan reuses step ids, so a step is named by the plan's
     `plan_version_id` and its id together.
+
+    `kind` says what the decision settles (`DecisionKind`), so a client can
+    tell it from a row a card shows for the same axis; absent where the
+    harness does not know.
     """
 
     id: str
@@ -1517,6 +1688,7 @@ class PlanDecision(_WireModel):
     options: list[PlanDecisionOption] | None = None
     unit: UnitOffer | None = None
     step_ids: list[str] | None = None
+    kind: DecisionKind | None = None
 
     @model_validator(mode="after")
     def _scope_members_come_together(self) -> PlanDecision:
@@ -1693,7 +1865,7 @@ class PlanApprovedChoice(_WireModel):
     (`chosen`) and, when a switch of the turn changed it, the label it held
     on the card the user first switched from (`changed_from`), and the ids
     of the plan steps it applies to (`step_ids`, as `PlanDecision.step_ids`
-    states them)."""
+    states them), and what it settles (`kind`, as `PlanDecision.kind`)."""
 
     # Delta 24 (v1.9): a `plan.approved` stored before it has no `choice_id`.
     choice_id: str
@@ -1702,6 +1874,8 @@ class PlanApprovedChoice(_WireModel):
     changed_from: str | None = None
     # A `plan.approved` stored before choices named their steps has none.
     step_ids: list[str] | None = None
+    # As `PlanDecision.kind`; absent from a `plan.approved` stored before it.
+    kind: DecisionKind | None = None
 
 
 class PlanApproved(_WireModel):
@@ -1742,6 +1916,19 @@ class StepProgress(_WireModel):
     total: int = Field(ge=1)
 
 
+class ComingCard(_WireModel):
+    """A card a running step may draw, for the page to hold a place for:
+    `placeholder_id`, `"<step_id>.<entry>"` with the entry's index in the
+    call's `charts`, which the card's `created_from.placeholder_id` names
+    when it lands; the card's `type`, which is the type that lands; and its
+    `title` as the call asked it, which the card's own can extend (with the
+    period `make_charts` adds, for one)."""
+
+    placeholder_id: str = Field(min_length=1)
+    type: Literal["line_chart", "bar_chart", "stat_card", "table"]
+    title: str
+
+
 class ActivityStep(_WireModel):
     """One execution step -- the only progress channel (Activity tab and the
     "2/3 complete" line). A step-scoped failure surfaces here as
@@ -1763,6 +1950,12 @@ class ActivityStep(_WireModel):
     duration_ms: int | None = None
     produced: StepProduced | None = None
     progress: StepProgress | None = None
+    # On a `make_charts` line's running frame only: the cards the call may
+    # draw, one per chart it asks for up to the most one call draws
+    # (`harness.chart_binding.MAX_CHARTS_PER_CALL`), in its order
+    # (`ComingCard`). A placeholder ends when a card names it, when this line
+    # closes, or when the stream ends.
+    coming: list[ComingCard] | None = Field(default=None, min_length=1)
     # The plan this line runs a step of and that step (`PlanStep.id`), both
     # or neither; absent on a line outside a plan. A replan reuses step ids,
     # so a step is named by the two together.
@@ -1779,12 +1972,16 @@ class CreatedFrom(_WireModel):
     drawn from a frame no plan step produced names no plan. A replan reuses
     step ids, so a step is named by the two together. A card that takes
     another's slot (`ComponentCreated.replaces`) keeps the plan of the card
-    it replaced."""
+    it replaced.
+
+    `placeholder_id` names the `ComingCard` of the running `make_charts`
+    line this card fills, absent on a card no such line announced."""
 
     step_id: str
     message_seq: int | None = Field(default=None, ge=0)
     plan_version_id: str | None = None
     plan_step_id: str | None = None
+    placeholder_id: str | None = Field(default=None, min_length=1)
 
 
 class PlanLink(TypedDict):
@@ -1814,6 +2011,9 @@ class ComponentCreated(_WireModel):
     created_from: CreatedFrom | None = None
     # Set only when the card reads from one convertible spec.
     unit_change: UnitChange | None = None
+    # Set only when the card draws one retrieval's own frame and can change
+    # its years or places.
+    card_changes: CardChanges | None = None
     # The card this one took the canvas slot of (a unit change, or an Edit Card
     # rebuild): the new card holds that card's block, pin, card meta and layout
     # hint membership, and the old card leaves the canvas.
@@ -1821,12 +2021,17 @@ class ComponentCreated(_WireModel):
 
 
 def component_created(
-    component: dict[str, Any], *, step_id: str, plan: PlanLink | None = None
+    component: dict[str, Any],
+    *,
+    step_id: str,
+    plan: PlanLink | None = None,
+    placeholder_id: str | None = None,
 ) -> ComponentCreated:
     """The `component.created` frame for `component` (a `write_component`
     result's own `component` member), with `seq` 0 until the caller stamps it.
-    `step_id` is the step that produced it and `plan` the plan step its frame
-    came from, unless the component names its own `created_from`.
+    `step_id` is the step that produced it, `plan` the plan step its frame
+    came from and `placeholder_id` the `ComingCard` it fills, unless the
+    component names its own `created_from`.
 
     Raises:
         ValidationError: `component` does not satisfy the contract above.
@@ -1836,7 +2041,12 @@ def component_created(
             **component,
             "event": "component.created",
             "seq": 0,
-            "created_from": component.get("created_from") or {"step_id": step_id, **(plan or {})},
+            "created_from": component.get("created_from")
+            or {
+                "step_id": step_id,
+                **(plan or {}),
+                **({"placeholder_id": placeholder_id} if placeholder_id else {}),
+            },
         }
     )
 
@@ -1886,7 +2096,14 @@ def log_unreadable_card(
 class ComponentRevised(_WireModel):
     """Same component_id, incremented revision. `payload` may be omitted when
     only presentation fields changed -- apply `changed` against the revision
-    you hold."""
+    you hold.
+
+    `card_changes` is set on a revise in place through Edit Card: the years
+    and places the revised card offers, in `component.created`'s shape, or
+    `null` when it offers neither, including a revised card that cannot be
+    read as one that offers changes. It is absent on other revises. The
+    frame carries no `unit_change`, since a revise keeps the card's spec, its
+    sum and the Search block its unit offer reads."""
 
     event: Literal["component.revised"]
     seq: int = Field(ge=0)
@@ -1895,6 +2112,16 @@ class ComponentRevised(_WireModel):
     changed: list[str] = Field(min_length=1)
     fact_summary: FactSummary
     payload: dict[str, Any] | None = None
+    card_changes: CardChanges | None = None
+
+    @model_serializer(mode="wrap")
+    def _keeps_no_offers(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # The stream drops `None` members, and a set `card_changes` of `None`
+        # says the revised card offers nothing, which absence does not.
+        dumped = handler(self)
+        if "card_changes" in self.model_fields_set and self.card_changes is None:
+            dumped["card_changes"] = None
+        return dumped
 
 
 def component_revised(
@@ -2142,6 +2369,7 @@ class TurnState(_WireModel):
     trace_id: str
     user_message: str
     approved: list[PlanApproved] | None = None
+    card_change: CardChangeMark | None = None
     lease_live: bool
     retry_after_seconds: int | None = Field(default=None, ge=0)
 
@@ -2153,12 +2381,13 @@ class StoredCard(_WireModel):
     card holds no `payload` or `provenance`. The component id reads the
     resolved revision from the presentation platform.
 
-    `unit_change` and `replaces` have `ComponentCreated`'s names and
-    shapes. `unit_change` is the card's offer now, as `apply_unit` reads it
-    from what the conversation keeps with the card, set while the card is on
-    the canvas. `replaces` names the card whose canvas slot this one took,
-    on the closed turn that swapped it in. A card an earlier release stored
-    carries no `replaces`.
+    `unit_change`, `card_changes` and `replaces` have `ComponentCreated`'s
+    names and shapes. `unit_change` and `card_changes` are the card's offers
+    now, as `apply_unit` and `apply_change` read them from what the
+    conversation keeps with the card, set while the card is on the canvas.
+    `replaces` names the card whose canvas slot this one took, on the closed
+    turn that swapped it in. A card an earlier release stored carries no
+    `replaces`.
 
     `plan_version_id` and `plan_step_id` are the plan and plan step its
     `component.created` named in `created_from` (`CreatedFrom`), both or
@@ -2171,9 +2400,21 @@ class StoredCard(_WireModel):
     revision: int = Field(ge=1)
     fact_summary: FactSummary | None = None
     unit_change: UnitChange | None = None
+    card_changes: CardChanges | None = None
     replaces: str | None = None
     plan_version_id: str | None = None
     plan_step_id: str | None = None
+
+
+class CardChangeMark(_WireModel):
+    """On a state read's turn, a turn that changed a card in place
+    (`apply_unit` or `apply_change`): the card the request named
+    (`component_id`, the one the change replaced), what changed (`kind`), and
+    for a change of places the role (`role`)."""
+
+    component_id: str
+    kind: Literal["unit", "window", "places"]
+    role: str | None = None
 
 
 class ClosedTurn(_WireModel):
@@ -2196,6 +2437,7 @@ class ClosedTurn(_WireModel):
     approved: list[PlanApproved] | None = None
     error: str | None = None
     new_question: str | None = None
+    card_change: CardChangeMark | None = None
 
 
 class PendingPause(_WireModel):

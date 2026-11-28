@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import re
 import time
@@ -56,6 +57,8 @@ from urllib.parse import quote
 import httpx2
 
 from common.apis_auth import ApisAuthError, AuthProvider
+
+logger = logging.getLogger(__name__)
 
 # apis' principal header (`principal_header`, default `x-dfo-principal`).
 PRINCIPAL_HEADER = "x-dfo-principal"
@@ -70,6 +73,7 @@ _RENDER_DATA_PATH = f"{_RENDER_PATH}/data"
 _CAPABILITIES_PATH = "/api/datasets/capabilities"
 _STATED_SCOPE_PATH = "/api/search/stated-scope"
 _SEARCH_CAPABILITIES_PATH = "/api/search/capabilities"
+_SEARCH_OPTIONS_PATH = "/api/search/options"
 
 # The capabilities field naming the engine apis' analysis runner computes with.
 _EXECUTION_IDENTITY_FIELD = "analysis_execution_identity"
@@ -770,6 +774,67 @@ class LiveApisClient:
         if any(reading is None for reading in read):
             raise _invalid(response, "stated scope answer")
         return tuple(reading for reading in read if reading is not None)
+
+    async def read_entity_options(
+        self, *, identity: Mapping[str, Any], role: str
+    ) -> tuple[tuple[tuple[str, str], ...], bool]:
+        """The places of the same kind Search lists for role `role` of
+        `identity` (`POST /api/search/options`, `for: {role, scope: peers}`),
+        each as `(ref, label)`, in the order Search lists them, and whether
+        Search capped the list (`truncated`). Search lists every place with
+        data at any date, so when `identity`'s `requested_window` is a range
+        the call asks for each place's coverage (`include_coverage`), which
+        Search counts over that range, and a place whose coverage says it
+        holds no data there is left out. One listed with no coverage, which
+        Search answers when its coverage read fails, is kept. Under any other
+        window every listed place holds data in it, so the call asks for no
+        coverage. Asking for it adds up to about 1 s to a first read. A listed
+        entry whose value names no ref is left out, and so is one outside the
+        contract (an item or `value` that is no object, or a `ref` that is no
+        object naming a ref with a text label), which is logged, so one bad
+        entry leaves the rest of the list readable.
+
+        Raises:
+            LiveApisError: apis refused the call, or answered a body with no
+                `options.items` list (`response_invalid`).
+        """
+        window = identity.get("requested_window")
+        ranged = isinstance(window, Mapping) and window.get("kind") == "range"
+        response = await self._send(
+            "POST",
+            _SEARCH_OPTIONS_PATH,
+            json={
+                "schema_version": 1,
+                "identity": dict(identity),
+                "for": {"role": role, "scope": "peers"},
+                "include_coverage": ranged,
+            },
+        )
+        options = _json_object(response, "options answer").get("options")
+        items = options.get("items") if isinstance(options, dict) else None
+        if not isinstance(items, list):
+            raise _invalid(response, "options answer")
+        listed = []
+        for index, item in enumerate(items):
+            value = item.get("value") if isinstance(item, dict) else None
+            if isinstance(value, dict) and value.get("ref") is None:
+                continue
+            coverage = item.get("coverage") if isinstance(item, dict) else None
+            if isinstance(coverage, dict) and coverage.get("has_data") is False:
+                continue
+            ref: object = value.get("ref") if isinstance(value, dict) else None
+            named = ref.get("ref") if isinstance(ref, dict) else None
+            label = ref.get("label") if isinstance(ref, dict) else None
+            if not isinstance(named, str) or not named or not isinstance(label, str | None):
+                logger.warning(
+                    "options answer item %d is outside the contract and is left out: %.200r",
+                    index,
+                    item,
+                )
+                continue
+            listed.append((named, label or named))
+        assert isinstance(options, dict)
+        return tuple(listed), options.get("truncated") is True
 
     # Wire.
 

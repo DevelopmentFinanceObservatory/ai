@@ -985,8 +985,8 @@ def frame_plan_step(entry: Mapping[str, Any]) -> str | None:
 
 def forget_plan_steps(state: SessionState, frame_ids: Iterable[str]) -> None:
     """Drop the plan step from the entries of `frame_ids` in `state`
-    (`ORCHESTRATOR_FRAMES_KEY`): the frames are handed out again outside a
-    plan, as a `fetch` the turn already made gives its frames back."""
+    (`ORCHESTRATOR_FRAMES_KEY`), for frames handed out again outside a plan,
+    as a `fetch` the turn already made gives its frames back."""
     frames = stored_mapping(state, ORCHESTRATOR_FRAMES_KEY)
     marked = [
         f for f in frame_ids if isinstance(frames.get(f), Mapping) and FRAME_PLAN_STEP in frames[f]

@@ -1075,6 +1075,10 @@ async def _finish_mint_response(
         structured_content["stat_var_count"] = outcome.stat_var_count
     structured_content["summed_stat_var_count"] = None if summed is None else summed.count
     structured_content["summed_stat_var_label"] = None if summed is None else summed.label
+    # The name of each place this call's scope resolved, by dcid, which the
+    # harness labels a card's places by where its Search block names none
+    # (`harness.card_unit.unit_card`).
+    structured_content["entity_labels"] = dict(entity_labels)
     return ToolResult(
         # The digest text stays first, so `text_of(result)` -- which reads
         # `content[0]` -- keeps working; the resource links follow it.

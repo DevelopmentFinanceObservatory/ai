@@ -689,7 +689,9 @@ async def test_a_turn_past_its_call_cap_ends_on_the_cap_sentence_with_no_further
 async def test_a_chart_call_writes_each_chart_and_a_refused_write_fails_its_line() -> None:
     """Each chart of one `make_charts` call is its own write and its own
     Activity line: a refused write fails its line while the turn completes,
-    and the card that landed names the line it came from."""
+    and the card that landed names the line it came from. The call's running
+    line announces both cards; the card that landed names its own, and the
+    refused one is named by no card as the call's line closes failed."""
     executor = ScriptedExecutor(
         [
             *_card_results(),
@@ -731,8 +733,63 @@ async def test_a_chart_call_writes_each_chart_and_a_refused_write_fails_its_line
     (created,) = [f for f in frames if f["event"] == "component.created"]
     assert created["component_id"] == "cmp_01test0001"
     assert created["created_from"]["step_id"] == lines[0]["step_id"]
+    (running,) = [
+        f
+        for f in frames
+        if f["event"] == "activity.step"
+        and f.get("tool") == "make_charts"
+        and f["status"] == "running"
+    ]
+    assert running["step_id"] == call["step_id"]
+    assert running["coming"] == [
+        {"placeholder_id": f"{call['step_id']}.0", "type": "stat_card", "title": "Aid to Kenya"},
+        {
+            "placeholder_id": f"{call['step_id']}.1",
+            "type": "stat_card",
+            "title": "Aid to Kenya (2)",
+        },
+    ]
+    assert created["created_from"]["placeholder_id"] == f"{call['step_id']}.0"
+    assert "coming" not in call
     done = _frame(frames, "done")
     assert [b["component_id"] for b in done["composition"]["blocks"]] == ["cmp_01test0001"]
+
+
+async def test_two_charts_of_one_title_and_type_each_name_their_own_placeholder() -> None:
+    """Two charts asked under one title and type, apart only in their
+    select, are two cards, and each names the entry it was asked as."""
+    second = json.loads(json.dumps(COMPONENT).replace("cmp_01test0001", "cmp_01test0002"))
+    executor = ScriptedExecutor(
+        [*_card_results(), {"outcome": "ok", "frame_refs": [], "component": second}]
+    )
+    charts = [
+        chart(FRAME_A, type_="stat_card", title="Aid to Kenya", select=select)
+        for select in ({"stat_var": "dcid:LifeExpectancy_Person"}, {"stat_var": "dcid:Aid"})
+    ]
+    script = (search_call("aid to Kenya"), fetch_call(SPEC_A), make_charts_call(*charts))
+    app = _app(*script, _text("Here are the cards."), resolver=_search(), executor=executor)
+    async with _client(app) as client:
+        frames = await _stream(client, "/api/studio/turn", _turn_body())
+
+    (running,) = [
+        f
+        for f in frames
+        if f["event"] == "activity.step"
+        and f.get("tool") == "make_charts"
+        and f["status"] == "running"
+    ]
+    assert [entry["placeholder_id"] for entry in running["coming"]] == [
+        f"{running['step_id']}.0",
+        f"{running['step_id']}.1",
+    ]
+    assert {
+        f["component_id"]: f["created_from"]["placeholder_id"]
+        for f in frames
+        if f["event"] == "component.created"
+    } == {
+        "cmp_01test0001": f"{running['step_id']}.0",
+        "cmp_01test0002": f"{running['step_id']}.1",
+    }
 
 
 async def test_a_planner_run_shows_working_on_a_plan_and_not_the_planners_late_reports(
@@ -14034,3 +14091,247 @@ async def test_a_stated_scope_read_that_raises_licenses_nothing_and_the_turn_ans
     ]
     assert sent == [_window(2020, 2030)]
     assert reads == [[words], [words]]
+
+
+_SECOND = json.loads(json.dumps(COMPONENT).replace("cmp_01test0001", "cmp_01test0002"))
+
+
+def _swaps_the_card() -> tuple[types.Part, ...]:
+    """What the agent does to replace `_card`'s card: it removes it and
+    fetches in one response, which is no lone removal the harness answers
+    itself, then draws another card."""
+    return (
+        reply(call_part("remove_cards", {"component_ids": ["cmp_01test0001"]}), fetch_call(SPEC_A)),
+        make_charts_call(chart(FRAME_A, type_="stat_card", title="Aid to Uganda")),
+        _text("Swapped."),
+    )
+
+
+class _SearchesThenHangs:
+    """Answers the first search with `_search()`'s envelope and hangs on the
+    next, setting `entered`, as a slow upstream does while the client
+    leaves."""
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self._first = _search()
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        if not self.entered.is_set() and not getattr(self, "_answered", False):
+            self._answered = True
+            return await self._first(**kwargs)
+        self.entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+def _removal_order(frames: list[dict[str, Any]]) -> list[str]:
+    """The removal's and the drawing's lines and the canvas updates, in
+    stream order, up to the update that follows the removal."""
+    order = [
+        f"{f['tool']}:{f['status']}" if f["event"] == "activity.step" else f["event"]
+        for f in frames
+        if f["event"] == "composition.updated"
+        or (f["event"] == "activity.step" and f.get("tool") in {"remove_cards", "make_charts"})
+    ]
+    return order[: order.index("composition.updated") + 1]
+
+
+_BASE_REMOVAL = ["remove_cards:running", "composition.updated"]
+_HELD_REMOVAL = [
+    "remove_cards:running",
+    "remove_cards:complete",
+    "make_charts:running",
+    "composition.updated",
+]
+
+
+@pytest.mark.parametrize(
+    ("hold", "order"),
+    [
+        ({}, _BASE_REMOVAL),
+        ({"hold_removals": False}, _BASE_REMOVAL),
+        ({"hold_removals": True}, _HELD_REMOVAL),
+    ],
+    ids=["absent", "false", "true"],
+)
+@pytest.mark.parametrize("route", ["turn", "interrupt", "resume"])
+async def test_each_streaming_route_holds_a_removal_only_when_its_body_asks(
+    route: str, hold: dict[str, Any], order: list[str]
+) -> None:
+    """A turn replaces the card an earlier turn drew: it removes it, then
+    draws another, on a `/turn`, on the `/interrupt` that answers its
+    question, or on the `/resume` of a turn whose client left. Without
+    `hold_removals` in that request's body, the canvas update goes out as
+    the removal's answer is read, before its line closes. With it, the
+    update follows the line that draws the new card."""
+    executor = ScriptedExecutor([*_card_results(), *_card_results(_SECOND)])
+    resolver = _SearchesThenHangs()
+    before = (*_ask("A", "B"),) if route == "interrupt" else ()
+    before += (search_call("aid to Uganda"),) if route == "resume" else ()
+    app = _app(*_card(), *before, *_swaps_the_card(), resolver=resolver, executor=executor)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body())
+        second = _turn_body("swap the card")
+        match route:
+            case "turn":
+                frames = await _stream(client, "/api/studio/turn", {**second, **hold})
+            case "interrupt":
+                asked = await _stream(client, "/api/studio/turn", second)
+                frames = await _stream(
+                    client, "/api/studio/interrupt", {**_ask_answer(asked, 0), **hold}
+                )
+            case _:
+                await _asgi(app, "/api/studio/turn", second, disconnect_after=resolver.entered)
+                body = {
+                    "kind": "turn.resume",
+                    "schema_version": 1,
+                    "conversation_id": CONVERSATION,
+                    "turn_index": 2,
+                }
+                frames = await _stream(client, "/api/studio/resume", {**body, **hold})
+
+    assert _events(frames)[-1] == "done"
+    assert _removal_order(frames) == order
+    (removal,) = [
+        f
+        for f in frames
+        if f["event"] == "composition.updated"
+        and not any(b["component_id"] == "cmp_01test0002" for b in f["manifest"]["blocks"])
+    ]
+    assert removal["manifest"]["blocks"] == []
+
+
+@pytest.mark.parametrize(
+    ("hold", "held"),
+    [({}, False), ({"hold_removals": True}, True)],
+    ids=["absent", "true"],
+)
+@pytest.mark.parametrize("route", ["interrupt", "resume"])
+async def test_a_replayed_pause_takes_hold_removals_from_its_body(
+    monkeypatch: pytest.MonkeyPatch, route: str, hold: dict[str, Any], held: bool
+) -> None:
+    """A pause the client never read is sent again with no node run
+    (`_replay_pause`): on `/interrupt`, the retried answer of a stream whose
+    closing write kept the answered entry; on `/resume`, a turn whose
+    closing write failed. A replay runs no node, so no removal of its own
+    orders its frames: its segment takes the body's `hold_removals`, which
+    decides how it reports one this instance owes."""
+    built: list[tuple[bool, bool]] = []
+
+    class _Seen(studio_module._SegmentWork):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            built.append((kwargs.get("replay", False), kwargs.get("hold_removals", False)))
+            super().__init__(*args, **kwargs)
+
+    clock = await StoreClock.start(_engine())
+    store = StudioStore(_engine(), **clock.store_kwargs)
+    script = (*_ask("reading A", "reading B"), *_ask("C", "D"), _text("Done."))
+    app = _app(*script, store=store)
+    real_close = store.close_segment
+    closes: list[int] = []
+
+    async def close(*args: Any, **kwargs: Any) -> SegmentClose:
+        closes.append(1)
+        if route == "resume" and len(closes) == 1:
+            return SegmentClose.FAILED
+        return await real_close(*args, **kwargs)
+
+    store.close_segment = close  # type: ignore[method-assign]
+    async with _client(app) as client:
+        first = await _stream(client, "/api/studio/turn", _turn_body("ambiguous q"))
+        if route == "interrupt":
+            body = _ask_answer(first, 1)
+            with monkeypatch.context() as patch:
+                patch.setattr(ConversationState, "drop_resuming", lambda self, segment_id: None)
+                await _stream(client, "/api/studio/interrupt", body)
+            monkeypatch.setattr(studio_module, "_SegmentWork", _Seen)
+            replayed = await _stream(client, "/api/studio/interrupt", {**body, **hold})
+        else:
+            assert first[-1]["event"] == "error"
+            await clock.advance(studio_state_module.SEGMENT_TTL_S + 1)
+            monkeypatch.setattr(studio_module, "_SegmentWork", _Seen)
+            resume = {
+                "kind": "turn.resume",
+                "schema_version": 1,
+                "conversation_id": CONVERSATION,
+                "turn_index": 1,
+            }
+            replayed = await _stream(client, "/api/studio/resume", {**resume, **hold})
+
+    assert _events(replayed)[-1] == "elicitation.request"
+    assert built == [(True, held)]
+
+
+_THIRD = json.loads(json.dumps(COMPONENT).replace("cmp_01test0001", "cmp_01test0003"))
+
+
+@pytest.mark.parametrize(
+    ("hold", "again", "draws"),
+    [
+        (False, False, True),
+        (True, False, True),
+        (True, False, False),
+        (True, True, True),
+    ],
+    ids=["absent", "held-draws", "held-never-draws", "held-two-removals"],
+)
+async def test_a_held_removal_waits_through_a_multi_step_turn_on_turn(
+    hold: bool, again: bool, draws: bool
+) -> None:
+    """A follow-up removes a card and searches in one response, fetches in
+    the next (removing the other card too when `again`), then draws and
+    answers, or only answers. With `hold_removals`, one update drops the
+    removed cards: right after the drawing line and before the new card,
+    or, when nothing is drawn, after the reply's text and before `done`.
+    Without it, the update goes out as the removal's answer is read."""
+    executor = ScriptedExecutor(
+        [
+            *_card_results(),
+            {"outcome": "ok", "frame_refs": [], "component": _SECOND},
+            *_card_results(_THIRD),
+        ]
+    )
+    removal = ("remove_cards", {"component_ids": ["cmp_01test0001"]})
+    second = ("remove_cards", {"component_ids": ["cmp_01test0002"]})
+    follow_up = (
+        reply(call_part(*removal), search_call("aid to Uganda")),
+        reply(*((call_part(*second),) if again else ()), fetch_call(SPEC_A)),
+        *(
+            (make_charts_call(chart(FRAME_A, type_="stat_card", title="Aid to Uganda")),)
+            if draws
+            else ()
+        ),
+        _text("Swapped." if draws else "Removed."),
+    )
+    app = _app(*_card(charts=2), *follow_up, resolver=_search(2), executor=executor)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body())
+        body = {**_turn_body("swap the cards"), **({"hold_removals": True} if hold else {})}
+        frames = await _stream(client, "/api/studio/turn", body)
+
+    order = [
+        f"{f['tool']}:{f['status']}" if f["event"] == "activity.step" else f["event"]
+        for f in frames
+        if f["event"] in {"composition.updated", "component.created", "message.complete", "done"}
+        or (f["event"] == "activity.step" and f.get("tool") in {"remove_cards", "make_charts"})
+    ]
+    removals = [
+        index
+        for index, f in enumerate(frames)
+        if f["event"] == "composition.updated"
+        and not any(b["component_id"] == "cmp_01test0003" for b in f["manifest"]["blocks"])
+    ]
+    assert _events(frames)[-1] == "done"
+    if not hold:
+        assert order[:2] == ["remove_cards:running", "composition.updated"]
+        return
+    (shown,) = removals
+    left = [b["component_id"] for b in frames[shown]["manifest"]["blocks"]]
+    assert left == ([] if again else ["cmp_01test0002"])
+    update = order.index("composition.updated")
+    if draws:
+        assert order[update - 1] == "make_charts:running"
+        assert order[update + 1] == "component.created"
+    else:
+        assert order[update - 1 :] == ["message.complete", "composition.updated", "done"]

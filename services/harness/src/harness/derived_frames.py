@@ -63,8 +63,8 @@ async def derived_recipe(ref: FrameRef) -> dict[str, Any] | None:
     stores a recipe (`common.recipe`), which is its manifest's `recipe` with the
     manifest's `anchor` and `left_out`. `None` for a frame stored without a recipe.
 
-    A derived node of the tree is `{op_spec, inputs}` and a root node `{root}`, an
-    index into `roots`. Neither carries a `frame`.
+    A derived node of the tree is `{frame, op_spec, inputs}` and a root node
+    `{frame, root}`, with `root` an index into `roots` (`common.recipe`).
     """
     manifest = await read_derived_manifest(ref)
     recipe = manifest.get("recipe")

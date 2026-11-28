@@ -606,8 +606,8 @@ class TurnUsage:
     on the previous turn's conversation, of `carried_tokens` tokens, or
     `reset:<reason>` from the whole digest (`ConversationState.carried_opening`).
     It is `None` on a `digest` turn and on a turn that opened no orchestrator,
-    such as an Edit Card. Each is `None` on a turn that began before the
-    harness kept it.
+    such as an Edit Card or a card change (`apply_change`, `apply_unit`).
+    Each is `None` on a turn that began before the harness kept it.
     """
 
     trace_id: str | None = None
@@ -776,12 +776,24 @@ class ConversationState:
     turn_projection_asked: bool = False
     turn_readings: list[dict[str, Any]] = field(default_factory=list)
     turn_specs: dict[str, Any] = field(default_factory=dict)
+    # The `RecordedIdentity` JSON of each retrieval a card change drew, by the
+    # spec_id it is served under, as the written card's lineage states it
+    # (`harness.studio_edit.change_events`). Written with the card, so a turn
+    # cut before Search reads it again keeps it. `close_turn` keeps each one
+    # that resolves under `identities`, and the block of each one Search read
+    # again (`turn_specs`).
+    turn_identities: dict[str, dict[str, Any]] = field(default_factory=dict)
     # The chip the turn was asked to apply, `{"choice_id", "option_id"}`, set
     # by `harness.studio`; once the graph's `seed` node applied it, as that
     # node wrote it, with `from_option_id` and `spec_id`
     # (`harness.graph.state.ORCHESTRATOR_APPLIED_KEY`). `close_turn` keeps it
     # with the turn's record as `applied_choice`.
     turn_applied_choice: dict[str, Any] | None = None
+    # The card a card change (`apply_unit`, `apply_change`) named and what it
+    # changes, `{"component_id", "kind", "role"?}` as `harness.wire.
+    # CardChangeMark` states it, set by `harness.studio`; `close_turn` keeps
+    # it with the turn's record as `card_change`.
+    turn_card_change: dict[str, Any] | None = None
     # The option label each scope choice of the turn's plan held on the card
     # the user first switched it from, by the row's choice id, kept from the
     # first switch of the turn on (`/interrupt`). `plan.approved` names it
@@ -797,7 +809,7 @@ class ConversationState:
     # from, by the frame's id (`harness.graph.state.frame_id_for`), written as
     # the `execute` node hands a run back (`harness.studio_translate`). A card
     # drawn on one of these frames names that plan step in its
-    # `created_from`. Kept for the turn only: a frame id names the frame's
+    # `created_from`. Kept for the turn only, since a frame id names the frame's
     # content, which a later turn can fetch outside any plan. No model reads it.
     turn_plan_frames: dict[str, PlanLink] = field(default_factory=dict)
     # The turn's orchestrator conversation once its run closed on the reply
@@ -1034,17 +1046,20 @@ class ConversationState:
         runs `model_name`, opens from: the previous turn's conversation as
         `StoredHistory` JSON text and the conversation digest's tail, its
         `total_turns` without the `turns` list. None opens a fresh chain from
-        the whole digest: on a first turn, or, logged with its reason, when
-        the previous turn closed with no conversation to carry
-        (`previous_turn_carried_none`), as after an error, a Stop, a pause
-        left unanswered, an Edit Card turn, a reply the harness wrote or a
-        `digest` turn, when the turn closed `done` and its closing write
-        failed (`close_failed`, `mark_carry_lost`), when another
-        model wrote it (`model_changed`), since its thought signatures are
-        that model's, when no call in it reported usage (`no_usage`), when
-        its largest call reported more than `CARRIED_HISTORY_TOKEN_CAP`
-        tokens (`token_cap`), or when it no longer loads as a
-        `StoredHistory` (`unloadable`), as after a deploy that changed the
+        the whole digest. A first turn opens it as `fresh`. Every other
+        reset is logged with its reason. The previous turn may have closed
+        with no conversation to carry. After a card change (`apply_change`,
+        `apply_unit`), whose record names it as `card_change`, the reason is
+        `previous_turn_card_change`, whatever the change's outcome. After any
+        other such turn, as after an error, a Stop, a pause left unanswered,
+        an Edit Card, a reply the harness wrote or a `digest` turn, it is
+        `previous_turn_carried_none`. The reason is `close_failed` when the
+        turn closed `done` and its closing write failed (`mark_carry_lost`),
+        `model_changed` when another model wrote it, since its thought
+        signatures are that model's, `no_usage` when no call in it reported
+        usage, `token_cap` when its largest call reported more than
+        `CARRIED_HISTORY_TOKEN_CAP` tokens, and `unloadable` when it no longer
+        loads as a `StoredHistory`, as after a deploy that changed the
         message schema. The outcome is kept on the turn's usage as
         `history_chain`, and the carried tokens as `carried_tokens`. The
         `orchestrate` node checks the conversation again as it opens, on the
@@ -1057,7 +1072,11 @@ class ConversationState:
         carried = self.carried_history
         reason: str | None = None
         if carried is None or carried.get("turn") != len(self.turns):
-            reason = "previous_turn_carried_none"
+            reason = (
+                "previous_turn_card_change"
+                if self.turns[-1].get("card_change")
+                else "previous_turn_carried_none"
+            )
         elif isinstance(lost := carried.get("reset"), str):
             reason = lost
         elif carried.get("model") != model_name:
@@ -1370,6 +1389,8 @@ class ConversationState:
             record["plans"] = list(self.turn_plans)
         if self.turn_applied_choice:
             record["applied_choice"] = dict(self.turn_applied_choice)
+        if self.turn_card_change:
+            record["card_change"] = dict(self.turn_card_change)
         # A source only the translator or the canvas found is read here too,
         # so a later turn's planner is shown it beside the ones a search
         # returned (`prior_ledger_state`).
@@ -1388,8 +1409,9 @@ class ConversationState:
         # card the turn drew or redrew reads when its unit can change
         # (`harness.card_unit`), which a later turn's unit change reads. A block
         # can run to about 120 KB and the record is kept for the whole
-        # conversation, so no other is kept.
-        identities = _turn_identities(self.turn_specs, plans)
+        # conversation, so no other is kept but the block of each retrieval a
+        # card change drew (`turn_identities`).
+        identities = _turn_identities(self.turn_specs, plans, held=self._held_identities())
         copied = _copied_sources(
             [source for plan in plans for source in plan.sources],
             {**self._earlier_identities(), **identities},
@@ -1403,6 +1425,7 @@ class ConversationState:
             }
             | copied
             | self._unit_card_specs()
+            | set(self.turn_identities)
         )
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
@@ -1424,6 +1447,16 @@ class ConversationState:
             if isinstance(stored, dict) and isinstance(stored.get("spec_id"), str):
                 specs.add(stored["spec_id"])
         return specs
+
+    def _held_identities(self) -> dict[str, RecordedIdentity]:
+        """The open turn's `turn_identities` that validate, by spec_id."""
+        held: dict[str, RecordedIdentity] = {}
+        for spec_id, stored in self.turn_identities.items():
+            try:
+                held[spec_id] = RecordedIdentity.model_validate(stored)
+            except ValidationError:
+                logger.warning("skipping the stored identity of %s", spec_id, exc_info=True)
+        return held
 
     def take_identity(
         self,
@@ -1464,7 +1497,9 @@ class ConversationState:
         change it.
         """
         plans = _validated(PlanRecord, self.turn_plans, reader="identity", what="plan record")
-        recorded = _turn_identities(self.turn_specs, plans).get(spec_id)
+        recorded = _turn_identities(self.turn_specs, plans, held=self._held_identities()).get(
+            spec_id
+        )
         if recorded is not None:
             return recorded
         for turn in reversed(self.turns):
@@ -1621,7 +1656,9 @@ class ConversationState:
         self.turn_projection_asked = False
         self.turn_readings = []
         self.turn_specs = {}
+        self.turn_identities = {}
         self.turn_applied_choice = None
+        self.turn_card_change = None
         self.turn_approved = []
         self.turn_plan_frames = {}
         self.turn_carried = None
@@ -2038,10 +2075,13 @@ def _history_turn(
 
 
 def _turn_identities(
-    specs: dict[str, Any], plans: Iterable[PlanRecord]
+    specs: dict[str, Any],
+    plans: Iterable[PlanRecord],
+    *,
+    held: Mapping[str, RecordedIdentity] | None = None,
 ) -> dict[str, RecordedIdentity]:
-    """The identity of each spec block in `specs` and of each source of
-    `plans`, by spec_id.
+    """The identity of each spec block in `specs`, of each source of `plans`,
+    and each of `held`, identities the turn holds with no block, by spec_id.
 
     A block is read as a source (`source_from_spec_block`) for its
     `definition.identity`, and for the identity of each measure it offers
@@ -2096,7 +2136,7 @@ def _turn_identities(
                                 resolved_sources=source.resolved_sources,
                             ),
                         )
-    found = {**offered, **found}
+    found = {**offered, **(held or {}), **found}
     identities: dict[str, RecordedIdentity] = {}
     for spec_id, recorded in found.items():
         try:
@@ -2542,18 +2582,22 @@ def _replace_block(
     *,
     old_component_id: str,
     component: dict[str, Any],
-    retitle: Callable[[str], str] | None = None,
+    rewrite: Callable[[str, str], str | None] | None = None,
+    unit: bool = False,
 ) -> bool:
     """Swap the named card's block for `component`, in place. The new block
     keeps the old one's `pinned` flag and card meta (`CardMeta`, the user's
     note and labels), and a layout hint naming the old card names the new one
     in its place, so nothing on the canvas stays on the old id.
 
-    `retitle` marks a unit change: it rewrites the words of the kept meta's
-    subtitle, description and axis labels that name the old unit
-    (`harness.card_unit.retitled`), and a `comparison` hint, which aligns its
-    members' units, drops the card, a hint left with fewer than two members
-    going with it. A `row` hint keeps the card.
+    `rewrite` rewrites the kept meta's subtitle, description and axis labels,
+    each by name, for a card changed in place: a unit change names the new
+    unit where they named the old (`harness.card_unit.retitled`), and a
+    change of years or places drops the words that may name the old ones
+    (`harness.studio_edit._changed_meta`). `unit` marks a unit change: a
+    `comparison` hint, which aligns its members' units, drops the card, and a
+    hint left with fewer than two members goes with it. A `row` hint keeps
+    the card.
 
     True iff the canvas shows `component` in the slot: a block was
     replaced, or the canvas already held `component`'s block. A card that
@@ -2570,10 +2614,10 @@ def _replace_block(
     new_id = component["component_id"]
     blocks = [block.model_copy(deep=True) for block in previous.blocks]
     meta = blocks[index].meta
-    if meta is not None and retitle is not None:
+    if meta is not None and rewrite is not None:
         meta = meta.model_copy(
             update={
-                name: retitle(text)
+                name: rewrite(name, text)
                 for name in ("subtitle", "description", "x_label", "y_label")
                 if isinstance(text := getattr(meta, name), str)
             }
@@ -2591,7 +2635,7 @@ def _replace_block(
         hints = [
             hint.model_copy(update={"members": members})
             for hint in hints
-            if len(members := _swapped_members(hint, old_component_id, new_id, retitle)) >= 2
+            if len(members := _swapped_members(hint, old_component_id, new_id, unit=unit)) >= 2
         ]
     conversation.composition = _next_manifest(
         previous, blocks, actor=CompositionActor.MODEL, layout_hints=hints
@@ -2599,12 +2643,10 @@ def _replace_block(
     return True
 
 
-def _swapped_members(
-    hint: LayoutHint, old_id: str, new_id: str, retitle: Callable[[str], str] | None
-) -> list[str]:
+def _swapped_members(hint: LayoutHint, old_id: str, new_id: str, *, unit: bool) -> list[str]:
     """`hint`'s members with `old_id` named `new_id`, or left out of a
-    `comparison` hint when `retitle` marks a unit change."""
-    if retitle is not None and hint.type is LayoutHintType.COMPARISON:
+    `comparison` hint when `unit` marks a unit change."""
+    if unit and hint.type is LayoutHintType.COMPARISON:
         return [member for member in hint.members if member != old_id]
     return [new_id if member == old_id else member for member in hint.members]
 

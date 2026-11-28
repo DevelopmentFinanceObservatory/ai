@@ -110,6 +110,7 @@ from compiler.surface import transient
 from executor.ledger import RunStatus
 from fastapi.responses import JSONResponse
 from planner.stated_scope import LICENCE_STATE_KEY, STATED_SCOPE_STATE_KEY, StatedScopeRecord
+from pydantic import ValidationError
 from sqlalchemy import ARRAY, Text, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -186,6 +187,25 @@ _OWNER_ID = uuid.uuid4().hex[:12]
 # `change_canvas` diff against the last stored snapshot. The scalar keys live in
 # `conversations.turn_state`, `composition` and `segment` in their own
 # columns, and each per-item key in a row of its own table.
+# The members of a stored frame's list items that a release this one can be
+# rolled back to refuses, in layers, each by the frame's `event` and the list
+# the members sit in. A pause's card and frames and the turn's approved plans
+# are stored without them, each layer's members beside the frame under a key
+# of the layer's own, `<key>_<layer>` (`_added_apart`), and a load puts back
+# the members of each layer it knows (`_added_back`). A release that knows a
+# layer puts back every member stored under its key, so a member is never
+# added to a layer an earlier release knows: it starts a layer of its own.
+_ADDED_MEMBERS: dict[str, dict[str, dict[str, frozenset[str]]]] = {
+    "added": {
+        "plan.proposed": {"decisions": frozenset({"step_ids"})},
+        "plan.approved": {"steps": frozenset({"id"}), "choices": frozenset({"step_ids"})},
+    },
+    "added_kind": {
+        "plan.proposed": {"decisions": frozenset({"kind"})},
+        "plan.approved": {"choices": frozenset({"kind"})},
+    },
+}
+
 _KEY_TURN_INDEX = "turn_index"
 _KEY_SEQ = "seq"
 _KEY_TRACE_ID = "trace_id"
@@ -209,9 +229,10 @@ _KEY_TURN_PLANS = "turn_plans"
 _KEY_TURN_PROJECTION_ASKED = "turn_projection_asked"
 _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
+_KEY_TURN_CARD_CHANGE = "turn_card_change"
+_KEY_TURN_IDENTITIES = "turn_identities"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
 _KEY_TURN_APPROVED = "turn_approved"
-_KEY_TURN_APPROVED_ADDED = "turn_approved_added"
 _KEY_TURN_PLAN_FRAMES = "turn_plan_frames"
 # The members of the stored map of plan frames: the turn index it was written
 # in and the map itself (`_plan_frames_of`).
@@ -240,13 +261,18 @@ _SCALAR_KEYS = frozenset(
         _KEY_TURN_PROJECTION_ASKED,
         _KEY_TURN_READINGS,
         _KEY_TURN_APPLIED_CHOICE,
+        _KEY_TURN_CARD_CHANGE,
+        _KEY_TURN_IDENTITIES,
         _KEY_TURN_CHOICE_BASELINE,
         _KEY_TURN_APPROVED,
-        _KEY_TURN_APPROVED_ADDED,
+        *(f"{_KEY_TURN_APPROVED}_{layer}" for layer in _ADDED_MEMBERS),
         _KEY_TURN_PLAN_FRAMES,
         _KEY_TURN_USAGE,
     }
 )
+# The keys `_serialize_durable` keeps each layer of the turn's approved plans'
+# added members under (`_approved_apart`).
+_APPROVED_LAYER_KEYS = frozenset(f"{_KEY_TURN_APPROVED}_{layer}" for layer in _ADDED_MEMBERS)
 _KEY_COMPOSITION = "composition"
 _KEY_SEGMENT = "segment"
 # Per-item keys: `turns` and `approvals` by their position, `components` and
@@ -472,96 +498,129 @@ def _serialize_pending(pending: dict[str, _PendingInterrupt]) -> dict[str, Any]:
     }
 
 
-# The members of a stored frame's list items that a release this one can be
-# rolled back to refuses, by the frame's `event` and the list they sit in. A
-# pause's card and frames and the turn's approved plans are stored without
-# them, the members beside each frame (`_added_apart`), and a load puts them
-# back (`_added_back`). Another such member is one more name here.
-_ADDED_MEMBERS: dict[str, dict[str, frozenset[str]]] = {
-    "plan.proposed": {"decisions": frozenset({"step_ids"})},
-    "plan.approved": {"steps": frozenset({"id"}), "choices": frozenset({"step_ids"})},
-}
+type _Added = dict[str, dict[str, Any]]
 
 
-def _added_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _added_apart(frame: dict[str, Any]) -> tuple[dict[str, Any], _Added]:
     """`frame` with no member `_ADDED_MEMBERS` names for its event, and those
-    members, by list and by each item's index there, empty when it holds none."""
+    members by layer, then by list and by each item's index there, a layer
+    left out when the frame holds none of its members."""
     kept = dict(frame)
-    added: dict[str, Any] = {}
-    for name, members in _ADDED_MEMBERS.get(frame.get("event", ""), {}).items():
-        items = frame.get(name) or ()
-        moved = {
-            str(index): taken
-            for index, item in enumerate(items)
-            if (taken := {k: v for k, v in item.items() if k in members})
-        }
-        if moved:
-            kept[name] = [{k: v for k, v in item.items() if k not in members} for item in items]
-            added[name] = moved
+    added: _Added = {}
+    for layer, events in _ADDED_MEMBERS.items():
+        for name, members in events.get(frame.get("event", ""), {}).items():
+            items = kept.get(name) or ()
+            moved = {
+                str(index): taken
+                for index, item in enumerate(items)
+                if (taken := {k: v for k, v in item.items() if k in members})
+            }
+            if moved:
+                kept[name] = [{k: v for k, v in item.items() if k not in members} for item in items]
+                added.setdefault(layer, {})[name] = moved
     return kept, added
 
 
-def _added_back(frame: dict[str, Any], added: Mapping[str, Any] | None) -> dict[str, Any]:
-    """`frame` with the members `_added_apart` took from it put back."""
-    if not added:
-        return frame
-    return {
-        **frame,
-        **{
-            name: [
-                {**item, **(moved.get(str(index)) or {})}
-                for index, item in enumerate(frame.get(name) or ())
+def _added_back(frame: dict[str, Any], added: Mapping[str, Any]) -> dict[str, Any]:
+    """`frame` with the members `_added_apart` took from it put back, from
+    `added` by layer: only a layer this release knows, and only the members
+    it names."""
+    whole = dict(frame)
+    for layer, lists in added.items():
+        events = _ADDED_MEMBERS.get(layer, {})
+        for name, moved in (lists or {}).items():
+            members = events.get(frame.get("event", ""), {}).get(name, frozenset())
+            whole[name] = [
+                {
+                    **item,
+                    **{
+                        k: v
+                        for k, v in ((moved or {}).get(str(index)) or {}).items()
+                        if k in members
+                    },
+                }
+                for index, item in enumerate(whole.get(name) or ())
             ]
-            for name, moved in added.items()
-        },
+    return whole
+
+
+def _layers(stored: Mapping[str, Any], key: str) -> dict[str, Any]:
+    """The value each layer of `_ADDED_MEMBERS` keeps under `<key>_<layer>`
+    in `stored`, by layer, for each layer `stored` holds."""
+    return {
+        layer: stored[f"{key}_{layer}"] for layer in _ADDED_MEMBERS if f"{key}_{layer}" in stored
     }
 
 
 def _card_apart(card: dict[str, Any] | None) -> dict[str, Any]:
     """A pause's `card` under `"card"` with its units under `"card_units"`
-    (`_units_apart`) and its added members under `"card_added"`
-    (`_added_apart`), each key written only when it holds something."""
+    (`_units_apart`) and each layer of its added members under
+    `"card_<layer>"` (`_added_apart`), each key written only when it holds
+    something."""
     if card is None:
         return {"card": None}
     card, added = _added_apart(card)
-    return {**_units_apart("card", card), **({"card_added": added} if added else {})}
-
-
-def _approved_apart(
-    frames: Sequence[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """`frames`, stored `plan.approved` frames, without their added members,
-    and those members by each frame's plan `revision` (`_added_apart`). A
-    rolled-back release that rewrites the frames leaves the members where
-    they were, and the revision keeps them off another plan's frame."""
-    apart = [_added_apart(frame) for frame in frames]
-    return [kept for kept, _ in apart], {
-        str(kept.get("revision")): added for kept, added in apart if added
+    return {
+        **_units_apart("card", card),
+        **{f"card_{layer}": lists for layer, lists in added.items()},
     }
 
 
+def _approved_apart(frames: Sequence[dict[str, Any]]) -> tuple[list[dict[str, Any]], _Added]:
+    """`frames`, stored `plan.approved` frames, without their added members,
+    and those members by layer, then by each frame's plan `revision`
+    (`_added_apart`). A rolled-back release that rewrites the frames leaves
+    the members where they were, and the revision keeps them off another
+    plan's frame."""
+    kept: list[dict[str, Any]] = []
+    added: _Added = {}
+    for frame in frames:
+        one, layers = _added_apart(frame)
+        kept.append(one)
+        for layer, lists in layers.items():
+            added.setdefault(layer, {})[str(one.get("revision"))] = lists
+    return kept, added
+
+
 def _approved_back(
-    frames: Sequence[dict[str, Any]], added: Mapping[str, Any] | None
+    frames: Sequence[dict[str, Any]], added: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     """The frames `_approved_apart` split, whole again."""
-    return [_added_back(frame, (added or {}).get(str(frame.get("revision")))) for frame in frames]
+    return [
+        _added_back(
+            frame,
+            {
+                layer: (by_revision or {}).get(str(frame.get("revision")))
+                for layer, by_revision in added.items()
+            },
+        )
+        for frame in frames
+    ]
 
 
 def _turn_record_apart(record: dict[str, Any]) -> dict[str, Any]:
     """A turn record as stored: its `approved` plans without their added
-    members, which go under `approved_added` (`_approved_apart`)."""
+    members, which go under `approved_<layer>` (`_approved_apart`)."""
     if not record.get("approved"):
         return record
     approved, added = _approved_apart(record["approved"])
-    return {**record, "approved": approved, **({"approved_added": added} if added else {})}
+    return {
+        **record,
+        "approved": approved,
+        **{f"approved_{layer}": by_revision for layer, by_revision in added.items()},
+    }
 
 
 def _turn_record_back(record: Any) -> Any:
     """The turn record `_turn_record_apart` stored, whole again."""
-    if not isinstance(record, dict) or "approved_added" not in record:
+    if not isinstance(record, dict):
         return record
-    whole = {key: value for key, value in record.items() if key != "approved_added"}
-    whole["approved"] = _approved_back(record.get("approved") or (), record["approved_added"])
+    added = _layers(record, "approved")
+    if not added:
+        return record
+    layer_keys = {f"approved_{layer}" for layer in added}
+    whole = {key: value for key, value in record.items() if key not in layer_keys}
+    whole["approved"] = _approved_back(record.get("approved") or (), added)
     return whole
 
 
@@ -585,7 +644,7 @@ def _frames_apart(frames: list[dict[str, Any]]) -> dict[str, Any]:
     """`frames` under `"frames"`, each with no decision's `unit`, no unit question's
     offer and no added member, each frame's units taken out, by its index, under
     `"frames_units"`, its unit questions' offers under `"frames_unit_questions"`, and
-    its added members under `"frames_added"`, when there is one (`_units_apart`,
+    each layer of its added members under `"frames_<layer>"`, when there is one (`_units_apart`,
     `_unit_questions_apart`, `_added_apart`)."""
     taken = [_added_apart(frame) for frame in frames]
     asked = [_unit_questions_apart(frame) for frame, _ in taken]
@@ -594,12 +653,15 @@ def _frames_apart(frames: list[dict[str, Any]]) -> dict[str, Any]:
         str(index): one["frame_units"] for index, one in enumerate(apart) if "frame_units" in one
     }
     offers = {str(index): one for index, (_, one) in enumerate(asked) if one}
-    added = {str(index): one for index, (_, one) in enumerate(taken) if one}
+    added: _Added = {}
+    for index, (_, layers) in enumerate(taken):
+        for layer, lists in layers.items():
+            added.setdefault(layer, {})[str(index)] = lists
     return {
         "frames": [one["frame"] for one in apart],
         **({"frames_units": units} if units else {}),
         **({"frames_unit_questions": offers} if offers else {}),
-        **({"frames_added": added} if added else {}),
+        **{f"frames_{layer}": by_index for layer, by_index in added.items()},
     }
 
 
@@ -726,6 +788,51 @@ def _unit_questions_back(frame: dict[str, Any], offers: Mapping[str, Any] | None
     }
 
 
+def _loaded_card(entry: Mapping[str, Any]) -> PlanProposed | None:
+    """The plan card a pending entry keeps, or `None` for none or for one this
+    release cannot read, such as one a later release stored with members this
+    one does not know, which is logged."""
+    if not entry.get("card"):
+        return None
+    try:
+        return PlanProposed.model_validate(
+            {
+                **_added_back(
+                    _units_back(entry["card"], entry.get("card_units")), _layers(entry, "card")
+                ),
+                "new_plan": True if entry.get("card_new_plan") else None,
+            }
+        )
+    except ValidationError:
+        logger.warning(
+            "studio store: a pending plan card cannot be read and is dropped", exc_info=True
+        )
+        return None
+
+
+def _loaded_frame(entry: Mapping[str, Any], index: int, stored: Any) -> Any:
+    """Frame `index` a pending entry keeps, or `None`, logged, for one this
+    release cannot read."""
+    try:
+        return STUDIO_FRAME_ADAPTER.validate_python(
+            _added_back(
+                _unit_questions_back(
+                    _units_back(stored, (entry.get("frames_units") or {}).get(str(index))),
+                    (entry.get("frames_unit_questions") or {}).get(str(index)),
+                ),
+                {
+                    layer: (by_index or {}).get(str(index))
+                    for layer, by_index in _layers(entry, "frames").items()
+                },
+            )
+        )
+    except ValidationError:
+        logger.warning(
+            "studio store: pending frame %d cannot be read and is dropped", index, exc_info=True
+        )
+        return None
+
+
 def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
     pending = _PendingInterrupt(
         adk_id=entry["adk_id"],
@@ -747,31 +854,12 @@ def _deserialize_entry(entry: dict[str, Any]) -> _PendingInterrupt:
             )
             for choice_id, choice in (entry.get("choices") or {}).items()
         },
-        card=(
-            PlanProposed.model_validate(
-                {
-                    **_added_back(
-                        _units_back(entry["card"], entry.get("card_units")),
-                        entry.get("card_added"),
-                    ),
-                    "new_plan": True if entry.get("card_new_plan") else None,
-                }
-            )
-            if entry.get("card")
-            else None
-        ),
+        card=_loaded_card(entry),
         admitted_run=entry.get("admitted_run"),
         frames=tuple(
-            STUDIO_FRAME_ADAPTER.validate_python(
-                _added_back(
-                    _unit_questions_back(
-                        _units_back(frame, (entry.get("frames_units") or {}).get(str(index))),
-                        (entry.get("frames_unit_questions") or {}).get(str(index)),
-                    ),
-                    (entry.get("frames_added") or {}).get(str(index)),
-                )
-            )
-            for index, frame in enumerate(entry.get("frames") or ())
+            frame
+            for index, stored in enumerate(entry.get("frames") or ())
+            if (frame := _loaded_frame(entry, index, stored)) is not None
         ),
     )
     if "questions" in entry:
@@ -829,13 +917,18 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_PROJECTION_ASKED: state.turn_projection_asked,
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
+        _KEY_TURN_CARD_CHANGE: _card_change_stamped(state),
+        _KEY_TURN_IDENTITIES: _identities_stamped(state),
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
         # The approved plans' added members are stored beside them
         # (`_approved_apart`), as a pause's are.
         _KEY_TURN_APPROVED: approved,
-        _KEY_TURN_APPROVED_ADDED: approved_added,
-        # Stamped with the turn it belongs to: a release that writes no map
-        # leaves the previous turn's in place (`_plan_frames_of`). An empty
+        **{
+            f"{_KEY_TURN_APPROVED}_{layer}": approved_added.get(layer, {})
+            for layer in _ADDED_MEMBERS
+        },
+        # Stamped with the turn it belongs to, since a release that writes no
+        # map leaves the previous turn's in place (`_plan_frames_of`). An empty
         # map needs no stamp, so a new turn's index alone changes no key here.
         _KEY_TURN_PLAN_FRAMES: {
             _PLAN_FRAMES_TURN: state.turn_index,
@@ -882,7 +975,7 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
     """Merge `delta` (a subset of `_serialize_durable`'s keys) onto `state`
     in place. A key this release does not know (one a later release wrote
     into `turn_state`) is logged and ignored."""
-    turn_index = state.turn_index
+    turn_before = state.turn_index
     for key, value in delta.items():
         if key == _KEY_TURN_INDEX:
             state.turn_index = value
@@ -932,10 +1025,12 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_readings = list(value)
         elif key == _KEY_TURN_APPLIED_CHOICE:
             state.turn_applied_choice = dict(value) if value else None
+        elif key in {_KEY_TURN_CARD_CHANGE, _KEY_TURN_IDENTITIES}:
+            pass  # after the loop, against the turn index this delta leaves
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
-        elif key in (_KEY_TURN_APPROVED, _KEY_TURN_APPROVED_ADDED):
-            pass  # after the loop, the two together
+        elif key == _KEY_TURN_APPROVED or key in _APPROVED_LAYER_KEYS:
+            pass  # after the loop, together
         elif key == _KEY_TURN_PLAN_FRAMES:
             pass  # after the loop, once `turn_index` holds its value from this delta
         elif key == _KEY_TURN_USAGE:
@@ -953,19 +1048,34 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             _set_list_item(state.approvals, index, ApprovalRecord.model_validate(value))
         else:
             logger.warning("studio store: ignoring unknown turn state key %r", key)
-    if _KEY_TURN_APPROVED in delta or _KEY_TURN_APPROVED_ADDED in delta:
-        # A delta carries either key alone when only it changed, so the other
-        # is read from the plans `state` holds.
+    if _KEY_TURN_APPROVED in delta or not _APPROVED_LAYER_KEYS.isdisjoint(delta):
+        # A delta carries any of these keys alone when only it changed, so the
+        # others are read from the plans `state` holds.
         approved, added = _approved_apart(state.turn_approved)
         state.turn_approved = _approved_back(
             list(delta.get(_KEY_TURN_APPROVED, approved) or ()),
-            delta.get(_KEY_TURN_APPROVED_ADDED, added),
+            {**added, **_layers(delta, _KEY_TURN_APPROVED)},
         )
+    if _KEY_TURN_CARD_CHANGE in delta:
+        state.turn_card_change = _card_change_back(
+            delta[_KEY_TURN_CARD_CHANGE], turn_index=state.turn_index
+        )
+    elif state.turn_index != turn_before:
+        # A release that does not know the mark moved the turn on and left
+        # the stored mark as it was, so the mark held here is an earlier
+        # turn's.
+        state.turn_card_change = None
+    if _KEY_TURN_IDENTITIES in delta:
+        state.turn_identities = _identities_back(
+            delta[_KEY_TURN_IDENTITIES], turn_index=state.turn_index
+        )
+    elif state.turn_index != turn_before:
+        state.turn_identities = {}
     if _KEY_TURN_PLAN_FRAMES in delta:
         state.turn_plan_frames = _plan_frames_of(
             delta[_KEY_TURN_PLAN_FRAMES], turn_index=state.turn_index
         )
-    elif state.turn_index != turn_index:
+    elif state.turn_index != turn_before:
         state.turn_plan_frames = {}
     if _KEY_TURN_USAGE in delta:
         state.turn_usage = _turn_usage(delta[_KEY_TURN_USAGE], trace_id=state.trace_id)
@@ -974,6 +1084,48 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
         # trace id alone, leaves the turn an empty usage of its own, which
         # `take_identity` and `note_spec_use` can fill and a save keeps.
         state.turn_usage = TurnUsage(trace_id=state.trace_id or None)
+
+
+def _card_change_stamped(state: ConversationState) -> dict[str, Any] | None:
+    """The stored form of the open turn's card change mark: `{"turn_index",
+    "mark"}`, the mark stamped with the turn it belongs to, or `None` for
+    none."""
+    if not state.turn_card_change:
+        return None
+    return {"turn_index": state.turn_index, "mark": state.turn_card_change}
+
+
+def _card_change_back(value: Any, *, turn_index: int) -> dict[str, Any] | None:
+    """The card change mark a stored `turn_card_change` holds for turn
+    `turn_index`. A release that does not know the mark merges only the
+    keys it knows into the stored state, so a mark stamped for another turn
+    is an earlier turn's left in place, and reads as none, as does an
+    unstamped one."""
+    if not isinstance(value, dict) or value.get("turn_index") != turn_index:
+        return None
+    mark = value.get("mark")
+    return dict(mark) if isinstance(mark, dict) and mark else None
+
+
+def _identities_stamped(state: ConversationState) -> dict[str, Any] | None:
+    """The stored form of the open turn's `turn_identities`: `{"turn_index",
+    "identities"}`, stamped with the turn they belong to as the card change
+    mark is (`_card_change_stamped`), or `None` for none."""
+    if not state.turn_identities:
+        return None
+    return {"turn_index": state.turn_index, "identities": state.turn_identities}
+
+
+def _identities_back(value: Any, *, turn_index: int) -> dict[str, dict[str, Any]]:
+    """The identities a stored `turn_identities` holds for turn `turn_index`:
+    none for one stamped for another turn, which a release that does not
+    know the key left in place, or for an unstamped one."""
+    if not isinstance(value, dict) or value.get("turn_index") != turn_index:
+        return {}
+    held = value.get("identities")
+    if not isinstance(held, dict):
+        return {}
+    return {str(k): dict(v) for k, v in held.items() if isinstance(v, dict)}
 
 
 def _history_assignment(value: Any) -> dict[str, Any] | None:

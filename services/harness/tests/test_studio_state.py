@@ -32,7 +32,7 @@ import logging
 import ssl
 import time
 import typing
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -473,7 +473,8 @@ def _entry(
 def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     """A stored entry holds the id of every series its card draws, past the
     twelve the platform's fact summary lists. No canvas view, recall or
-    manifest states them, and a revised card's ids follow its new payload."""
+    manifest states them, nor the card's plan link or readable arguments,
+    and a revised card's ids follow its new payload."""
     codes = [f"country/P{number:02d}" for number in range(24)]
     series = {code: {"2024": 1.0} for code in codes}
     card = drawn_cards.write_reply(
@@ -482,7 +483,9 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     state = ConversationState(conversation_id=CONVERSATION)
     intent = {"type": "bar_chart", "title": "t", "select": {"observationAbout": codes}}
     plan = PlanLink(plan_version_id="plan_secret", plan_step_id="step_secret")
-    land_component(state, card, intent=intent, plan=plan)
+    land_component(
+        state, card, intent=intent, plan=plan, unit_card={"spec_id": "spec_secret", "args": {}}
+    )
     card_id = card["component_id"]
 
     ids = [drawn_cards.series_id(code) for code in codes]
@@ -504,6 +507,7 @@ def test_a_cards_series_ids_are_stored_whole_and_stated_to_no_reader() -> None:
     assert "series_ids" not in model_facing
     assert "drawn_card" not in model_facing
     assert "plan_secret" not in model_facing
+    assert "spec_secret" not in model_facing
     assert ids[11] in model_facing
     assert ids[12] not in model_facing
 
@@ -2007,11 +2011,35 @@ def test_a_stored_pending_card_keeps_each_decision_s_unit_beside_the_card_and_fr
     assert (restored.card, restored.frames) == (card, (note, card))
 
 
-# The members each model of a stored pause or approved plan has on the release
-# `feat/studio-prototype` (`git show origin/feat/studio-prototype:services/harness/
-# src/harness/wire.py`, each model's `model_fields`), which refuses any other: what a
-# release rolled back to that one loads.
-_ROLLBACK_MEMBERS: dict[str, frozenset[str]] = {
+def test_a_pending_card_or_frame_this_release_cannot_read_is_dropped_on_load() -> None:
+    """A pending entry a later release stored, its card and one frame holding a
+    member this release does not know, loads with neither, and the frames it
+    can read."""
+    raw = json.loads(
+        (
+            Path(__file__).parent / "wire_fixtures" / "studio" / "event-03-plan-proposed.json"
+        ).read_text()
+    )
+    note = MessageComplete(event="message.complete", seq=8, text="Still there.")
+    pending = _PendingInterrupt(
+        adk_id="adk_1", kind="plan", card=PlanProposed.model_validate(raw), frames=(note,)
+    )
+    entry = json.loads(json.dumps(studio_store._serialize_pending({"int_1": pending})["int_1"]))
+    entry["card"]["later_member"] = True
+    entry["frames"] = [{**entry["card"]}, *entry["frames"]]
+
+    restored = studio_store._deserialize_entry(entry)
+
+    assert (restored.card, restored.frames) == (None, (note,))
+
+
+# The members each model of a stored pause or approved plan has on two releases
+# this one can be rolled back to, each of which refuses any other, with the layers
+# of `studio_store._ADDED_MEMBERS` whose keys that release reads back. The base,
+# `feat/studio-prototype`, reads none; `3b2996ad` reads `added`, and puts back
+# every member stored under its keys. Each set is the model's `model_fields` in
+# `git show <release>:services/harness/src/harness/wire.py`.
+_BASE_MEMBERS: dict[str, frozenset[str]] = {
     name: frozenset(members.split())
     for name, members in {
         "PlanProposed": "actions asks caveats decisions event interrupt_id moved new_plan"
@@ -2036,13 +2064,41 @@ _ROLLBACK_MEMBERS: dict[str, frozenset[str]] = {
         "MessageComplete": "event seq text",
     }.items()
 }
+_ROLLBACK_RELEASES: dict[str, tuple[dict[str, frozenset[str]], tuple[str, ...]]] = {
+    "feat/studio-prototype": (_BASE_MEMBERS, ()),
+    "3b2996ad": (
+        _BASE_MEMBERS
+        | {
+            "PlanDecision": _BASE_MEMBERS["PlanDecision"] | {"step_ids"},
+            "PlanApprovedStep": _BASE_MEMBERS["PlanApprovedStep"] | {"id"},
+            "PlanApprovedChoice": _BASE_MEMBERS["PlanApprovedChoice"] | {"step_ids"},
+        },
+        ("added",),
+    ),
+}
 
 
-def _rollback_refusals(model: type[BaseModel], stored: Any, where: str = "") -> list[str]:
+def _put_back(frame: dict[str, Any], lists: Any) -> dict[str, Any]:
+    """`frame` with every member `lists` holds, by list and item index, put back,
+    as a release reading that layer does, whatever the members are."""
+    return {
+        **frame,
+        **{
+            name: [
+                {**item, **moved.get(str(i), {})} for i, item in enumerate(frame.get(name) or ())
+            ]
+            for name, moved in (lists or {}).items()
+        },
+    }
+
+
+def _rollback_refusals(
+    release: dict[str, frozenset[str]], model: type[BaseModel], stored: Any, where: str = ""
+) -> list[str]:
     """Each member of `stored`, a value of `model` as stored, that `model` lacks on
-    the release `_ROLLBACK_MEMBERS` lists, by its path. Nested models are found
-    through this release's field types."""
-    known = _ROLLBACK_MEMBERS[model.__name__]
+    `release`, by its path. Nested models are found through this release's field
+    types."""
+    known = release[model.__name__]
     refused = [f"{where}/{member}" for member in stored if member not in known]
     for name, value in stored.items():
         annotation = model.model_fields[name].annotation if name in known else None
@@ -2056,7 +2112,7 @@ def _rollback_refusals(model: type[BaseModel], stored: Any, where: str = "") -> 
         (kind,) = nested
         for index, item in enumerate(value if isinstance(value, list) else [value]):
             if isinstance(item, dict):
-                refused += _rollback_refusals(kind, item, f"{where}/{name}/{index}")
+                refused += _rollback_refusals(release, kind, item, f"{where}/{name}/{index}")
     return refused
 
 
@@ -2068,21 +2124,31 @@ def _annotation_types(annotation: Any) -> list[Any]:
     return found
 
 
-def test_a_pause_and_an_approved_plan_are_stored_as_a_rolled_back_release_reads_them() -> None:
-    """A plan card's `decisions[].step_ids` and a `plan.approved`'s `steps[].id` and
-    `choices[].step_ids` are members a rolled-back release refuses, so the pause's
-    card and frames, the turn's approved plans and the turn record holding them are
-    stored without them, the members beside them, and restored on load."""
+@pytest.mark.parametrize("release", list(_ROLLBACK_RELEASES))
+def test_a_pause_and_an_approved_plan_are_stored_as_a_rolled_back_release_reads_them(
+    release: str,
+) -> None:
+    """A plan card's `decisions[].step_ids` and `kind` and a `plan.approved`'s
+    `steps[].id` and `choices[].step_ids` and `kind` are members a rolled-back
+    release refuses, so the pause's card and frames, the turn's approved plans and
+    the turn record holding them are stored without them, the members beside them,
+    and restored on load. Each release reads back only the layers it knows."""
+    members, layers = _ROLLBACK_RELEASES[release]
     fixtures = Path(__file__).parent / "wire_fixtures" / "studio"
-    proposed = PlanProposed.model_validate(
-        json.loads((fixtures / "event-03-plan-proposed.json").read_text())
-    )
+    raw = json.loads((fixtures / "event-03-plan-proposed.json").read_text())
+    proposed = PlanProposed.model_validate(raw)
+    assert all(d.step_ids for d in proposed.decisions or ())
+    assert any(d.kind for d in proposed.decisions or ())
     raw_unit = json.loads((fixtures / "event-22-plan-proposed-unit.json").read_text())
     unit_card = PlanProposed.model_validate(
-        {**raw_unit, "decisions": [{**d, "step_ids": ["s1"]} for d in raw_unit["decisions"]]}
+        {
+            **raw_unit,
+            "decisions": [{**d, "step_ids": ["s1"], "kind": "unit"} for d in raw_unit["decisions"]],
+        }
     )
+    raw_approved = json.loads((fixtures / "event-16-plan-approved.json").read_text())
     approved = PlanApproved.model_validate(
-        json.loads((fixtures / "event-16-plan-approved.json").read_text())
+        {**raw_approved, "choices": [{**c, "kind": "window"} for c in raw_approved["choices"]]}
     )
     assert approved.steps[0].id and approved.choices and approved.choices[0].step_ids
     note = MessageComplete(event="message.complete", seq=8, text="Version 1 is still there.")
@@ -2098,13 +2164,40 @@ def test_a_pause_and_an_approved_plan_are_stored_as_a_rolled_back_release_reads_
     studio_store._apply_delta(reloaded, stored)
 
     entry = stored["pending"]["int_1"]
+    record = stored["turn:0"]
+
+    def read(frame: dict[str, Any], beside: Mapping[str, Any], key: str, at: str) -> Any:
+        """`frame` as `release` loads it: each layer it knows put back from
+        `beside[<key>_<layer>][at]`."""
+        for layer in layers:
+            frame = _put_back(frame, (beside.get(f"{key}_{layer}") or {}).get(at))
+        return frame
+
+    card = entry["card"]
+    for layer in layers:
+        card = _put_back(card, entry.get(f"card_{layer}"))
     kept = [
-        (PlanProposed, entry["card"]),
-        *((STUDIO_FRAME_ADAPTER.validate_python(f).__class__, f) for f in entry["frames"]),
-        *((PlanApproved, frame) for frame in stored["turn_approved"]),
-        *((PlanApproved, frame) for frame in stored["turn:0"]["approved"]),
+        (PlanProposed, card),
+        *(
+            (
+                STUDIO_FRAME_ADAPTER.validate_python(frame).__class__,
+                read(frame, entry, "frames", str(index)),
+            )
+            for index, frame in enumerate(entry["frames"])
+        ),
+        *(
+            (PlanApproved, read(frame, stored, "turn_approved", frame["revision"]))
+            for frame in stored["turn_approved"]
+        ),
+        *(
+            (PlanApproved, read(frame, record, "approved", frame["revision"]))
+            for frame in record["approved"]
+        ),
     ]
-    assert [where for model, frame in kept for where in _rollback_refusals(model, frame)] == []
+    refused = [
+        where for model, frame in kept for where in _rollback_refusals(members, model, frame)
+    ]
+    assert refused == []
     (pause,) = reloaded.pending.values()
     assert (pause.card, pause.frames) == (unit_card, (note, proposed, unit_card))
     assert reloaded.turn_approved == state.turn_approved

@@ -206,6 +206,15 @@ from harness.wire import RetryMode
 
 logger = logging.getLogger(__name__)
 
+# The chart a `make_charts` call is drawing while it calls the executor: the
+# call's id (`OrchestratorCall.call_id`) and the chart's index in its
+# `charts`. The Studio's recording executor keeps it with each write, so the
+# card names the entry the call's running line announced
+# (`harness.studio_translate`), however many entries share a title and type.
+current_chart_entry: ContextVar[tuple[str, int] | None] = ContextVar(
+    "make_charts_current_chart_entry", default=None
+)
+
 # The turn's completed fetches: `_fetch_key` -> the spec_id fetched, its
 # summary and the ids of its frames, every one described, or the refusal of a
 # fetch that served no observations.
@@ -215,8 +224,9 @@ _FETCHES_KEY = "orchestrator:fetches"
 _CANVAS_SERIES_KEY = "orchestrator:canvas_series"
 # The cards `make_charts` drew this turn that are still on the canvas:
 # {"turn", "drawn"}, `drawn` mapping `_card_identity` to the card's
-# {"component_id", "revision"}, the revision it was drawn as; a card the harness
-# could not read back also holds "unreadable": True and is not on the canvas.
+# {"component_id", "revision"}, the revision it was drawn as; a card cut to
+# its largest members at one period also holds "cut": True, and a card the harness
+# could not read back holds "unreadable": True and is not on the canvas.
 # `remove_cards` drops the cards it takes off.
 _DRAWN_CARDS_KEY = "orchestrator:drawn_cards"
 
@@ -233,6 +243,17 @@ def drawn_cards(state: Mapping[str, Any], turn_id: str) -> frozenset[tuple[str, 
         (card["component_id"], card["revision"])
         for card in held["drawn"].values()
         if not card.get("unreadable") and card.get("component_id")
+    )
+
+
+def cut_cards(state: Mapping[str, Any]) -> frozenset[str]:
+    """The component ids of the cards `make_charts` drew cut to their largest
+    members at one period (`_DRAWN_CARDS_KEY`), whose years cannot change."""
+    held = state.get(_DRAWN_CARDS_KEY) or {}
+    return frozenset(
+        str(card["component_id"])
+        for card in (held.get("drawn") or {}).values()
+        if isinstance(card, Mapping) and card.get("cut") and card.get("component_id")
     )
 
 
@@ -2567,7 +2588,7 @@ def build_orchestrator_tools(
         key = _fetch_key(args, block)
         earlier = (call.state.get(_FETCHES_KEY) or {}).get(key)
         if earlier is not None:
-            # A plan may have returned these frames since; handed out by
+            # A plan may have returned these frames since. Handed out by
             # this fetch, they come from no plan step.
             forget_plan_steps(call.state, earlier.get("frames") or ())
             frames = stored_mapping(call.state, ORCHESTRATOR_FRAMES_KEY)
@@ -2974,7 +2995,11 @@ def build_orchestrator_tools(
             )
             _remember_drawn(
                 identity,
-                {"component_id": component["component_id"], "revision": component["revision"]},
+                {
+                    "component_id": component["component_id"],
+                    "revision": component["revision"],
+                    **({"cut": True} if cut is not None else {}),
+                },
             )
             return entry, None, False
 
@@ -2997,9 +3022,13 @@ def build_orchestrator_tools(
                 dimension=dimension[0],
             )
 
+        entered = None
         try:
             attempted = charts[:MAX_CHARTS_PER_CALL]
             for index, chart in enumerate(attempted):
+                if call.call_id is not None:
+                    token = current_chart_entry.set((call.call_id, index))
+                    entered = entered or token
                 later = index < len(attempted) - 1
                 frame = frames.get(chart.frame)
                 if frame is None:
@@ -3121,6 +3150,8 @@ def build_orchestrator_tools(
                 if stop:
                     break
         finally:
+            if entered is not None:
+                current_chart_entry.reset(entered)
             # After the awaits, so the counts are read afresh. The `finally`
             # covers cancellation and anything raised outside the per-chart
             # `try`. A failed write is caught above. A call that read a card

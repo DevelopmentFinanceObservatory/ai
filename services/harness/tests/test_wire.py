@@ -34,11 +34,13 @@ from harness.wire import (
     STUDIO_REQUEST_ADAPTER,
     ActivityStep,
     CancelRequest,
+    CardChanges,
     ClientFeature,
     ComponentCreated,
     ComponentRevised,
     CompositionMutation,
     CompositionUpdated,
+    ConversationRead,
     Done,
     ElicitationRequest,
     ErrorFrame,
@@ -48,6 +50,7 @@ from harness.wire import (
     OperationAxis,
     OperationVerb,
     OptionAnswer,
+    PlacesOptions,
     PlanApproved,
     PlanDecision,
     PlanOperation,
@@ -96,6 +99,8 @@ EVENT_FIXTURES = {
     "event-20-elicitation-multi-select.json": ElicitationRequest,
     "event-21-elicitation-unit-pick.json": ElicitationRequest,
     "event-22-plan-proposed-unit.json": PlanProposed,
+    "event-23-component-card-changes.json": ComponentCreated,
+    "event-24-activity-step-coming-cards.json": ActivityStep,
 }
 
 REQUEST_FIXTURES = {
@@ -120,6 +125,15 @@ REQUEST_FIXTURES = {
     "request-19-turn-client-features.json": TurnRequest,
     "request-20-interrupt-switch-unit.json": InterruptResponse,
     "request-21-cancel-turn.json": CancelRequest,
+    "request-22-turn-apply-change-window.json": TurnRequest,
+    "request-23-turn-apply-change-places.json": TurnRequest,
+}
+
+
+# The answers of the read routes, by fixture.
+RESPONSE_FIXTURES = {
+    "response-01-places-options.json": PlacesOptions,
+    "response-02-state-card-change.json": ConversationRead,
 }
 
 
@@ -130,7 +144,16 @@ def _load(name: str) -> dict:
 def test_every_contract_fixture_is_covered() -> None:
     """A fixture file added to the contract without a pin here fails this test."""
     on_disk = {p.name for p in FIXTURES.glob("*.json")}
-    assert on_disk == set(EVENT_FIXTURES) | set(REQUEST_FIXTURES)
+    assert on_disk == set(EVENT_FIXTURES) | set(REQUEST_FIXTURES) | set(RESPONSE_FIXTURES)
+
+
+@pytest.mark.parametrize("name", sorted(RESPONSE_FIXTURES))
+def test_response_fixture_round_trips_exactly(name: str) -> None:
+    raw = _load(name)
+
+    answer = RESPONSE_FIXTURES[name].model_validate(raw)
+
+    assert answer.model_dump(mode="json", exclude_unset=True) == raw
 
 
 @pytest.mark.parametrize("name", sorted(EVENT_FIXTURES))
@@ -325,6 +348,38 @@ def test_a_malformed_answer_is_refused(answer: dict[str, Any]) -> None:
         STUDIO_REQUEST_ADAPTER.validate_python(raw)
 
 
+_ABSENT = object()
+_STREAMING_REQUESTS = [
+    "request-01-turn.json",
+    "request-03-interrupt-approve.json",
+    "request-14-resume.json",
+]
+
+
+@pytest.mark.parametrize("name", _STREAMING_REQUESTS)
+@pytest.mark.parametrize(
+    ("value", "held"),
+    [(_ABSENT, False), (False, False), (True, True), ("true", None), (1, None), (None, None)],
+    ids=["absent", "false", "true", "string", "number", "null"],
+)
+def test_a_streaming_request_takes_hold_removals_only_as_a_boolean(
+    name: str, value: object, held: bool | None
+) -> None:
+    """`hold_removals` on a turn, an interrupt answer and a resume: absent
+    is false, a boolean is taken, and anything else is refused."""
+    raw = _load(name)
+    if value is not _ABSENT:
+        raw["hold_removals"] = value
+
+    if held is None:
+        with pytest.raises(ValidationError):
+            STUDIO_REQUEST_ADAPTER.validate_json(json.dumps(raw))
+        return
+    request = STUDIO_REQUEST_ADAPTER.validate_json(json.dumps(raw))
+    assert isinstance(request, TurnRequest | InterruptResponse | ResumeRequest)
+    assert request.hold_removals is held
+
+
 @pytest.mark.parametrize("turn_index", [0, 2**31], ids=["zero", "past-postgres-int"])
 def test_a_cancel_naming_a_turn_out_of_range_is_refused(turn_index: int) -> None:
     raw = {**_load("request-21-cancel-turn.json"), "turn_index": turn_index}
@@ -333,8 +388,39 @@ def test_a_cancel_naming_a_turn_out_of_range_is_refused(turn_index: int) -> None
         STUDIO_REQUEST_ADAPTER.validate_python(raw)
 
 
-def test_apply_unit_comes_alone() -> None:
-    raw = {**_load("request-16-turn-apply-unit.json"), "message": "hello"}
+@pytest.mark.parametrize(
+    "fixture", ["request-16-turn-apply-unit.json", "request-22-turn-apply-change-window.json"]
+)
+def test_a_card_change_comes_alone(fixture: str) -> None:
+    raw = {**_load(fixture), "message": "hello"}
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+def test_apply_unit_and_apply_change_do_not_come_together() -> None:
+    raw = {
+        **_load("request-16-turn-apply-unit.json"),
+        "apply_change": _load("request-22-turn-apply-change-window.json")["apply_change"],
+    }
+
+    with pytest.raises(ValidationError):
+        STUDIO_REQUEST_ADAPTER.validate_python(raw)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"kind": "window", "start_year": 2024, "end_year": 2023},
+        {"kind": "places", "role": "observationAbout", "entities": []},
+        {"kind": "places", "role": "observationAbout", "entities": [""]},
+        {"kind": "breakdown", "level": "sector"},
+    ],
+    ids=["reversed-years", "no-places", "blank-place", "unknown-kind"],
+)
+def test_a_card_change_that_names_no_change_is_refused(change: dict[str, Any]) -> None:
+    raw = _load("request-22-turn-apply-change-window.json")
+    raw["apply_change"]["change"] = change
 
     with pytest.raises(ValidationError):
         STUDIO_REQUEST_ADAPTER.validate_python(raw)
@@ -353,6 +439,19 @@ def test_apply_unit_and_apply_choice_do_not_come_together() -> None:
 def test_an_unknown_frame_member_is_refused() -> None:
     raw = _load("event-01-message-delta.json")
     raw["surprise"] = True
+
+    with pytest.raises(ValidationError):
+        STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+
+@pytest.mark.parametrize(
+    "offer",
+    [{"label": {}}, {"label": {"singular": ""}}, {"max": 0}],
+    ids=["label-naming-no-form", "label-empty-form", "max-below-one"],
+)
+def test_a_places_offer_with_an_empty_label_or_max_is_refused(offer: dict[str, Any]) -> None:
+    raw = _load("event-23-component-card-changes.json")
+    raw["card_changes"]["places"][0].update(offer)
 
     with pytest.raises(ValidationError):
         STUDIO_FRAME_ADAPTER.validate_python(raw)
@@ -451,6 +550,26 @@ def test_component_revised_requires_at_least_one_changed_field() -> None:
 
     with pytest.raises(ValidationError):
         STUDIO_FRAME_ADAPTER.validate_python(raw)
+
+
+@pytest.mark.parametrize("offers", ["absent", "none", "some"])
+def test_a_revised_frame_tells_no_offers_from_offers_it_does_not_carry(offers: str) -> None:
+    """The stream drops `None` members, and a revised card offering nothing
+    reaches the page as `card_changes: null`, while a frame that did not work
+    the offers out again carries no member."""
+    offered = _load("event-23-component-card-changes.json")["card_changes"]
+    frame = STUDIO_FRAME_ADAPTER.validate_python(_load("event-07-component-revised.json"))
+    expected = {"absent": {}, "none": {"card_changes": None}, "some": {"card_changes": offered}}
+    if offers != "absent":
+        frame = frame.model_copy(
+            update={
+                "card_changes": CardChanges.model_validate(offered) if offers == "some" else None
+            }
+        )
+
+    dumped = json.loads(frame.model_dump_json(exclude_none=True))
+
+    assert {k: v for k, v in dumped.items() if k == "card_changes"} == expected[offers]
 
 
 def test_a_mutation_op_missing_its_required_field_is_refused() -> None:

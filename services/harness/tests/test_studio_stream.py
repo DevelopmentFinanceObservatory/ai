@@ -39,16 +39,23 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from google.genai import types
+from harness import studio as studio_module
 from harness import studio_stream
+from harness.conversation import current_conversation_id
 from harness.fatal_codes import wire_error
+from harness.studio import _SegmentWork, event_key
 from harness.studio_relay import Channel, StudioStream
 from harness.studio_state import (
     ConversationState,
     SegmentLost,
     _PendingInterrupt,
+    land_component,
+    remove_cards,
 )
 from harness.studio_store import SegmentClose, closed_turn_error
 from harness.studio_stream import (
@@ -60,9 +67,12 @@ from harness.studio_stream import (
     ending,
     own_segment,
 )
-from harness.studio_translate import recorded_fatal
+from harness.studio_translate import (
+    _RecordingExecutor,
+    recorded_fatal,
+)
 from harness.tool_contracts import HarnessCode, harness_refusal
-from harness.turn.loop import Outcome
+from harness.turn.loop import Outcome, Segment
 from harness.turn.store import Cursor, TurnStatus
 from harness.wire import (
     ActivityStep,
@@ -76,10 +86,12 @@ from harness.wire import (
     StepStatus,
     ToolError,
 )
+from orchestrator.run import ModelResponded, ToolsAnswered
 from pydantic import BaseModel
 from starlette.types import Message
 
 from .failure_text import classed_sentence, is_user_sentence
+from .turn_driver import unconnected_store
 
 PRINCIPAL = "principal"
 CONVERSATION = "conversation"
@@ -609,6 +621,9 @@ class FakeWork:
             error=ToolError(error=code, retry=RetryMode.DO_NOT_RETRY, detail="failed"),
         )
 
+    def owed(self) -> list[BaseModel]:
+        return []
+
     def fatal(self, error: BaseException) -> ErrorFrame:
         del error
         return self._fatal(ErrorCode.CAPABILITY_UNAVAILABLE)
@@ -937,6 +952,9 @@ class _ScriptedWork:
     async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
         return cast(Outcome, result), []
 
+    def owed(self) -> list[BaseModel]:
+        return []
+
     def fatal(self, error: BaseException) -> ErrorFrame:
         raise AssertionError("the work does not fail") from error
 
@@ -982,6 +1000,338 @@ async def _owned(
     while (frame := channel.get_nowait()) is not None:
         frames.append(json.loads(frame.model_dump_json(exclude_none=True)))
     return frames
+
+
+class _RemovingSegment(_SegmentWork):
+    """The Studio's own segment work, its translation, `owed`, `end` and
+    `fatal` as served, over a conversation whose agent removes `cmp_01` of
+    two cards. Its drive stands in for the turn loop: it emits the
+    removal's call, removes the card once the call is translated, emits the
+    call's answer when `answered`, a response drawing a chart when `draws`,
+    and then raises `raises`, ends `ends`, or runs until it is cancelled.
+    With `calls` false it makes no removal call and goes straight to the
+    drawing. `hold` is the request's `hold_removals`, left out when `None`."""
+
+    def __init__(
+        self,
+        conversation: ConversationState,
+        *,
+        remove: bool = True,
+        answered: bool = True,
+        raises: BaseException | None = None,
+        ends: Outcome | None = None,
+        draws: bool = False,
+        calls: bool = True,
+        hold: bool | None = None,
+    ) -> None:
+        runner = SimpleNamespace(
+            recorder=_RecordingExecutor(_never_called, store=unconnected_store()),
+            surface_recorder=None,
+            place_options=None,
+        )
+        self.cursor = SimpleNamespace(state={}, pause=None, error=None)
+        super().__init__(
+            cast(Any, runner),
+            principal=PRINCIPAL,
+            conversation=conversation,
+            cursor=cast(Any, self.cursor),
+            segment_id=SEGMENT,
+            **({} if hold is None else {"hold_removals": hold}),
+        )
+        self._draws = draws
+        self._calls = calls
+        self._remove = remove
+        self._answered = answered
+        self._raises = raises
+        self._ends = ends
+        self._responded = asyncio.Event()
+        self.removed = asyncio.Event()
+
+    async def drive(self, emit: Emit) -> Segment:
+        def recorded(event: Any) -> None:
+            emit(self._marks.recorded(event), key=event_key(event))
+
+        if self._calls:
+            call = types.FunctionCall(id="r", name="remove_cards", args={})
+            recorded(ModelResponded(parts=(types.Part(function_call=call),)))
+            # The call runs once its response is translated, as the agent's does.
+            await self._responded.wait()
+            if self._remove:
+                remove_cards(self._conversation, ["cmp_01"], all_cards=False)
+        self.removed.set()
+        if self._calls and self._answered:
+            answer = types.FunctionResponse(
+                id="r", name="remove_cards", response={"removed": ["cmp_01"]}
+            )
+            recorded(ToolsAnswered(answers=(answer,), state={}))
+        if self._draws:
+            charts = {"charts": [{"frame": "f", "type": "stat_card", "title": "Aid"}]}
+            drawing = types.FunctionCall(id="m", name="make_charts", args=charts)
+            recorded(ModelResponded(parts=(types.Part(function_call=drawing),)))
+        if self._raises is not None:
+            raise self._raises
+        if self._ends is not None:
+            return Segment(cursor=cast(Any, self.cursor), outcome=self._ends)
+        await asyncio.Event().wait()
+        raise AssertionError("the drive runs until it is cancelled")
+
+    async def frames(self, event: Any) -> list[BaseModel]:
+        frames = await super().frames(event)
+        self._responded.set()
+        return frames
+
+
+async def _never_called(*, tool: str, args: dict[str, object]) -> dict[str, object]:
+    raise AssertionError(f"no tool call expected, got {tool}")
+
+
+def _two_cards() -> ConversationState:
+    conversation = ConversationState(conversation_id=CONVERSATION, trace_id="tr")
+    conversation.begin_turn()
+    for cid in ("cmp_01", "cmp_02"):
+        land_component(
+            conversation, {"component_id": cid, "revision": 1, "type": "line_chart", "title": "Aid"}
+        )
+    return conversation
+
+
+_RAISED = RuntimeError("the drive failed")
+
+
+@pytest.mark.parametrize(
+    ("remove", "answered", "raises", "ends"),
+    [
+        (True, True, _RAISED, None),
+        (False, True, _RAISED, None),
+        (True, True, None, Outcome.ABANDONED),
+        (True, True, None, Outcome.LOST),
+        (True, False, _RAISED, None),
+        (True, False, SegmentLost(CONVERSATION), None),
+    ],
+    ids=[
+        "translated-then-raises",
+        "nothing-removed",
+        "abandoned",
+        "lost",
+        "raises-before-the-answer",
+        "lease-lost-before-the-answer",
+    ],
+)
+async def test_a_removal_goes_out_before_the_stream_ends_however_it_ends(
+    spans: Spans,
+    remove: bool,
+    answered: bool,
+    raises: BaseException | None,
+    ends: Outcome | None,
+) -> None:
+    """With `hold_removals`, the drive raises, its turn is abandoned, or
+    another instance takes its lease, after the agent removed a card, whether
+    or not the removal's answer was translated. The stream sends the canvas
+    without the card once, after the removal's line closed, then the `error`
+    frame. With nothing removed, it sends the error alone."""
+    current_conversation_id.set(CONVERSATION)
+    conversation = _two_cards()
+    work = _RemovingSegment(
+        conversation, remove=remove, answered=answered, raises=raises, ends=ends, hold=True
+    )
+
+    frames = await _owned(cast(Any, work), conversation, _LandingStore())
+
+    events = [f["event"] for f in frames if f["event"] != "activity.step"]
+    assert events == (["composition.updated", "error"] if remove else ["error"])
+    if remove and answered:
+        # Held until after the removal's line closes, which the default precedes.
+        assert _order(frames).index("composition.updated") > _order(frames).index(
+            "remove_cards:complete"
+        )
+    if remove:
+        (update,) = [f for f in frames if f["event"] == "composition.updated"]
+        assert [b["component_id"] for b in update["manifest"]["blocks"]] == ["cmp_02"]
+    assert work.owed() == []
+    assert not conversation.take_unreported_removal()
+
+
+@pytest.mark.parametrize("fault", ["fatal-frame", "first-settle"])
+async def test_an_owner_that_fails_still_sends_the_removal_before_its_transient_frame(
+    spans: Spans, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """A fault in the owner: the drive raises and the work's fatal frame
+    raises too (`fatal-frame`), or the turn is abandoned with the removal
+    held and building its update raises the first time the owner takes
+    what the work owes (`first-settle`). The stream sends the removal once,
+    before the transient frame."""
+    current_conversation_id.set(CONVERSATION)
+    conversation = _two_cards()
+    if fault == "fatal-frame":
+        work = _RemovingSegment(conversation, answered=False, raises=_RAISED, hold=True)
+
+        def broken(conversation: ConversationState, error: Exception) -> ErrorFrame:
+            raise RuntimeError("the fatal frame could not be built")
+
+        monkeypatch.setattr(studio_module, "_stream_fatal", broken)
+    else:
+        work = _RemovingSegment(conversation, ends=Outcome.ABANDONED, hold=True)
+        translator = work._translator
+        build = translator._composition_update
+        attempts: list[int] = []
+
+        def once_broken() -> list[Any]:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("the update could not be built")
+            return build()
+
+        monkeypatch.setattr(translator, "_composition_update", once_broken)
+
+    frames = await _owned(cast(Any, work), conversation, _LandingStore())
+
+    events = [f["event"] for f in frames if f["event"] != "activity.step"]
+    assert events == ["composition.updated", "error"]
+    assert frames[-1]["error"]["error"] == "transient_unavailable"
+    assert not conversation.take_unreported_removal()
+
+
+def _order(frames: list[dict[str, Any]]) -> list[str]:
+    """The removal's and the drawing's lines, canvas updates and the error,
+    in stream order."""
+    return [
+        f"{f.get('tool')}:{f['status']}" if f["event"] == "activity.step" else f["event"]
+        for f in frames
+        if f["event"] != "activity.step" or f.get("tool") in {"remove_cards", "make_charts"}
+    ]
+
+
+_BASE_ORDER = [
+    "remove_cards:running",
+    "composition.updated",
+    "remove_cards:complete",
+    "make_charts:running",
+    "make_charts:failed",
+    "error",
+]
+_HELD_ORDER = [
+    "remove_cards:running",
+    "remove_cards:complete",
+    "make_charts:running",
+    "composition.updated",
+    "make_charts:failed",
+    "error",
+]
+
+
+@pytest.mark.parametrize(
+    ("hold", "answered", "order", "left_marked"),
+    [
+        (None, True, _BASE_ORDER, False),
+        (False, True, _BASE_ORDER, False),
+        (True, True, _HELD_ORDER, False),
+        (None, False, ["remove_cards:running", "remove_cards:failed", "error"], True),
+    ],
+    ids=["absent", "false", "true", "absent-raises-before-the-answer"],
+)
+async def test_a_removal_then_a_drawing_streams_in_the_order_the_request_asks(
+    spans: Spans, hold: bool | None, answered: bool, order: list[str], left_marked: bool
+) -> None:
+    """A turn removes a card, then draws one. Without `hold_removals` the
+    canvas update goes out as the removal's answer is drained, ahead of the
+    removal's closing line. With it, the update waits for the drawing line
+    and follows it. The abandoned turn fails the drawing line. Without the
+    member, a drive that raises before the removal's answer sends no update
+    and leaves the removal marked on the conversation for the turn's next
+    stream."""
+    current_conversation_id.set(CONVERSATION)
+    conversation = _two_cards()
+    work = _RemovingSegment(
+        conversation,
+        answered=answered,
+        draws=answered,
+        ends=None if not answered else Outcome.ABANDONED,
+        raises=None if answered else _RAISED,
+        hold=hold,
+    )
+
+    frames = await _owned(cast(Any, work), conversation, _LandingStore())
+
+    assert _order(frames) == order
+    assert conversation.take_unreported_removal() is left_marked
+
+
+@pytest.mark.parametrize(
+    ("first", "answered", "then", "left_sent", "resumed_sends"),
+    [
+        (True, True, None, 1, None),
+        (True, False, None, 1, None),
+        (None, True, True, 1, None),
+        (None, False, True, 0, "make_charts:running"),
+        (None, False, None, 0, "first"),
+    ],
+    ids=[
+        "held-then-not-answered",
+        "held-then-not-unanswered",
+        "not-then-held-answered",
+        "not-then-held-unanswered",
+        "not-then-not-unanswered",
+    ],
+)
+async def test_a_client_that_leaves_has_its_removal_reported_once_whatever_the_next_stream_asks(
+    spans: Spans,
+    first: bool | None,
+    answered: bool,
+    then: bool | None,
+    left_sent: int,
+    resumed_sends: str | None,
+) -> None:
+    """The client leaves after the agent removed a card, before or after the
+    removal's answer was translated, and a later stream picks the turn up
+    and draws. A segment with `hold_removals` reports the removal as it
+    ends, on the stream the client left. One without it reports it when its
+    answer is drained, and otherwise leaves it marked on the conversation.
+    The later stream, whose first response draws,
+    then reports it at its first drain, ahead of the drawing line, without
+    the member, and holds it to right after that line with it. Across both
+    streams it goes out once."""
+    current_conversation_id.set(CONVERSATION)
+    conversation = _two_cards()
+    work = _RemovingSegment(conversation, answered=answered, hold=first)
+    channel: Channel = asyncio.Queue()
+    gone = asyncio.Event()
+    await conversation.lock.acquire()
+    owner = asyncio.ensure_future(
+        own_segment(
+            cast(Any, work),
+            store=_LandingStore(),
+            conversation=conversation,
+            principal=PRINCIPAL,
+            conversation_id=CONVERSATION,
+            segment_id=SEGMENT,
+            channel=channel,
+            gone=gone,
+            hold=LockHold(conversation.lock),
+        )
+    )
+    await work.removed.wait()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    gone.set()
+    await owner
+    left: list[str] = []
+    while not channel.empty() and (frame := channel.get_nowait()) is not None:
+        left.append(frame.event)
+    resumed = _RemovingSegment(
+        conversation, calls=False, draws=True, ends=Outcome.ABANDONED, hold=then
+    )
+
+    frames = await _owned(cast(Any, resumed), conversation, _LandingStore())
+
+    assert left.count("composition.updated") == left_sent
+    order = _order(frames)
+    assert order.count("composition.updated") == (0 if resumed_sends is None else 1)
+    if resumed_sends == "first":
+        assert order[0] == "composition.updated"
+    elif resumed_sends is not None:
+        assert order[order.index("composition.updated") - 1] == resumed_sends
+    assert work.owed() == []
+    assert not conversation.take_unreported_removal()
 
 
 def _running(conversation: ConversationState, step_id: str, **fields: Any) -> ActivityStep:

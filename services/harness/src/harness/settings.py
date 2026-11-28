@@ -348,6 +348,11 @@ class Settings(BaseServiceSettings):
     # capabilities document does not explain). An apis whose capabilities document
     # lists no `stated_scope` door answers the route 404 and reads as off.
     planner_stated_scope: bool = True
+    # Whether a Studio card drawn on one retrieval offers a change of the places
+    # each role binds (`STUDIO_PLACE_OPTIONS`, `harness.place_options`), whose
+    # options `GET /api/studio/places` reads from dfo-apis' options door when
+    # asked. Off, cards offer no change of places and the route refuses.
+    studio_place_options: bool = True
     # The origin of dfo-apis (`DFO_APIS_URL`).
     dfo_apis_url: str = "http://localhost:8083"
     # The combined server's limits for outside callers; see the class docstring.

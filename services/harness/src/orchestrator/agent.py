@@ -725,7 +725,9 @@ def _tool_function(function: FunctionType) -> Callable[..., Awaitable[dict[str, 
         deps = ctx.deps
         arguments = {name: value for name, value in raw.items() if name in accepted}
         if takes_call:
-            arguments[CALL_PARAMETER] = OrchestratorCall(state=deps.view, turn_id=deps.turn_id)
+            arguments[CALL_PARAMETER] = OrchestratorCall(
+                state=deps.view, turn_id=deps.turn_id, call_id=ctx.tool_call_id
+            )
         try:
             answer = function(**arguments)
             if is_async:

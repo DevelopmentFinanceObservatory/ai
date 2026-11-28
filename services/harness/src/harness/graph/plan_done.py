@@ -753,7 +753,7 @@ class HandBack:
     reads: list[bool] = field(default_factory=list)
     wholes: dict[str, str] = field(default_factory=dict)
     # Frame id -> the id of the step that gave it, None for a frame two steps
-    # gave or one described with no step: a card drawn on it names no step.
+    # gave or one described with no step. A card drawn on it names no step.
     plan_steps: dict[str, str | None] = field(default_factory=dict)
 
     @property

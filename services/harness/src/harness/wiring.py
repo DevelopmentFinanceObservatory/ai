@@ -14,6 +14,7 @@ from compiler.surface import ToolSurface
 from planner.stated_scope import ApisStatedScopeReader, StatedScopeReader, apis_stated_scope_reader
 
 from harness.graph.interfaces import PlannerModel
+from harness.place_options import ApisPlaceOptions
 from harness.planner_adapter import PlannerAdapter, PlannerAdapterError
 from harness.prefix_cache import PrefixCache
 from harness.settings import Settings
@@ -52,6 +53,16 @@ def build_stated_scope_reader(settings: Settings) -> ApisStatedScopeReader | Non
     if not settings.planner_stated_scope:
         return None
     return apis_stated_scope_reader(base_url=settings.dfo_apis_url)
+
+
+def build_place_options_reader(settings: Settings) -> ApisPlaceOptions | None:
+    """The reader of the places a Studio card's roles can change to, from
+    dfo-apis at `settings.dfo_apis_url` (`DFO_APIS_URL`), or `None` where
+    `studio_place_options` is off. Build it once for the process and close it at
+    shutdown (`ApisPlaceOptions.aclose`), since it holds a connection pool."""
+    if not settings.studio_place_options:
+        return None
+    return ApisPlaceOptions(base_url=settings.dfo_apis_url)
 
 
 def handing_back_planner_failures(planner: PlannerModel) -> PlannerModel:

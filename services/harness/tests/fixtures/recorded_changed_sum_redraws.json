@@ -1,0 +1,724 @@
+{
+  "_source": "The redraws of a sum of gross ODA disbursements to Kenya for health refused live: the card's stored intent as the platform kept it, the pair its retrieval was served under (old_served), and for each change the new retrieval's served pair, the sum's derived manifest as served and the sum frame's view (describe_frame), each recorded against the dev data API; the labels its Search block resolved (block_labels: its resolved concept, measure and shape labels and sentence plan, cut from the block), and the card's title as drawn followed by the titles its three changes redrew (titles).",
+  "stored_intent": {
+    "type": "line_chart",
+    "title": "Total gross ODA disbursements to Kenya for health, 2010 to 2020",
+    "select": {
+      "stat_var": "dcid:spec_c3bdd40d307f08d0b3a0cbfff2ba1d00"
+    },
+    "frame_ref": {
+      "spec_id": "ops_3d3453aaf965325cebef00301a6b07ee",
+      "content_version": "ocv_9a4bd9015ee71d237e015733f1bd4111"
+    }
+  },
+  "changes": {
+    "years": {
+      "served": {
+        "spec_id": "spec_311615d61ee3724fd993dbbbde7a9fc4",
+        "content_version": "cv_aff31a9058a89fbd86f4cd406c62f52b"
+      },
+      "derived_manifest": {
+        "spec_id": "ops_5e14d9f58920b26b00dfcd318adebddf",
+        "content_version": "ocv_a4d396849b603e20cc22e3fa81ce543f",
+        "retention": {
+          "pinned": false,
+          "held_until": "2026-12-27T13:07:46.827046Z"
+        },
+        "citation": {
+          "text": "OECD Creditor Reporting System (CRS) (2026), processed by the Development Finance Observatory",
+          "sources": [
+            {
+              "ref": "provenance/OECDCreditorReportingSystem",
+              "label": "OECD Creditor Reporting System (CRS)",
+              "processing_level": null,
+              "license": "OECD Terms and Conditions",
+              "license_type": "OECDTermsAndConditions",
+              "license_url": "https://www.oecd.org/en/about/terms-conditions.html",
+              "url": "https://data-explorer.oecd.org/vis?tm=crs&pg=0&snb=30&df[ds]=dsDisseminateFinalDMZ&df[id]=DSD_CRS%40DF_CRS&df[ag]=OECD.DCD.FSD&df[vs]=1.6&isAvailabilityDisabled=false&page=0",
+              "source": {
+                "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd",
+                "label": "Organisation for Economic Co-operation and Development (OECD)"
+              },
+              "data_commons": {
+                "id": "dfo",
+                "label": "Development Finance Observatory"
+              },
+              "documentation": {
+                "publisher": "Organisation for Economic Co-operation and Development (OECD)",
+                "description": "The Creditor Reporting System (CRS) is the OECD Development Assistance Committee's activity-level database of development finance. Each record is a project, programme or contribution reported by a bilateral provider, a multilateral organisation or a private foundation, with its recipient, sector and purpose, channel of delivery, aid type, and commitment and disbursement amounts. It covers ODA, other official flows, private sector instruments and private philanthropy, and is the source for any breakdown by sector, channel or project.",
+                "source_data_url": "https://webfs-dcd.oecd.org/files/dotStat/DSD_CRS/CRS.parquet",
+                "attribution": "OECD (2026), Creditor Reporting System (CRS), OECD Data Explorer, https://webfs-dcd.oecd.org/files/dotStat/DSD_CRS/CRS.parquet (accessed on 2026-10-15)",
+                "update_cadence": "Quarterly",
+                "last_update": "2026-10-29",
+                "years_covered": "1973-2025",
+                "granularity": "Annual, by provider and recipient",
+                "currencies": [
+                  "USD"
+                ],
+                "transformation_log": [
+                  {
+                    "transformation": "Download the source data",
+                    "description": "The complete CRS file is downloaded from the OECD each time the pipeline runs, and replaces the previous copy, so the data reflects the OECD's latest release."
+                  },
+                  {
+                    "transformation": "Mark the partial year",
+                    "description": "The OECD publishes data for a year as donors report it, and its final release in December of the following year covers every donor. Until then, the year is partial. The pipeline publishes it, and the import's provenance names it in `partialObservationDate`."
+                  },
+                  {
+                    "transformation": "Exclude donor core contributions to multilaterals",
+                    "description": "The OECD instructs that donor core contributions to multilateral organisations, reported as ordinary CRS rows flagged `bi_multi = 2`, are excluded to compute bilateral flows. These contributions are already reported in Members' Total Use of the Multilateral System, so keeping them would double count."
+                  },
+                  {
+                    "transformation": "Standardise providers and recipients",
+                    "description": "Provider and recipient codes are standardised to Data Commons IDs used across the platform, so data can be compared across datasets."
+                  },
+                  {
+                    "transformation": "Select dimensions",
+                    "description": "Every figure is reported against the year, the provider and the recipient, and four dimensions from the CRS: type of flow, co-operation modality, type of finance and purpose code. The CRS describes each activity in far more detail than this, including project titles, descriptions, channels and policy markers, none of which is carried through."
+                  },
+                  {
+                    "transformation": "Aggregate totals",
+                    "description": "Activities sharing the same year, provider, recipient and dimensions are summed. Commitments, disbursements, net disbursements and grant equivalents are each aggregated as separate measures. Every figure is reported in US dollars at current prices."
+                  }
+                ],
+                "version_history": [
+                  {
+                    "date": "2026-10-29",
+                    "title": "Partial year published, marked as partial",
+                    "changes": [
+                      {
+                        "kind": "changed",
+                        "note": "The partial year, which only some donors have reported ahead of the OECD's final release in December, is included, and the import's provenance marks it with `partialObservationDate`."
+                      }
+                    ]
+                  },
+                  {
+                    "date": "2026-10-15",
+                    "title": "Partial year excluded",
+                    "changes": [
+                      {
+                        "kind": "changed",
+                        "note": "The partial year, which only some donors have reported ahead of the OECD's final release in December, is excluded."
+                      }
+                    ]
+                  },
+                  {
+                    "date": "2026-10-14",
+                    "title": "First release",
+                    "changes": [
+                      {
+                        "kind": "added",
+                        "note": "Commitments, gross and net disbursements, and grant equivalents by donor, recipient, flow type, finance type, modality and purpose, at current US dollar prices. Covers ODA, other official flows, private development finance and private sector instruments."
+                      }
+                    ]
+                  }
+                ]
+              },
+              "licence": "OECD Terms and Conditions",
+              "licence_type": "OECDTermsAndConditions",
+              "licence_url": "https://www.oecd.org/en/about/terms-conditions.html"
+            }
+          ]
+        },
+        "recipe": {
+          "normal_form_hash": "rnf_0319b95bc407de18ab8201cf6f08efb0",
+          "replay_key": "rpk_7e43cdd255d88f93d3e7fd10ed90fb77",
+          "execution_identity": "0.9.1|1.2.0|0.2.0",
+          "tree": {
+            "frame": {
+              "spec_id": "ops_5e14d9f58920b26b00dfcd318adebddf",
+              "content_version": "ocv_a4d396849b603e20cc22e3fa81ce543f"
+            },
+            "inputs": {
+              "frame_ref": {
+                "root": 0,
+                "frame": {
+                  "spec_id": "spec_311615d61ee3724fd993dbbbde7a9fc4",
+                  "content_version": "cv_8f0d796612e72a70ee9cfa293323cb18"
+                }
+              }
+            },
+            "op_spec": {
+              "verb": "aggregate",
+              "frame_ref": {
+                "spec_id": "spec_311615d61ee3724fd993dbbbde7a9fc4",
+                "content_version": "cv_8f0d796612e72a70ee9cfa293323cb18"
+              },
+              "parameters": {
+                "unit": null,
+                "group_by": [
+                  "time_period"
+                ],
+                "aggregation": "sum"
+              },
+              "identity_version": "ops1"
+            }
+          },
+          "roots": [
+            {
+              "frame": {
+                "spec_id": "spec_311615d61ee3724fd993dbbbde7a9fc4",
+                "content_version": "cv_8f0d796612e72a70ee9cfa293323cb18"
+              },
+              "scope": {},
+              "dataset": {
+                "spec_id": "spec_311615d61ee3724fd993dbbbde7a9fc4",
+                "content_version": "cv_aff31a9058a89fbd86f4cd406c62f52b"
+              },
+              "options": {
+                "bundle": false,
+                "format": "parquet",
+                "layout": "frame",
+                "columns": [
+                  "party_class",
+                  "party_kind",
+                  "party_whole"
+                ],
+                "groupby": {
+                  "by": [
+                    "time_period"
+                  ],
+                  "op": "sum"
+                },
+                "without_party_totals": true
+              },
+              "schema_version": 1,
+              "enrichment_stamp": "796c3b009ec1548def1946756b9fb8b5b08f2750a2003ec4e0f0ce18fa294d3b"
+            }
+          ]
+        },
+        "roots": [
+          {
+            "spec_id": "spec_311615d61ee3724fd993dbbbde7a9fc4",
+            "content_version": "cv_aff31a9058a89fbd86f4cd406c62f52b",
+            "rendering": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame",
+              "without_party_totals": true,
+              "groupby": {
+                "by": [
+                  "time_period"
+                ],
+                "op": "sum"
+              }
+            }
+          }
+        ],
+        "resolved_periods": [],
+        "anchor": null,
+        "left_out": [],
+        "left_out_complete": true
+      },
+      "view": {
+        "dimensions": [
+          {
+            "name": "stat_var",
+            "values": [
+              "dcid:spec_311615d61ee3724fd993dbbbde7a9fc4"
+            ],
+            "total_count": 1,
+            "truncated": false,
+            "plural": false
+          },
+          {
+            "name": "unit",
+            "values": [
+              "CurrencyUSD"
+            ],
+            "total_count": 1,
+            "truncated": false,
+            "plural": false
+          },
+          {
+            "name": "measurementMethod",
+            "values": [],
+            "total_count": 0,
+            "truncated": false,
+            "plural": false
+          },
+          {
+            "name": "provenance",
+            "values": [
+              "provenance/OECDCreditorReportingSystem"
+            ],
+            "total_count": 1,
+            "truncated": false,
+            "plural": false
+          }
+        ],
+        "period_grain": "year",
+        "coverage": [
+          "2012",
+          "2018"
+        ],
+        "series_count": 1
+      }
+    },
+    "places": {
+      "served": {
+        "spec_id": "spec_3bf71cd6fc894528902c059af4666047",
+        "content_version": "cv_1c812fbb08918034276402ae225bdf35"
+      },
+      "derived_manifest": {
+        "spec_id": "ops_8df569f369ba1ccea8322440e5a82e31",
+        "content_version": "ocv_d89c8e1bd0a2f866da708dc148e20db4",
+        "retention": {
+          "pinned": false,
+          "held_until": "2026-12-27T13:12:20.247122Z"
+        },
+        "citation": {
+          "text": "OECD Creditor Reporting System (CRS) (2026), processed by the Development Finance Observatory",
+          "sources": [
+            {
+              "ref": "provenance/OECDCreditorReportingSystem",
+              "label": "OECD Creditor Reporting System (CRS)",
+              "processing_level": null,
+              "license": "OECD Terms and Conditions",
+              "license_type": "OECDTermsAndConditions",
+              "license_url": "https://www.oecd.org/en/about/terms-conditions.html",
+              "url": "https://data-explorer.oecd.org/vis?tm=crs&pg=0&snb=30&df[ds]=dsDisseminateFinalDMZ&df[id]=DSD_CRS%40DF_CRS&df[ag]=OECD.DCD.FSD&df[vs]=1.6&isAvailabilityDisabled=false&page=0",
+              "source": {
+                "ref": "dc/s/OrganisationForEconomicCo-operationAndDevelopmentOecd",
+                "label": "Organisation for Economic Co-operation and Development (OECD)"
+              },
+              "data_commons": {
+                "id": "dfo",
+                "label": "Development Finance Observatory"
+              },
+              "documentation": {
+                "publisher": "Organisation for Economic Co-operation and Development (OECD)",
+                "description": "The Creditor Reporting System (CRS) is the OECD Development Assistance Committee's activity-level database of development finance. Each record is a project, programme or contribution reported by a bilateral provider, a multilateral organisation or a private foundation, with its recipient, sector and purpose, channel of delivery, aid type, and commitment and disbursement amounts. It covers ODA, other official flows, private sector instruments and private philanthropy, and is the source for any breakdown by sector, channel or project.",
+                "source_data_url": "https://webfs-dcd.oecd.org/files/dotStat/DSD_CRS/CRS.parquet",
+                "attribution": "OECD (2026), Creditor Reporting System (CRS), OECD Data Explorer, https://webfs-dcd.oecd.org/files/dotStat/DSD_CRS/CRS.parquet (accessed on 2026-10-15)",
+                "update_cadence": "Quarterly",
+                "last_update": "2026-10-29",
+                "years_covered": "1973-2025",
+                "granularity": "Annual, by provider and recipient",
+                "currencies": [
+                  "USD"
+                ],
+                "transformation_log": [
+                  {
+                    "transformation": "Download the source data",
+                    "description": "The complete CRS file is downloaded from the OECD each time the pipeline runs, and replaces the previous copy, so the data reflects the OECD's latest release."
+                  },
+                  {
+                    "transformation": "Mark the partial year",
+                    "description": "The OECD publishes data for a year as donors report it, and its final release in December of the following year covers every donor. Until then, the year is partial. The pipeline publishes it, and the import's provenance names it in `partialObservationDate`."
+                  },
+                  {
+                    "transformation": "Exclude donor core contributions to multilaterals",
+                    "description": "The OECD instructs that donor core contributions to multilateral organisations, reported as ordinary CRS rows flagged `bi_multi = 2`, are excluded to compute bilateral flows. These contributions are already reported in Members' Total Use of the Multilateral System, so keeping them would double count."
+                  },
+                  {
+                    "transformation": "Standardise providers and recipients",
+                    "description": "Provider and recipient codes are standardised to Data Commons IDs used across the platform, so data can be compared across datasets."
+                  },
+                  {
+                    "transformation": "Select dimensions",
+                    "description": "Every figure is reported against the year, the provider and the recipient, and four dimensions from the CRS: type of flow, co-operation modality, type of finance and purpose code. The CRS describes each activity in far more detail than this, including project titles, descriptions, channels and policy markers, none of which is carried through."
+                  },
+                  {
+                    "transformation": "Aggregate totals",
+                    "description": "Activities sharing the same year, provider, recipient and dimensions are summed. Commitments, disbursements, net disbursements and grant equivalents are each aggregated as separate measures. Every figure is reported in US dollars at current prices."
+                  }
+                ],
+                "version_history": [
+                  {
+                    "date": "2026-10-29",
+                    "title": "Partial year published, marked as partial",
+                    "changes": [
+                      {
+                        "kind": "changed",
+                        "note": "The partial year, which only some donors have reported ahead of the OECD's final release in December, is included, and the import's provenance marks it with `partialObservationDate`."
+                      }
+                    ]
+                  },
+                  {
+                    "date": "2026-10-15",
+                    "title": "Partial year excluded",
+                    "changes": [
+                      {
+                        "kind": "changed",
+                        "note": "The partial year, which only some donors have reported ahead of the OECD's final release in December, is excluded."
+                      }
+                    ]
+                  },
+                  {
+                    "date": "2026-10-14",
+                    "title": "First release",
+                    "changes": [
+                      {
+                        "kind": "added",
+                        "note": "Commitments, gross and net disbursements, and grant equivalents by donor, recipient, flow type, finance type, modality and purpose, at current US dollar prices. Covers ODA, other official flows, private development finance and private sector instruments."
+                      }
+                    ]
+                  }
+                ]
+              },
+              "licence": "OECD Terms and Conditions",
+              "licence_type": "OECDTermsAndConditions",
+              "licence_url": "https://www.oecd.org/en/about/terms-conditions.html"
+            }
+          ]
+        },
+        "recipe": {
+          "normal_form_hash": "rnf_184f4671473359ae19386f42ef19418b",
+          "replay_key": "rpk_9f2c8f749529df326bf7c20ab486ddc9",
+          "execution_identity": "0.9.1|1.2.0|0.2.0",
+          "tree": {
+            "frame": {
+              "spec_id": "ops_8df569f369ba1ccea8322440e5a82e31",
+              "content_version": "ocv_d89c8e1bd0a2f866da708dc148e20db4"
+            },
+            "inputs": {
+              "frame_ref": {
+                "root": 0,
+                "frame": {
+                  "spec_id": "spec_3bf71cd6fc894528902c059af4666047",
+                  "content_version": "cv_e952c7ed958bdef867bb2c7156191513"
+                }
+              }
+            },
+            "op_spec": {
+              "verb": "aggregate",
+              "frame_ref": {
+                "spec_id": "spec_3bf71cd6fc894528902c059af4666047",
+                "content_version": "cv_e952c7ed958bdef867bb2c7156191513"
+              },
+              "parameters": {
+                "unit": null,
+                "group_by": [
+                  "time_period"
+                ],
+                "aggregation": "sum"
+              },
+              "identity_version": "ops1"
+            }
+          },
+          "roots": [
+            {
+              "frame": {
+                "spec_id": "spec_3bf71cd6fc894528902c059af4666047",
+                "content_version": "cv_e952c7ed958bdef867bb2c7156191513"
+              },
+              "scope": {},
+              "dataset": {
+                "spec_id": "spec_3bf71cd6fc894528902c059af4666047",
+                "content_version": "cv_1c812fbb08918034276402ae225bdf35"
+              },
+              "options": {
+                "bundle": false,
+                "format": "parquet",
+                "layout": "frame",
+                "columns": [
+                  "party_class",
+                  "party_kind",
+                  "party_whole"
+                ],
+                "groupby": {
+                  "by": [
+                    "time_period"
+                  ],
+                  "op": "sum"
+                },
+                "without_party_totals": true
+              },
+              "schema_version": 1,
+              "enrichment_stamp": "796c3b009ec1548def1946756b9fb8b5b08f2750a2003ec4e0f0ce18fa294d3b"
+            }
+          ]
+        },
+        "roots": [
+          {
+            "spec_id": "spec_3bf71cd6fc894528902c059af4666047",
+            "content_version": "cv_1c812fbb08918034276402ae225bdf35",
+            "rendering": {
+              "format": "parquet",
+              "bundle": false,
+              "layout": "frame",
+              "without_party_totals": true,
+              "groupby": {
+                "by": [
+                  "time_period"
+                ],
+                "op": "sum"
+              }
+            }
+          }
+        ],
+        "resolved_periods": [],
+        "anchor": null,
+        "left_out": [],
+        "left_out_complete": true
+      },
+      "view": {
+        "dimensions": [
+          {
+            "name": "stat_var",
+            "values": [
+              "dcid:spec_3bf71cd6fc894528902c059af4666047"
+            ],
+            "total_count": 1,
+            "truncated": false,
+            "plural": false
+          },
+          {
+            "name": "unit",
+            "values": [
+              "CurrencyUSD"
+            ],
+            "total_count": 1,
+            "truncated": false,
+            "plural": false
+          },
+          {
+            "name": "measurementMethod",
+            "values": [],
+            "total_count": 0,
+            "truncated": false,
+            "plural": false
+          },
+          {
+            "name": "provenance",
+            "values": [
+              "provenance/OECDCreditorReportingSystem"
+            ],
+            "total_count": 1,
+            "truncated": false,
+            "plural": false
+          }
+        ],
+        "period_grain": "year",
+        "coverage": [
+          "2010",
+          "2020"
+        ],
+        "series_count": 1
+      }
+    }
+  },
+  "old_served": {
+    "spec_id": "spec_c3bdd40d307f08d0b3a0cbfff2ba1d00",
+    "content_version": "cv_79d2847b0f045c25a31b2a28cd4ec1c6"
+  },
+  "block_labels": {
+    "spec_id": "spec_c3bdd40d307f08d0b3a0cbfff2ba1d00",
+    "resolved": {
+      "concept_label": "health",
+      "measure_label": "gross disbursements",
+      "shape": {
+        "label": "gross disbursements (health and population policy, programme, and reproductive health, official development assistance)"
+      },
+      "sentence_plan": [
+        {
+          "axis": "what",
+          "kind": "slot",
+          "text": "Gross ODA disbursements",
+          "states": [
+            "how:crsTypeOfFlow",
+            "how:financialFlowType",
+            "how:nettingBasis",
+            "axis:populationType",
+            "axis:measuredProperty"
+          ],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": " to ",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "axis": "where",
+          "kind": "slot",
+          "role": "destination",
+          "text": "Kenya",
+          "states": [
+            "where:"
+          ],
+          "segment": "heading",
+          "binding_ref": "where:",
+          "entity_refs": [
+            "country/KEN"
+          ]
+        },
+        {
+          "kind": "text",
+          "text": " from ",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "kind": "slot",
+          "role": "origin",
+          "text": "47 providers",
+          "states": [
+            "origin:"
+          ],
+          "segment": "heading",
+          "binding_ref": "origin:",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": " for ",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "health and population policy, programme, and reproductive health",
+          "states": [
+            "how:crsPurpose"
+          ],
+          "segment": "heading",
+          "binding_ref": "how:crsPurpose",
+          "entity_refs": [],
+          "property_dcid": "crsPurpose"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:crsCooperationModality",
+          "entity_refs": [],
+          "property_dcid": "crsCooperationModality"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:crsTypeOfFinance",
+          "entity_refs": [],
+          "property_dcid": "crsTypeOfFinance"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:iatiTransactionType",
+          "entity_refs": [],
+          "property_dcid": "iatiTransactionType"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:crsTypeOfFlow",
+          "entity_refs": [],
+          "property_dcid": "crsTypeOfFlow"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:financialFlowType",
+          "entity_refs": [],
+          "property_dcid": "financialFlowType"
+        },
+        {
+          "axis": "how",
+          "kind": "slot",
+          "text": "",
+          "states": [],
+          "segment": "heading",
+          "binding_ref": "how:nettingBasis",
+          "entity_refs": [],
+          "property_dcid": "nettingBasis"
+        },
+        {
+          "kind": "text",
+          "text": ", ",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "axis": "when",
+          "kind": "slot",
+          "text": "2010 to 2020",
+          "states": [
+            "when:"
+          ],
+          "segment": "heading",
+          "binding_ref": "when:",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "states": [],
+          "segment": "heading",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": " ",
+          "states": [],
+          "segment": "byline",
+          "entity_refs": []
+        },
+        {
+          "axis": "unit",
+          "kind": "slot",
+          "text": "Current US dollars",
+          "states": [
+            "unit:",
+            "axis:measurementQualifier"
+          ],
+          "segment": "byline",
+          "binding_ref": "unit:",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": " \u00b7 ",
+          "states": [],
+          "segment": "byline",
+          "entity_refs": []
+        },
+        {
+          "axis": "source",
+          "kind": "slot",
+          "text": "OECD Creditor Reporting System (CRS)",
+          "states": [
+            "source:"
+          ],
+          "segment": "byline",
+          "entity_refs": []
+        },
+        {
+          "kind": "text",
+          "text": ".",
+          "states": [],
+          "segment": "byline",
+          "entity_refs": []
+        }
+      ]
+    }
+  },
+  "titles": [
+    "Total gross ODA disbursements to Kenya for health, 2010 to 2020",
+    "Health, Kenya, 2012 to 2018",
+    "Health, Kenya, 2014 to 2020",
+    "Health, Uganda, 2014 to 2020"
+  ]
+}

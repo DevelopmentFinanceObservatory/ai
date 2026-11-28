@@ -1,0 +1,426 @@
+{
+  "_source": "component.created frames recorded from live Studio runs against the dev data API; each entry keeps the card's type, title, the select the platform resolved (its card_selection step's coordinates), the select its stored intent holds as written (written_select), its fact summary, its offer and its inputs as recorded.",
+  "debt_kenya": {
+    "card_changes": {
+      "places": [
+        {
+          "chosen": [
+            {
+              "id": "country/KEN",
+              "label": "Kenya"
+            }
+          ],
+          "multiple": true,
+          "role": "destination"
+        }
+      ],
+      "spec_id": "spec_17b2b89f595ca513920c6ec506729dbc",
+      "window": {
+        "end_year": 2015,
+        "first_year": 1970,
+        "last_year": 2025,
+        "start_year": 2000
+      }
+    },
+    "fact_summary": {
+      "attribution": {
+        "indicator_count": 1,
+        "label": "World Bank International Debt Statistics (IDS) (2026), via the Development Finance Observatory \u00b7 1 indicator(s)",
+        "source_count": 1
+      },
+      "component_id": "cmp_01M8DZ25TB237BRRSQSWN5Z9R2",
+      "defaults": [],
+      "revision": 1,
+      "series": [
+        {
+          "coordinates": {
+            "financingRecipient": "country/KEN",
+            "provenance": "provenance/WorldBankInternationalDebtStatistics",
+            "stat_var": "dcid:Amount_FinancialPosition_AmountOutstanding_Nominal",
+            "unit": "CurrencyUSD"
+          },
+          "first": 6150000000.0,
+          "first_period": "2000",
+          "id": "s_243debf9f86469d0",
+          "label": "Kenya",
+          "last": 19800000000.0,
+          "last_period": "2015",
+          "point_count": 16
+        }
+      ],
+      "unit": "US Dollar",
+      "window": {
+        "end": "2015",
+        "start": "2000"
+      }
+    },
+    "inputs": [
+      {
+        "content_version": "cv_53a5e25f742bd892c440d7a5d2f3b650",
+        "spec_id": "spec_3f226c60ff8495308385af38e006e38f"
+      }
+    ],
+    "select": {
+      "financingRecipient": [
+        "country/KEN"
+      ],
+      "stat_var": [
+        "Amount_FinancialPosition_AmountOutstanding_Nominal"
+      ]
+    },
+    "title": "Kenya's total external debt stocks owed to all creditors, 2000 to 2015",
+    "type": "line_chart",
+    "written_select": {
+      "stat_var": "dcid:Amount_FinancialPosition_AmountOutstanding_Nominal"
+    }
+  },
+  "debt_uganda_after_change": {
+    "card_changes": {
+      "places": [
+        {
+          "chosen": [
+            {
+              "id": "country/UGA",
+              "label": "Uganda"
+            }
+          ],
+          "multiple": true,
+          "role": "destination"
+        }
+      ],
+      "spec_id": "spec_17b2b89f595ca513920c6ec506729dbc",
+      "window": {
+        "end_year": 2015,
+        "first_year": 1970,
+        "last_year": 2025,
+        "start_year": 2000
+      }
+    },
+    "fact_summary": {
+      "attribution": {
+        "indicator_count": 1,
+        "label": "World Bank International Debt Statistics (IDS) (2026), via the Development Finance Observatory \u00b7 1 indicator(s)",
+        "source_count": 1
+      },
+      "component_id": "cmp_01M8DZHQSSSJ244R9AC7SX8TWR",
+      "defaults": [],
+      "revision": 1,
+      "series": [
+        {
+          "coordinates": {
+            "financingRecipient": "country/UGA",
+            "provenance": "provenance/WorldBankInternationalDebtStatistics",
+            "stat_var": "dcid:Amount_FinancialPosition_AmountOutstanding_Nominal",
+            "unit": "CurrencyUSD"
+          },
+          "first": 3540000000.0,
+          "first_period": "2000",
+          "id": "s_d5cfdb3cdeec5719",
+          "label": "Uganda",
+          "last": 9800000000.0,
+          "last_period": "2015",
+          "point_count": 16
+        }
+      ],
+      "unit": "US Dollar",
+      "window": {
+        "end": "2015",
+        "start": "2000"
+      }
+    },
+    "inputs": [
+      {
+        "content_version": "cv_7eee25bfab3514690ff4744afed33a43",
+        "spec_id": "spec_b9b3d04dd3f31043733332e5e4c8d710"
+      }
+    ],
+    "select": {
+      "financingRecipient": [
+        "country/UGA"
+      ],
+      "stat_var": [
+        "Amount_FinancialPosition_AmountOutstanding_Nominal"
+      ]
+    },
+    "title": "Uganda's total external debt stocks owed to all creditors, 2000 to 2015",
+    "type": "line_chart",
+    "written_select": {
+      "stat_var": "dcid:Amount_FinancialPosition_AmountOutstanding_Nominal"
+    }
+  },
+  "health_aid_kenya_by_provider": {
+    "card_changes": {
+      "places": [
+        {
+          "chosen": [
+            {
+              "id": "country/KEN",
+              "label": "Kenya"
+            },
+            {
+              "id": "country/TZA",
+              "label": "Tanzania"
+            },
+            {
+              "id": "country/UGA",
+              "label": "Uganda"
+            }
+          ],
+          "multiple": false,
+          "role": "destination"
+        }
+      ],
+      "spec_id": "spec_27be735941f7885599d63e1a9de40ee6"
+    },
+    "fact_summary": {
+      "attribution": {
+        "indicator_count": 205,
+        "label": "OECD Creditor Reporting System (CRS) (2026), processed by the Development Finance Observatory \u00b7 205 indicator(s)",
+        "source_count": 1
+      },
+      "component_id": "cmp_01M8E11FZPK1XHS6MD198SJKV6",
+      "defaults": [],
+      "revision": 1,
+      "series": [
+        {
+          "coordinates": {
+            "financingProvider": "country/USA",
+            "financingRecipient": "country/KEN",
+            "provenance": "provenance/OECDCreditorReportingSystem",
+            "stat_var": "dcid:spec_27be735941f7885599d63e1a9de40ee6",
+            "unit": "CurrencyUSD"
+          },
+          "first": 139000000.0,
+          "first_period": "2006",
+          "id": "s_dbb2821d78ba93da",
+          "label": "United States of America / Kenya",
+          "last": 415000000.0,
+          "last_period": "2024",
+          "point_count": 19
+        },
+        {
+          "coordinates": {
+            "financingProvider": "GlobalFund",
+            "financingRecipient": "country/KEN",
+            "provenance": "provenance/OECDCreditorReportingSystem",
+            "stat_var": "dcid:spec_27be735941f7885599d63e1a9de40ee6",
+            "unit": "CurrencyUSD"
+          },
+          "first": 55700000.0,
+          "first_period": "2006",
+          "id": "s_7282b2fa31cf63f1",
+          "label": "Global Fund / Kenya",
+          "last": 166000000.0,
+          "last_period": "2024",
+          "point_count": 19
+        },
+        {
+          "coordinates": {
+            "financingProvider": "Gavi",
+            "financingRecipient": "country/KEN",
+            "provenance": "provenance/OECDCreditorReportingSystem",
+            "stat_var": "dcid:spec_27be735941f7885599d63e1a9de40ee6",
+            "unit": "CurrencyUSD"
+          },
+          "first": 13800000.0,
+          "first_period": "2007",
+          "id": "s_ccbe5a88204133ee",
+          "label": "Gavi, the Vaccine Alliance / Kenya",
+          "last": 78000000.0,
+          "last_period": "2024",
+          "point_count": 18
+        },
+        {
+          "coordinates": {
+            "financingProvider": "InternationalDevelopmentAssociation",
+            "financingRecipient": "country/KEN",
+            "provenance": "provenance/OECDCreditorReportingSystem",
+            "stat_var": "dcid:spec_27be735941f7885599d63e1a9de40ee6",
+            "unit": "CurrencyUSD"
+          },
+          "first": 1730000.0,
+          "first_period": "2006",
+          "id": "s_700c86bc45bebfca",
+          "label": "International Development Association / Kenya",
+          "last": 17300000.0,
+          "last_period": "2024",
+          "point_count": 19
+        },
+        {
+          "coordinates": {
+            "financingProvider": "country/GBR",
+            "financingRecipient": "country/KEN",
+            "provenance": "provenance/OECDCreditorReportingSystem",
+            "stat_var": "dcid:spec_27be735941f7885599d63e1a9de40ee6",
+            "unit": "CurrencyUSD"
+          },
+          "first": 46400000.0,
+          "first_period": "2006",
+          "id": "s_37e98fb9d43b766f",
+          "label": "United Kingdom / Kenya",
+          "last": 16100000.0,
+          "last_period": "2024",
+          "point_count": 19
+        },
+        {
+          "coordinates": {
+            "financingProvider": "country/CAN",
+            "financingRecipient": "country/KEN",
+            "provenance": "provenance/OECDCreditorReportingSystem",
+            "stat_var": "dcid:spec_27be735941f7885599d63e1a9de40ee6",
+            "unit": "CurrencyUSD"
+          },
+          "first": 1140000.0,
+          "first_period": "2006",
+          "id": "s_0775bd16867f5f90",
+          "label": "Canada / Kenya",
+          "last": 6790000.0,
+          "last_period": "2024",
+          "point_count": 19
+        },
+        {
+          "coordinates": {
+            "financingProvider": "country/JPN",
+            "financingRecipient": "country/KEN",
+            "provenance": "provenance/OECDCreditorReportingSystem",
+            "stat_var": "dcid:spec_27be735941f7885599d63e1a9de40ee6",
+            "unit": "CurrencyUSD"
+          },
+          "first": 4940000.0,
+          "first_period": "2006",
+          "id": "s_6d68d53a8c24fea8",
+          "label": "Japan / Kenya",
+          "last": 4300000.0,
+          "last_period": "2024",
+          "point_count": 19
+        },
+        {
+          "coordinates": {
+            "financingProvider": "country/FIN",
+            "financingRecipient": "country/KEN",
+            "provenance": "provenance/OECDCreditorReportingSystem",
+            "stat_var": "dcid:spec_27be735941f7885599d63e1a9de40ee6",
+            "unit": "CurrencyUSD"
+          },
+          "first": 127000.0,
+          "first_period": "2006",
+          "id": "s_9037706a7ce33fa0",
+          "label": "Finland / Kenya",
+          "last": 4160000.0,
+          "last_period": "2024",
+          "point_count": 17
+        }
+      ],
+      "unit": "US Dollar",
+      "window": {
+        "end": "2024",
+        "start": "2006"
+      }
+    },
+    "inputs": [
+      {
+        "content_version": "cv_5d861a3e7090ecbf3677b98404f35823",
+        "spec_id": "spec_27be735941f7885599d63e1a9de40ee6"
+      }
+    ],
+    "select": {
+      "financingProvider": [
+        "Gavi",
+        "GlobalFund",
+        "InternationalDevelopmentAssociation",
+        "country/CAN",
+        "country/FIN",
+        "country/GBR",
+        "country/JPN",
+        "country/USA"
+      ],
+      "financingRecipient": [
+        "country/KEN"
+      ],
+      "stat_var": [
+        "spec_27be735941f7885599d63e1a9de40ee6"
+      ]
+    },
+    "title": "Gross ODA disbursements for health to Kenya by provider, 2006 to 2024 (8 largest of 36 in 2024)",
+    "type": "line_chart",
+    "written_select": {
+      "financingProvider": [
+        "Gavi",
+        "GlobalFund",
+        "InternationalDevelopmentAssociation",
+        "country/CAN",
+        "country/FIN",
+        "country/GBR",
+        "country/JPN",
+        "country/USA"
+      ],
+      "financingRecipient": "country/KEN"
+    }
+  },
+  "health_aid_kenya_summed": {
+    "card_changes": null,
+    "fact_summary": {
+      "attribution": {
+        "indicator_count": 162,
+        "label": "OECD Creditor Reporting System (CRS) (2026), processed by the Development Finance Observatory \u00b7 162 indicator(s)",
+        "source_count": 1
+      },
+      "component_id": "cmp_01M8DYK9TZGK29SRMG8XNXHW0Y",
+      "defaults": [],
+      "revision": 1,
+      "series": [
+        {
+          "coordinates": {
+            "financingRecipient": "country/KEN",
+            "financingRecipient_party_class": "official",
+            "financingRecipient_party_kind": "party",
+            "financingRecipient_party_whole": "false",
+            "provenance": "provenance/OECDCreditorReportingSystem",
+            "stat_var": "dcid:spec_27c3def78c844bfa2f44caa2b9b1598c",
+            "unit": "CurrencyUSD"
+          },
+          "first": 11800000.0,
+          "first_period": "1990",
+          "id": "s_4f7066635efa0a79",
+          "label": "Kenya",
+          "last": 741000000.0,
+          "last_period": "2024",
+          "point_count": 35
+        }
+      ],
+      "unit": "US Dollar",
+      "window": {
+        "end": "2024",
+        "start": "1990"
+      }
+    },
+    "inputs": [
+      {
+        "content_version": "ocv_b15eaf21936da4b81a35300c012fb345",
+        "spec_id": "ops_bb5d716ae011102ba425e480201860fc"
+      }
+    ],
+    "select": {
+      "financingRecipient": [
+        "country/KEN"
+      ],
+      "financingRecipient_party_class": [
+        "official"
+      ],
+      "financingRecipient_party_kind": [
+        "party"
+      ],
+      "financingRecipient_party_whole": [
+        "false"
+      ],
+      "stat_var": [
+        "spec_27c3def78c844bfa2f44caa2b9b1598c"
+      ]
+    },
+    "title": "Gross ODA disbursements to Kenya for health, 1990 to 2024",
+    "type": "line_chart",
+    "written_select": {
+      "stat_var": "dcid:spec_27c3def78c844bfa2f44caa2b9b1598c"
+    }
+  }
+}

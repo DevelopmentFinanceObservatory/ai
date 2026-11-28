@@ -613,6 +613,9 @@ class _SlowWork:
     async def end(self, result: object) -> tuple[Outcome, list[BaseModel]]:
         raise AssertionError("the drive never returns")
 
+    def owed(self) -> list[BaseModel]:
+        return []
+
     def fatal(self, error: BaseException) -> ErrorFrame:
         raise AssertionError("the work never fails") from error
 

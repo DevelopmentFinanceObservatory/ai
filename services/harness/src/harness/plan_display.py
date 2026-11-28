@@ -1914,7 +1914,7 @@ def decision_steps(plan: Plan) -> dict[str, list[str]]:
     A decision applies to the steps carrying out a requirement that cites it,
     a cited slot standing for the listed decision stating it as in
     `requirement_rows`, and to every step reading their results, directly or
-    through other steps. Steps are the card's (`card_rows`), in its order: a
+    through other steps. Steps are the card's (`card_rows`), in its order. A
     rolling copy is left out, and a step reading through one is kept. A
     decision no requirement cites applies to the whole plan and names every
     step. Requires a compiled plan, as `card_rows` does.

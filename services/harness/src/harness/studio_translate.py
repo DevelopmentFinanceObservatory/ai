@@ -47,7 +47,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from common.period_note import period_note
@@ -79,7 +79,17 @@ from pydantic import ValidationError
 from submission.service import SEARCH_DEFAULT_RATIONALE
 
 from harness import plan_display
-from harness.card_unit import UnitCard, card_unit_change, stored_block, unit_card
+from harness.card_unit import (
+    ConversationBlocks,
+    SummedFrame,
+    UnitCard,
+    card_changes,
+    card_unit_change,
+    encoded,
+    read_summed_frame,
+    unit_card,
+)
+from harness.chart_binding import MAX_CHARTS_PER_CALL
 from harness.conversation import current_conversation_id, current_conversation_key
 from harness.fatal_codes import stated_refusal, wire_error
 from harness.graph.events import AgentStatus, GraphEvent, PlannerStarted, StepProgress
@@ -94,7 +104,7 @@ from harness.graph.state import (
 )
 from harness.graph.switch import APPLY_CHOICE_STEP_TOOL
 from harness.mcp_client import _manifest_summary
-from harness.orchestrator_tools import HANDED_OFF
+from harness.orchestrator_tools import HANDED_OFF, current_chart_entry, cut_cards
 from harness.provenance import (
     CARD_FRAME_KEY,
     CARD_LINEAGE_KEY,
@@ -142,6 +152,7 @@ from harness.wire import (
     ActivityStep,
     ApplyChoiceSuggestion,
     ClientFeature,
+    ComingCard,
     ComponentCreated,
     CompositionUpdated,
     Done,
@@ -179,6 +190,14 @@ from harness.wire import (
 )
 
 logger = logging.getLogger(__name__)
+
+# How long a drain waits, in all, for the recipes of the sums its landing
+# cards rest on (`read_summed_frame`), read together. A recorded read of a
+# derived frame's manifest took 0.14 to 0.95 s. A card whose read misses it
+# is stored and sent as resting on no sum, with no `UnitCard`, so it offers
+# no years, places or unit change for as long as it stays on the canvas, since
+# no later read builds one.
+SUMMED_READ_DEADLINE_S = 4.0
 
 # The bound on a recorded refusal's `message` and on a running line's detail.
 # Large enough to hold a real over_ceiling/member_cardinality refusal whole,
@@ -493,6 +512,10 @@ class _ExecutorRecord:
     # The lineage of the frame a drawn card rests on, taken off its result
     # with the write token, which the card's write commits with the card.
     card_lineage: CardLineage | None = None
+    # The `make_charts` call and chart entry a write drew, read off
+    # `harness.orchestrator_tools.current_chart_entry` at call time; `None`
+    # for a call outside `make_charts`.
+    chart_entry: tuple[str, int] | None = None
     # Stamped with `land`: the plan step whose result the frame the card
     # draws was registered as, None for a frame registered outside a plan's
     # hand-back or one two steps gave (`harness.graph.state.frame_plan_step`).
@@ -594,9 +617,9 @@ class _RecordingExecutor:
         `write_component` returns, with no `await` in between. Stamps `land`
         onto this call's own recorded write (matched by identity: the record
         whose result carries this exact `component` object) so
-        `_component_frames` can perform the landing later, at drain time,
-        and `plan_step`, the plan step the card's frame was registered from
-        (`harness.graph.state.frame_plan_step`), beside it.
+        `_component_frames` can perform the landing later, at drain time.
+        `plan_step`, the plan step the card's frame was registered from
+        (`harness.graph.state.frame_plan_step`), is stamped beside it.
         Never touches the conversation itself; a component with no matching
         record (this capability called directly, not through `__call__`
         first) leaves nothing to stamp and is silently a no-op."""
@@ -667,6 +690,7 @@ class _RecordingExecutor:
                 step_id=step_id if step_id is not None else current_step_id.get(),
                 write_token=write_token,
                 card_lineage=card_lineage,
+                chart_entry=current_chart_entry.get(),
             )
         )
 
@@ -832,7 +856,7 @@ class _RecordingSurface:
         # feed names a plan step's line with it.
         self._step_labels: dict[str, dict[str, str]] = {}
         # The plan card's step each workflow step runs for, by conversation
-        # (`plan_display.card_steps`): an Activity line names it as its plan step.
+        # (`plan_display.card_steps`). An Activity line names it as its plan step.
         self._card_steps: dict[str, dict[str, str]] = {}
         # When each plan step's call in flight started, by (conversation,
         # step id). A call that returns or fails takes its entry with it
@@ -881,7 +905,7 @@ class _RecordingSurface:
         if self._provenance is not None and tool.name == "get_data" and not result.is_error:
             manifest = await manifest_with_stat_vars(dict(result.structured_content or {}))
             result = result.model_copy(update={"structured_content": manifest})
-            self._remember_manifest(manifest)
+            self._remember_manifest(manifest, requested_spec_id=arguments.get("spec_id"))
         self._record(
             tool.name, arguments, _surface_call_outcome(tool.name, result), started=started
         )
@@ -906,8 +930,11 @@ class _RecordingSurface:
             )
         )
 
-    def _remember_manifest(self, manifest: dict[str, Any]) -> None:
-        """Write a successful `get_data` step's manifest into `provenance`.
+    def _remember_manifest(
+        self, manifest: dict[str, Any], *, requested_spec_id: Any = None
+    ) -> None:
+        """Write a successful `get_data` step's manifest into `provenance`,
+        with the spec_id the step asked for when it is known.
 
         Through `ProvenanceStore.put_retrieval`, as `harness.mcp_client.McpExecutor
         ._get_data` writes it, so the two writers agree on where a manifest lives
@@ -915,7 +942,9 @@ class _RecordingSurface:
         """
         assert self._provenance is not None  # guarded by the caller
         self._provenance.put_retrieval(
-            conversation=current_conversation_id.get(), manifest=manifest
+            conversation=current_conversation_id.get(),
+            manifest=manifest,
+            requested_spec_id=requested_spec_id if isinstance(requested_spec_id, str) else None,
         )
 
     async def restore_retrievals(self, results: Sequence[Mapping[str, Any]]) -> None:
@@ -1222,6 +1251,10 @@ def _chart_key(chart: Mapping[Any, Any]) -> _ChartKey:
     return (str(chart.get("frame")), str(chart.get("type")))
 
 
+# The types a `make_charts` chart can be, as a `ComingCard` states them.
+_CHART_TYPES = frozenset(get_args(ComingCard.model_fields["type"].annotation))
+
+
 def _asked_charts(args: Mapping[str, Any]) -> list[Any]:
     """The entries of a `make_charts` call's `charts`; none when it is not a list."""
     asked = args.get("charts")
@@ -1357,6 +1390,36 @@ def _choice_members(
     }
 
 
+def _decision_kind(
+    decision: Decision | None, plan: PlannerPlan, unit_offers: Mapping[str, UnitOffer]
+) -> str | None:
+    """What `decision` settles (`harness.wire.DecisionKind`): `unit` for a unit
+    question's row and a decision fixing the unit or its price basis, `count`
+    for the row of how pinned sources' flows are counted, a scope choice's
+    axis, `window` for a decision fixing the period or its first or last year,
+    `places` for one fixing the places; `None` for any other."""
+    if decision is None:
+        return None
+    fixes = decision.fixes
+    kinds = (
+        (decision.slot in unit_offers, "unit"),
+        (plan_display.count_choice_id(plan, decision) is not None, "count"),
+        (decision.scope is not None, decision.scope.axis if decision.scope else None),
+        (fixes is not None and (fixes.unit is not None or fixes.prices is not None), "unit"),
+        (
+            fixes is not None
+            and (
+                fixes.period is not None
+                or fixes.window_start is not None
+                or fixes.window_end is not None
+            ),
+            "window",
+        ),
+        (fixes is not None and fixes.entities is not None, "places"),
+    )
+    return next((kind for holds, kind in kinds if holds), None)
+
+
 def _unit_members(decision: Decision, offer: UnitOffer) -> dict[str, Any]:
     """The `PlanDecision` members of the row stating a unit question's whole
     unit `decision`: its row id, `offer` as `unit`, and as options the whole
@@ -1472,6 +1535,7 @@ def plan_approved(
             if (held := baseline.get(decision.choice_id)) != labels[decision.choice_id]
             else None,
             step_ids=decision.step_ids,
+            kind=decision.kind,
         )
         for decision in card.decisions or ()
         if decision.choice_id is not None
@@ -1782,10 +1846,21 @@ class _Translator:
         surface_recorder: _RecordingSurface | None = None,
         approving: PlanProposed | None = None,
         restored: Sequence[PlanApproved] = (),
+        places: bool = False,
+        hold_removals: bool = False,
     ) -> None:
         self._conversation = conversation
+        # Whether the request asked to hold a removal's update until the next
+        # drawing line (`TurnRequest.hold_removals`).
+        self._hold_removals = hold_removals
         self._recorder = recorder
         self._surface_recorder = surface_recorder
+        # Whether a card offers a change of the places its roles bind, which
+        # Search's places door serves (`harness.place_options`).
+        self._places = places
+        # The cards `make_charts` cut to their largest members, by id, as
+        # the latest answered tools' state names them (`cut_cards`).
+        self._cut: frozenset[str] = frozenset()
         # The plan card the user approved on this segment's first answer to
         # its interrupt; `plan.approved` states it once the `approve` node
         # takes the approval, and only then.
@@ -1853,6 +1928,18 @@ class _Translator:
         self._unanswered: list[tuple[str, str]] = []
         # The highest composition revision this stream has sent.
         self._sent_revision = 0
+        # The placeholder id of each chart entry a running `make_charts` line
+        # announced (`ActivityStep.coming`), by (call id, entry index), until
+        # a card names it or the line closes.
+        self._coming: dict[tuple[str, int], str] = {}
+        # Whether a `remove_cards` changed the canvas and its
+        # `composition.updated` is held, to go out beside the next drawing
+        # line so the canvas never shows empty while the cards replacing the
+        # removed ones are drawn (`_release_removal`). Only a request with
+        # `hold_removals` holds one. One still held when the segment ends goes
+        # out before its ending frame, whatever that is. The stream's owner
+        # asks for it (`release_removal`).
+        self._removal_held = False
 
     async def translate_recorded(self, event: SegmentEvent, marks: RecordMarks) -> list[Any]:
         """The frames of `event`, emitted with `marks` (`_EventRecords`):
@@ -1893,6 +1980,7 @@ class _Translator:
                 ]
             case ToolsAnswered(answers=answers, state=state):
                 keep_turn_records(self._conversation, state)
+                self._cut = cut_cards(state)
                 return await self._agent_answers(self._answered(answers), records)
             case NodeDone(node="orchestrate", label="answered", output=dict() as carried):
                 # A `full` turn's conversation as its run closed on the reply
@@ -2022,13 +2110,23 @@ class _Translator:
         node's `output` hands back (`frame_refs`, with `frame_ref_steps`
         beside them), in the turn's map of plan frames
         (`ConversationState.turn_plan_frames`), so a card drawn on one names
-        them. The plan is the wire id of the run's `plan_version`; a run
-        whose version the turn gave no card keeps nothing."""
+        them. The plan is the wire id of the run's `plan_version`. A run
+        whose version the turn gave no card keeps nothing, and so does an
+        output whose two lists differ in length, which is logged."""
         plan_version_id = self._conversation.plan_version_ids.get(output.get("plan_version"))
         if plan_version_id is None:
             return
-        steps = output.get("frame_ref_steps") or ()
-        for ref, step in zip(output.get("frame_refs") or (), steps, strict=True):
+        refs = list(output.get("frame_refs") or ())
+        steps = list(output.get("frame_ref_steps") or ())
+        if len(refs) != len(steps):
+            logger.warning(
+                "studio translate: an execute output names %d frames and %d frame steps; "
+                "its cards name no plan step",
+                len(refs),
+                len(steps),
+            )
+            return
+        for ref, step in zip(refs, steps, strict=True):
             if step.get("is_final_step") and step.get("step_id"):
                 self._conversation.turn_plan_frames[frame_id_for(ref)] = PlanLink(
                     plan_version_id=plan_version_id, plan_step_id=str(step["step_id"])
@@ -2291,16 +2389,21 @@ class _Translator:
             else {}
         )
         frames: list[Any] = self._close_starting() if records else []
-        # A removal changed the canvas as its tool ran, before any landing
-        # below, so its frame goes first. It carries the live canvas, the
-        # latest one this instance wrote, rather than the one the removal
-        # wrote: a `/composition` edit may have written a newer revision on
-        # top of the removal since (`StudioStore.mutate_composition`), and
-        # the client renders every update, so an older one would undo that
-        # edit on screen. One frame stands for every removal since the last
-        # drain.
+        # A removal changed the canvas as its tool ran. Its frame goes out
+        # here, ahead of these records' frames. With `hold_removals` it is
+        # held until the next drawing line (`_agent_response`) or the
+        # segment's end (`release_removal`), unless a card these records drew
+        # lands, before which it goes out.
         if self._conversation.take_unreported_removal():
-            frames.extend(self._composition_update())
+            if self._hold_removals:
+                self._removal_held = True
+            else:
+                frames.extend(self._composition_update())
+        if any(
+            record.land and isinstance(record.result.get("component"), dict) for record in records
+        ):
+            frames.extend(self._release_removal())
+        totals = await self._summed_frames(records)
         for record in records:
             if self._unshown(record):
                 continue
@@ -2314,8 +2417,15 @@ class _Translator:
                 # (`stored_card_unreadable`). A bare executor's card is logged
                 # and left off the wire here.
                 plan = self._plan_of(record)
+                placeholder = (
+                    self._coming.pop(record.chart_entry, None)
+                    if record.chart_entry is not None
+                    else None
+                )
                 try:
-                    created = component_created(component, step_id=step_id, plan=plan)
+                    created = component_created(
+                        component, step_id=step_id, plan=plan, placeholder_id=placeholder
+                    )
                 except ValidationError as fault:
                     log_unreadable_card(
                         logger, component, fault, where="record_frames", frame=step_id
@@ -2356,7 +2466,15 @@ class _Translator:
                 # refuses a card off the canvas (`harness.card_unit.unit_move`).
                 lands = record.land and self._conversation.auto_add
                 card = (
-                    self._unit_card(component, record.card_lineage, created=created)
+                    self._changeable_card(
+                        component,
+                        record.card_lineage,
+                        created=created,
+                        intent=record.args.get("intent"),
+                        # A card on a sum of one retrieval changes as one on
+                        # the retrieval's frame does (`harness.card_unit`).
+                        total=totals.get(id(record)),
+                    )
                     if lands
                     else None
                 )
@@ -2374,25 +2492,76 @@ class _Translator:
                 )
         return frames
 
-    def _unit_card(
+    async def _summed_frames(
+        self, records: Sequence[_ExecutorRecord]
+    ) -> dict[int, SummedFrame | None]:
+        """The sum each card of `records` that lands a block rests on, by the
+        record's `id`, read together within `SUMMED_READ_DEADLINE_S`. A read
+        that misses the deadline is cancelled and its card reads as resting
+        on no sum (`read_summed_frame` answers `None` for most cards at once)."""
+        if not self._conversation.auto_add:
+            return {}
+        reads = {
+            id(record): asyncio.ensure_future(read_summed_frame(record.card_lineage))
+            for record in records
+            if record.land and isinstance(record.result.get("component"), dict)
+        }
+        if not reads:
+            return {}
+        _, late = await asyncio.wait(reads.values(), timeout=SUMMED_READ_DEADLINE_S)
+        for read in late:
+            read.cancel()
+        if late:
+            await asyncio.gather(*late, return_exceptions=True)
+            logger.warning(
+                "studio stream: %d of %d sum reads missed the %.1f s deadline, so "
+                "their cards offer no change",
+                len(late),
+                len(reads),
+                SUMMED_READ_DEADLINE_S,
+            )
+        return {key: None if read in late else read.result() for key, read in reads.items()}
+
+    def _changeable_card(
         self,
         component: dict[str, Any],
         lineage: CardLineage | None,
         *,
         created: ComponentCreated,
+        intent: Any = None,
+        total: SummedFrame | None = None,
     ) -> UnitCard | None:
-        """The `UnitCard` of `component` when its unit can change, with its
-        `unit_change` set on `created`: a card drawing one retrieval's own
-        frame of a spec whose Search block, this turn's or one an earlier
-        turn kept, converts it (`harness.card_unit`)."""
-        card = unit_card(component, lineage)
+        """The `UnitCard` of `component` when it can change, with its
+        `unit_change` and `card_changes` set on `created`: a card drawing one
+        retrieval's own frame, or `total`, the sum of it the card's frame is,
+        of a spec whose Search block, this turn's or one an earlier turn
+        kept, converts its unit, offers other years, or binds places
+        (`harness.card_unit`). The encoding is the one `intent`, the card's
+        written intent, fixes (`harness.card_unit.encoded`)."""
+        c = self._conversation
+        blocks = ConversationBlocks(c.turn_specs, c.turns)
+        card = unit_card(component, lineage, blocks, total=total)
         if card is None:
             return None
-        c = self._conversation
-        change = card_unit_change(card, stored_block(c.turn_specs, c.turns, card.spec_id))
-        if change is None:
+        block = blocks.get(card.spec_id)
+        card = encoded(
+            card,
+            block,
+            intent=intent,
+            cut=str(component.get("component_id")) in self._cut,
+            component=component,
+        )
+        created.unit_change = card_unit_change(card, block)
+        fact_summary = component.get("fact_summary")
+        created.card_changes = card_changes(
+            card, block, fact_summary=fact_summary, places=self._places
+        )
+        # The card is kept by what it can offer, whether or not Search's places
+        # door is on. The door's state applies when an offer is read.
+        if created.unit_change is None and (
+            card_changes(card, block, fact_summary=fact_summary, places=True) is None
+        ):
             return None
-        created.unit_change = change
         return card
 
     async def _component_frames(
@@ -2480,6 +2649,42 @@ class _Translator:
         return await self._recorder.store.change_canvas(
             *key, land, lineage=card_lineage, landed=lambda landed: landed == "created"
         )
+
+    def _release_removal(self) -> list[CompositionUpdated]:
+        """The held removal's `composition.updated`, once, or none when none
+        is held. It carries the live canvas, the latest one this instance
+        wrote, rather than the one the removal wrote: a `/composition` edit
+        may have written a newer revision on top of the removal since
+        (`StudioStore.mutate_composition`), and the client renders every
+        update, so an older one would undo that edit on screen. One frame
+        stands for every removal held. It stays held until its frame is
+        built, so an owner whose first take of what the work owes raises
+        (`harness.studio_stream._Owner.run`) still finds it on the retry."""
+        if not self._removal_held:
+            return []
+        frames = self._composition_update()
+        self._removal_held = False
+        return frames
+
+    def release_removal(self) -> list[CompositionUpdated]:
+        """What a stream with `hold_removals` still owes as the segment ends:
+        one `composition.updated` for every removal no frame has reported,
+        the one this translator holds and one the conversation marked that no
+        drain took yet (`ConversationState.take_unreported_removal`), as when
+        the drive raised or its lease went before the removal's answer was
+        translated. Taking it clears both, so no later stream of the turn
+        sends it again. The work's `owed` hands it to the stream's owner
+        (`harness.studio_stream.Work.owed`).
+
+        A stream without `hold_removals` owes nothing. A removal whose answer
+        its drive never reached stays marked on the conversation, and the
+        next stream of the turn reports it at its first drain, held to that
+        stream's next drawing line when that stream holds removals."""
+        if not self._hold_removals:
+            return []
+        if self._conversation.take_unreported_removal():
+            self._removal_held = True
+        return self._release_removal()
 
     def _composition_update(self) -> list[CompositionUpdated]:
         """The `composition.updated` frame for the conversation's stored
@@ -2712,6 +2917,7 @@ class _Translator:
                             decision.get("resolved_by", ""), "default"
                         ),
                         "step_ids": decision_steps.get(decision["slot"]),
+                        "kind": _decision_kind(held, plan, unit_offers),
                         # A unit row words its choice and alternatives as its options.
                         **_choice_members(
                             held,
@@ -2906,7 +3112,9 @@ class _Translator:
         return frames
 
     def _agent_text(self, text: str) -> list[Any]:
-        """Answer text as the model streams it."""
+        """Answer text as the model streams it. A held removal's update
+        waits for a drawing line or the segment's end, so it never goes
+        out between deltas."""
         if not text:
             return []
         frames: list[Any] = [*self._close_status(), *self._narration_break()]
@@ -2970,7 +3178,39 @@ class _Translator:
                 detail,
             )
             frames.append(frame)
+            if name == "make_charts":
+                frame.coming = self._announce(call.id, frame.step_id, args) or None
+                # The held removal goes out beside the first line that
+                # announces a card to replace the removed ones. A line that
+                # announces none leaves it held, since no placeholder would
+                # fill the gap.
+                if frame.coming:
+                    frames.extend(self._release_removal())
+        # A response that draws nothing releases nothing. The held removal waits
+        # for a later drawing line or the segment's end (`release_removal`).
         return frames
+
+    def _announce(
+        self, call_id: str | None, step_id: str, args: Mapping[str, Any]
+    ) -> list[ComingCard]:
+        """The `ComingCard` of each chart a `make_charts` call with `args`
+        asks for, up to the `MAX_CHARTS_PER_CALL` it draws, each kept by its
+        call and entry index for the card that fills it (`_coming`). An entry
+        whose type or title does not read is left out, its index kept, and so
+        is every entry of a call with no id, whose cards no record ties to it."""
+        if not call_id:
+            return []
+        coming = []
+        for index, chart in enumerate(_asked_charts(args)[:MAX_CHARTS_PER_CALL]):
+            if not isinstance(chart, Mapping):
+                continue
+            kind, title = chart.get("type"), chart.get("title")
+            if kind not in _CHART_TYPES or not isinstance(title, str):
+                continue
+            placeholder = f"{step_id}.{index}"
+            self._coming[(call_id, index)] = placeholder
+            coming.append(ComingCard(placeholder_id=placeholder, type=kind, title=title))
+        return coming
 
     def _answered(self, answers: Sequence[types.FunctionResponse]) -> list[types.FunctionResponse]:
         """The answers of the agent's latest response's calls, in call order:
@@ -3051,6 +3291,11 @@ class _Translator:
             opened = self._open_calls.get(response.id or "")
             if opened is None:
                 continue
+            if response.name == "make_charts":
+                # The line closes, and its placeholders no card named end with it.
+                self._coming = {
+                    key: value for key, value in self._coming.items() if key[0] != response.id
+                }
             step_id, label, args, started, running = opened
             if failed:
                 status, detail = StepStatus.FAILED, _answer_failure(answer)

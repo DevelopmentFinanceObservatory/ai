@@ -2195,6 +2195,12 @@ async def test_duplicate_dcids_across_a_region_and_its_member_are_deduped_before
 
     assert result.is_error is False
     assert requests[0]["input"]["scope"]["entities"]["recipient"] == ["country/KEN", "country/NGA"]
+    # The harness labels the card's places by the names this call resolved.
+    assert result.structured_content is not None
+    assert result.structured_content["entity_labels"] == {
+        "country/KEN": "Kenya",
+        "country/NGA": "Nigeria",
+    }
 
 
 # Dropped-role notes
@@ -4094,6 +4100,7 @@ async def test_an_unsummed_result_reports_no_summed_count() -> None:
     assert result.structured_content is not None
     assert result.structured_content["summed_stat_var_count"] is None
     assert result.structured_content["summed_stat_var_label"] is None
+    assert result.structured_content["entity_labels"] == {}
 
 
 async def test_a_summed_call_dfo_apis_refuses_returns_rollup_not_summable() -> None:

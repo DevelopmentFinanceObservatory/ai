@@ -103,16 +103,19 @@ from harness.wire import (
 )
 from mcp import MCPError
 from mcp.types import CONNECTION_CLOSED, INTERNAL_ERROR
-from orchestrator.run import ModelResponded, ToolsAnswered
+from orchestrator.run import ModelResponded, TextDelta, ToolsAnswered
 from planner.plan import (
     PLAN_STATE_KEY,
     DatasetRequirement,
     Decision,
     DecisionFixes,
+    DecisionScope,
+    Entity,
     PinSource,
     Plan,
     RequirementSide,
     ResolvedBy,
+    ScopeOptionState,
     SessionState,
     ShareOfRequirement,
     Unit,
@@ -624,7 +627,11 @@ def test_the_row_stating_how_a_pin_is_counted_is_a_row_the_card_can_switch() -> 
 
     row = {row.id: row for row in frame.decisions}[counted.slot]
     gross, net = (decision_option_id(label) for label in counted.options)
-    assert (row.choice_id, row.active_option_id) == (f"{dataset.id}:count", gross)
+    assert (row.choice_id, row.active_option_id, row.kind) == (
+        f"{dataset.id}:count",
+        gross,
+        "count",
+    )
     assert row.options == [
         PlanDecisionOption(option_id=gross, label="gross disbursements", status="available"),
         PlanDecisionOption(option_id=net, label="net disbursements", status="available"),
@@ -632,6 +639,45 @@ def test_the_row_stating_how_a_pin_is_counted_is_a_row_the_card_can_switch() -> 
     assert PlanAction.SWITCH in frame.actions
     choices = translator._conversation.pending[frame.interrupt_id].choices
     assert choices[f"{dataset.id}:count"].active == gross
+
+
+@pytest.mark.parametrize(
+    ("fixes", "scope", "kind"),
+    [
+        (DecisionFixes(window_start=2010), None, "window"),
+        (DecisionFixes(entities=(Entity(name="Kenya", role="destination"),)), None, "places"),
+        (
+            DecisionFixes(),
+            DecisionScope(
+                choice_id="spec_x:sector",
+                axis="sector",
+                options=(
+                    ScopeOptionState(option_id="sector:120", status="available"),
+                    ScopeOptionState(option_id="sector:130", status="available"),
+                ),
+            ),
+            "sector",
+        ),
+        (DecisionFixes(measure="gross"), None, None),
+    ],
+    ids=["years", "places", "scope-axis", "other"],
+)
+def test_a_plan_decision_says_what_it_settles(
+    fixes: DecisionFixes, scope: DecisionScope | None, kind: str | None
+) -> None:
+    decision = Decision(
+        slot="d_x",
+        description="A choice.",
+        options=("a", "b"),
+        chosen="a",
+        resolved_by=ResolvedBy.USER,
+        rationale="The user chose it.",
+        fixes=fixes,
+        scope=scope,
+    )
+    plan = scripted_plan("kenya life expectancy", spec_id=None)
+
+    assert studio_translate_module._decision_kind(decision, plan, {}) == kind
 
 
 def test_a_planner_decision_option_keeps_its_id_when_a_replan_reorders_the_options() -> None:
@@ -933,6 +979,7 @@ def test_a_unit_question_s_row_offers_its_unit_and_the_whole_units_beside_it(
         [label for _, label in options],
     )
     assert (rows[own.slot].choice_id, rows[own.slot].unit) == (None, None)
+    assert (unit_row.kind, rows[own.slot].kind) == ("unit", "unit")
     assert PlanAction.SWITCH in card.actions
     (pending,) = translator._conversation.pending.values()
     assert set(pending.choices[decision_choice_id(row)].options) == {o for o, _ in options}
@@ -2422,6 +2469,211 @@ async def test_a_step_that_removes_a_card_and_draws_one_streams_each_write_s_own
         "composition.updated",
         "remove_cards:complete",
     ]
+
+
+def _call(tool: str, args: Mapping[str, Any] | None = None) -> ModelResponded:
+    """A model response making one call of `tool`, under the id `tool`."""
+    return ModelResponded(
+        parts=(types.Part(function_call=types.FunctionCall(id=tool, name=tool, args=args or {})),)
+    )
+
+
+_DRAWING = _call("make_charts", {"charts": [{"frame": "f", "type": "stat_card", "title": "Aid"}]})
+
+
+async def _held_removal(engine: AsyncEngine) -> tuple[StudioStore, _Translator, list[Any]]:
+    """A translator for a request with `hold_removals` whose agent removed
+    `cmp_01` of two cards, and the frames up to the answer of that removal,
+    which hold its canvas update."""
+    current_conversation_id.set("c1")
+    store, conversation = await _stored_conversation(engine)
+    for held in ("cmp_01", "cmp_02"):
+        await store.mutate_composition(
+            "principal",
+            "c1",
+            _on_canvas(
+                conversation,
+                lambda held=held: land_component(conversation, _written_component(held)),
+            ),
+        )
+    translator = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_dummy_executor, store=store),
+        hold_removals=True,
+    )
+    frames = await translated(translator, _call("remove_cards"))
+    await store.mutate_composition(
+        "principal",
+        "c1",
+        _on_canvas(conversation, lambda: remove_cards(conversation, ["cmp_01"], all_cards=False)),
+    )
+    answer = types.FunctionResponse(
+        id="remove_cards", name="remove_cards", response={"removed": ["cmp_01"]}
+    )
+    frames += await translated(translator, ToolsAnswered(answers=(answer,), state={}))
+    return store, translator, frames
+
+
+@pytest.mark.parametrize("ending", ["draws", "draws-none", "answers", "done", "pause", "error"])
+async def test_a_removal_shows_beside_the_next_drawing_line_or_as_the_segment_ends(
+    pg_engine: AsyncEngine, ending: str
+) -> None:
+    """The canvas update of a removal waits through the removal's answer, so
+    the removed cards stay on screen until the cards replacing them are
+    announced. It goes out right after the next response's `make_charts`
+    line that announces a card. A `make_charts` call that announces none,
+    and a response that only answers in text, streamed delta by delta,
+    leave the update held. When the segment ends with it held, on
+    `done`, a pause or a failure, the translator gives it, once, to the
+    stream's owner to send before the ending frame (`release_removal`,
+    which the work's `owed` hands over)."""
+    _, translator, held = await _held_removal(pg_engine)
+    match ending:
+        case "draws":
+            frames = await translated(translator, _DRAWING)
+        case "draws-none":
+            frames = await translated(translator, _call("make_charts", {"charts": []}))
+        case "answers":
+            frames = [
+                *await translated(translator, TextDelta("Do")),
+                *await translated(translator, TextDelta("ne.")),
+                *await translated(translator, ModelResponded(parts=(types.Part(text="Done."),))),
+            ]
+        case "done":
+            frames = await translator.finish()
+        case "pause":
+            frames = await translated(translator, _pause("ask", {"questions": [_asked(1)]}))
+        case _:
+            frames = await translated(
+                translator, TurnFailed(node="orchestrate", error=RuntimeError("boom"))
+            )
+    owed = translator.release_removal()
+
+    assert "composition.updated" not in [f.event for f in held]
+    events = [
+        f"{f.tool}:{f.status.value}" if f.event == "activity.step" else f.event for f in frames
+    ]
+    sent = [f.manifest for f in [*frames, *owed] if f.event == "composition.updated"]
+    assert [[b.component_id for b in manifest.blocks] for manifest in sent] == [["cmp_02"]]
+    assert translator.release_removal() == []
+    texts = [f.text for f in frames if f.event == "message.delta"]
+    match ending:
+        case "draws":
+            shown = events.index("composition.updated")
+            assert events[shown - 1] == "make_charts:running"
+        case "answers":
+            # Each delta is its own frame, sent as it streams, and the update
+            # waits for the segment's end.
+            assert texts == ["Do", "ne."]
+            assert "composition.updated" not in events
+        case _:
+            assert "composition.updated" not in events
+
+
+def _responding(*calls: tuple[str, str]) -> ModelResponded:
+    """A model response making each `(id, tool)` call."""
+    return ModelResponded(
+        parts=tuple(
+            types.Part(function_call=types.FunctionCall(id=call_id, name=tool, args={}))
+            for call_id, tool in calls
+        )
+    )
+
+
+def _answering(*calls: tuple[str, str]) -> ToolsAnswered:
+    return ToolsAnswered(
+        answers=tuple(
+            types.FunctionResponse(id=call_id, name=tool, response={"ok": True})
+            for call_id, tool in calls
+        ),
+        state={},
+    )
+
+
+@pytest.mark.parametrize(
+    ("again", "draws"),
+    [(False, True), (False, False), (True, True)],
+    ids=["draws-two-responses-on", "never-draws", "two-removals-then-draws"],
+)
+async def test_a_held_removal_waits_through_responses_that_draw_nothing(
+    pg_engine: AsyncEngine, again: bool, draws: bool
+) -> None:
+    """With `hold_removals`, a turn removes a card and searches in one
+    response, reads and fetches in the next, removing the other card too
+    when `again`, then draws or answers in text. A response that draws
+    nothing releases nothing: one update goes out right after the drawing
+    line, carrying every removal so far, or, when nothing is drawn, as the
+    segment ends (`release_removal`)."""
+    current_conversation_id.set("c1")
+    store, conversation = await _stored_conversation(pg_engine)
+    for held in ("cmp_01", "cmp_02"):
+        await store.mutate_composition(
+            "principal",
+            "c1",
+            _on_canvas(
+                conversation,
+                lambda held=held: land_component(conversation, _written_component(held)),
+            ),
+        )
+    translator = _Translator(
+        conversation=conversation,
+        recorder=_RecordingExecutor(_dummy_executor, store=store),
+        hold_removals=True,
+    )
+
+    async def remove(card: str) -> None:
+        await store.mutate_composition(
+            "principal",
+            "c1",
+            _on_canvas(conversation, lambda: remove_cards(conversation, [card], all_cards=False)),
+        )
+
+    first = (("r1", "remove_cards"), ("s1", "search"))
+    frames = await translated(translator, _responding(*first))
+    await remove("cmp_01")
+    frames += await translated(translator, _answering(*first))
+    second = (("f1", "fetch"), *((("r2", "remove_cards"),) if again else ()))
+    frames += await translated(translator, _responding(*second))
+    if again:
+        await remove("cmp_02")
+    frames += await translated(translator, _answering(*second))
+    frames += await translated(
+        translator,
+        _DRAWING if draws else ModelResponded(parts=(types.Part(text="Done."),)),
+    )
+    owed = translator.release_removal()
+
+    events = [
+        f"{f.tool}:{f.status.value}" if f.event == "activity.step" else f.event for f in frames
+    ]
+    sent = [f.manifest for f in [*frames, *owed] if f.event == "composition.updated"]
+    assert [[b.component_id for b in m.blocks] for m in sent] == [[] if again else ["cmp_02"]]
+    if draws:
+        shown = events.index("composition.updated")
+        assert events[shown - 1] == "make_charts:running"
+    else:
+        assert "composition.updated" not in events
+
+
+async def test_a_held_removal_shows_a_canvas_edit_made_while_it_was_held(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A `/composition` edit committed while the removal's update is held,
+    here a pin, is on the update that goes out: never undone on screen."""
+    store, translator, _ = await _held_removal(pg_engine)
+
+    def pin(manifest: CompositionManifest | None, _components: object) -> CompositionManifest:
+        assert manifest is not None
+        blocks = [block.model_copy(update={"pinned": True}) for block in manifest.blocks]
+        return _next_manifest(manifest, blocks, actor=CompositionActor.USER)
+
+    pinned = await store.mutate_composition("principal", "c1", pin)
+    assert isinstance(pinned, CompositionManifest)
+    frames = await translated(translator, _DRAWING)
+
+    (update,) = [f.manifest for f in frames if f.event == "composition.updated"]
+    assert update.revision == pinned.revision
+    assert [(b.component_id, b.pinned) for b in update.blocks] == [("cmp_02", True)]
 
 
 async def test_component_frames_land_true_holds_when_auto_add_is_off(
@@ -4656,3 +4908,76 @@ def test_a_recorded_plan_after_a_switch_reaches_the_card_in_the_users_words() ->
             "The user chose net disbursements, current USD on the plan.",
         ),
     ]
+
+
+def test_an_execute_output_whose_frames_and_steps_differ_in_length_names_no_plan_step(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    translator = _translator()
+    translator._conversation.plan_version_ids = {"v1": "plan_1"}
+    ref = {"spec_id": "spec_" + "a" * 32, "content_version": "cv_1"}
+
+    with caplog.at_level(logging.WARNING):
+        translator._remember_plan_frames(
+            {"plan_version": "v1", "frame_refs": [ref, ref], "frame_ref_steps": []}
+        )
+
+    assert translator._conversation.turn_plan_frames == {}
+    assert "frame steps" in caplog.text
+
+
+async def test_a_chart_batch_reads_its_cards_sums_together_under_one_deadline(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drain lands three cards, each of which may rest on a sum whose
+    recipe is read before the batch goes out (`read_summed_frame`). The
+    reads run together, and the first two finish only once both have started.
+    The third never answers, and at the shared deadline its card goes out
+    read as resting on no sum, so it offers no change."""
+    current_conversation_id.set("c1")
+    store, conversation = await _stored_conversation(pg_engine)
+    drawn = [_written_component(f"cmp_{index}") for index in range(3)]
+
+    async def executor(*, tool: str, args: dict[str, object], on_progress=None) -> dict[str, Any]:
+        del tool, args, on_progress
+        return {"outcome": "ok", "component": drawn.pop(0)}
+
+    recorder = _RecordingExecutor(executor, store=store)
+    translator = _Translator(conversation=conversation, recorder=recorder)
+    started = 0
+    both = asyncio.Event()
+    summed = object()
+
+    async def read(lineage: Any) -> Any:
+        nonlocal started
+        started += 1
+        if started > 2:
+            await asyncio.Event().wait()
+        if started == 2:
+            both.set()
+        await both.wait()
+        return summed
+
+    totals: list[Any] = []
+
+    def changeable(component: Any, lineage: Any, *, total: Any, **kwargs: Any) -> None:
+        totals.append(total)
+
+    monkeypatch.setattr(studio_translate_module, "read_summed_frame", read)
+    monkeypatch.setattr(studio_translate_module, "SUMMED_READ_DEADLINE_S", 0.2, raising=False)
+    monkeypatch.setattr(translator, "_changeable_card", changeable)
+    for _ in range(3):
+        written = await recorder(tool="write_component", args={})
+        recorder.land_component(written["component"])
+    answer = types.FunctionResponse(id="m", name="make_charts", response={"charts": []})
+
+    frames = await asyncio.wait_for(
+        translated(translator, ToolsAnswered(answers=(answer,), state={})), timeout=3
+    )
+
+    assert [f.component_id for f in frames if f.event == "component.created"] == [
+        "cmp_0",
+        "cmp_1",
+        "cmp_2",
+    ]
+    assert totals == [summed, summed, None]

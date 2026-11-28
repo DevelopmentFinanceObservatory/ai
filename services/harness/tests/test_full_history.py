@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 from common.logging import JSON_FIELDS
 from harness.conversation import current_history
+from harness.generative import GeminiEdit
 from harness.graph.orchestrate import _carried_opening, carried_record
 from harness.graph.state import ORCHESTRATOR_CARRIES_KEY, ORCHESTRATOR_CHAIN_RESET_KEY, CarriedRef
 from harness.settings import HistorySettings
@@ -70,6 +71,31 @@ from .studio_routes import (
     studio_client,
     turn_body,
 )
+from .test_generative import _FakeClient
+from .test_studio import (
+    COMPONENT,
+    WRITE_TOKEN,
+    ScriptedExecutor,
+    _card,
+    _card_results,
+    _described,
+    _edit_body,
+    _search,
+)
+from .test_studio_apply_unit import (
+    _CONSTANT_2023,
+    _ENVELOPE,
+    _SPEC,
+    _YEARS,
+    _apply_body,
+    _change_body,
+    _Changer,
+    _first_results,
+    _first_turn,
+    _Places,
+    _Search,
+)
+from .test_studio_apply_unit import _UGANDA as _UGANDA_CHANGE
 from .test_studio_resume import _leave_once, _resume_body
 
 pytestmark = pytest.mark.usefixtures("hydrogen_studio")
@@ -753,6 +779,149 @@ async def test_a_forced_digest_opens_a_full_arm_conversation_from_the_digest_and
     ]
 
 
+def _card_change_app(engine: AsyncEngine, body: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
+    """A first turn that draws card `cmp_01unit0001`, a card change `body` on
+    it answered by a `_Changer`, and a third turn that answers in text. The
+    card offers its places."""
+    *calls, answer = _first_turn()
+    app, model = orchestrator_app(
+        *calls,
+        Reply(chunks=[[answer]], usage=usage_metadata(prompt=9_000, candidates=40)),
+        _UGANDA,
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(_first_results()),
+        tool_surface=_Search(),
+        engine=engine,
+        history=_split(),
+    )
+    app.state.studio.place_options = _Places()
+    return app, model, {**body, "conversation_id": _FULL_ID}, _Changer()
+
+
+def _edit_card_app(engine: AsyncEngine) -> tuple[Any, Any, Any, Any]:
+    """A first turn that draws card `cmp_01test0001`, an Edit Card on it whose
+    model renames it, and a third turn that answers in text."""
+    revised = {
+        **COMPONENT,
+        "revision": 2,
+        "fact_summary": {**COMPONENT["fact_summary"], "revision": 2},
+    }
+    decision = {
+        "text": "Renamed.",
+        "patch_json": json.dumps({"title": "Kenya"}),
+        "recreate_json": None,
+    }
+    *calls, answer = _card()
+    app, model = orchestrator_app(
+        *calls,
+        Reply(chunks=[[answer]], usage=usage_metadata(prompt=9_000, candidates=40)),
+        _UGANDA,
+        resolver=_search(),
+        executor=ScriptedExecutor(
+            [
+                *_card_results(write_token=WRITE_TOKEN),
+                _described(),
+                {"outcome": "ok", "frame_refs": [], "component": revised},
+            ]
+        ),
+        edit_model=GeminiEdit(
+            model_name="gemini-edit-test",
+            timeout_s=30,
+            client=_FakeClient(json.dumps(decision), usage_metadata(prompt=600, candidates=6)),
+        ),
+        engine=engine,
+        history=_split(),
+    )
+    return app, model, {**_edit_body("rename it"), "conversation_id": _FULL_ID}, None
+
+
+@pytest.mark.parametrize(
+    ("build", "roles", "reason", "place"),
+    [
+        pytest.param(
+            lambda engine: _card_change_app(engine, _change_body("cmp_01unit0001", _SPEC, _YEARS)),
+            [],
+            "previous_turn_card_change",
+            None,
+            id="apply-change-years",
+        ),
+        pytest.param(
+            lambda engine: _card_change_app(
+                engine, _change_body("cmp_01unit0001", _SPEC, _UGANDA_CHANGE)
+            ),
+            [],
+            "previous_turn_card_change",
+            "country/UGA",
+            id="apply-change-places",
+        ),
+        pytest.param(
+            lambda engine: _card_change_app(
+                engine, _apply_body("cmp_01unit0001", _SPEC, _CONSTANT_2023)
+            ),
+            [],
+            "previous_turn_card_change",
+            None,
+            id="apply-unit",
+        ),
+        pytest.param(_edit_card_app, ["edit"], "previous_turn_carried_none", None, id="edit-card"),
+    ],
+)
+async def test_a_question_after_a_card_change_or_an_edit_card_on_the_full_arm_opens_from_the_digest(
+    pg_engine: AsyncEngine,
+    caplog: pytest.LogCaptureFixture,
+    build: Any,
+    roles: list[str],
+    reason: str,
+    place: str | None,
+) -> None:
+    """A card change in place and an Edit Card run no orchestrator, so they
+    carry no conversation: the question after one opens a fresh chain from
+    the whole digest, `previous_turn_card_change` after a card change and
+    `previous_turn_carried_none` after an Edit Card, and the arm the first
+    turn assigned stays stored. Only the Edit Card's model call writes a
+    `studio.model_call` line for the middle turn. After a change of places,
+    the ledger the next turn's planner pins from offers the retrieval the
+    changed card drew, over its new `place`."""
+    app, model, middle, changer = build(pg_engine)
+    with caplog.at_level(logging.INFO, logger="harness.studio_store"):
+        await _turns(app, "Aid to Kenya", conversation_id=_FULL_ID)
+        assert (await _stored(pg_engine, _FULL_ID, "carried_history"))["tokens"] == 9_040
+        if changer is not None:
+            app.state.studio.recorder._executor = changer
+        async with studio_client(app) as client:
+            frames = await stream(client, "/api/studio/turn", middle)
+        assert frames[-1]["event"] == "done"
+        assert await _stored(pg_engine, _FULL_ID, "carried_history") is None
+        await _turns(app, "And Uganda?", conversation_id=_FULL_ID)
+
+    request = model.requests[-1]
+    assert len(_contents(request)) == 2
+    assert '"turns": [' in _opening_texts(request, 2)[0]
+    lines = _turn_lines(caplog)
+    assert [_history_fields(line) for line in lines] == [
+        (1, "full", "full", "split", 1, "fresh"),
+        (2, "full", "full", "split", 1, None),
+        (3, "full", "full", "split", 1, f"reset:{reason}"),
+    ]
+    assert await _stored(pg_engine, _FULL_ID, "history_assignment") == {"arm": "full", "turn": 1}
+    calls = [
+        fields
+        for record in caplog.records
+        if isinstance(fields := getattr(record, JSON_FIELDS, None), dict)
+        and fields.get("event") == "studio.model_call"
+    ]
+    assert [call["role"] for call in calls if call["trace_id"] == lines[1]["trace_id"]] == roles
+    if place is not None:
+        conversation = app.state.studio.store.current(_PRINCIPAL, _FULL_ID)
+        ledger = conversation.prior_ledger_state()
+        assert ledger is not None
+        newest = ledger["readings"][-1]["spec_id"]
+        assert newest != _SPEC
+        recorded = conversation.recorded_identity(newest)
+        assert recorded is not None
+        assert recorded.identity["entities"]["financingRecipient"] == [place]
+
+
 async def test_each_turn_s_spans_and_line_name_its_own_conversation_s_arm(
     pg_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
@@ -1134,6 +1303,42 @@ def test_an_unknown_history_setting_is_refused(
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):
         HistorySettings()
+
+
+_CARD_CHANGE_TURN = {"card_change": {"component_id": "cmp_01unit0001", "kind": "window"}}
+
+
+@pytest.mark.parametrize(
+    ("turns", "reason"),
+    [
+        pytest.param([{}, _CARD_CHANGE_TURN], "previous_turn_card_change", id="card-change"),
+        pytest.param(
+            [{}, {**_CARD_CHANGE_TURN, "error": "change_failed"}],
+            "previous_turn_card_change",
+            id="card-change-that-failed",
+        ),
+        pytest.param(
+            [_CARD_CHANGE_TURN, {}], "previous_turn_carried_none", id="card-change-then-another"
+        ),
+    ],
+)
+def test_only_the_turn_right_after_a_card_change_names_it_as_its_reset(
+    turns: list[dict[str, Any]], reason: str
+) -> None:
+    """A turn that follows a card change and carries no conversation resets
+    with `previous_turn_card_change`, whether the change succeeded or closed
+    with an error. The reason comes from the previous turn's record only. When
+    another turn whose record holds no card change mark follows the change
+    and carries nothing, the turn after it resets with
+    `previous_turn_carried_none`."""
+    conversation = ConversationState(conversation_id="conv-card-change")
+    conversation.turns = [
+        {"turn": number, "user": "", "assistant": "", **record}
+        for number, record in enumerate(turns, start=1)
+    ]
+
+    assert conversation.carried_opening(model_name="gemini-test") is None
+    assert conversation.turn_usage.history_chain == f"reset:{reason}"
 
 
 @pytest.mark.parametrize(("carried", "marked"), [(True, True), (False, False)])

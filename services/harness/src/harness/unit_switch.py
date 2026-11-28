@@ -13,6 +13,9 @@ compiled identity alone would answer a part with no scope choices. Otherwise
 it is the identity of the block the part was read from.
 
 A Search refusal comes back as a `UnitRefused` value.
+
+`scope_years` reads, the same way, the years a spec holds over other places
+than its Search block names, which a card whose places changed offers.
 """
 
 from __future__ import annotations
@@ -24,10 +27,12 @@ from typing import Any
 
 from compiler.sources import readable_wire_groups
 from compiler.surface import ToolSurface
+from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.definition_writes import unit_identity
 from planner.workflow import ResolvedGroup
 from translator.discovery import DefinitionNotResolvedError, resolve_definition
 
+from harness.card_unit import years_held
 from harness.turn_records import SearchReading
 
 logger = logging.getLogger(__name__)
@@ -76,8 +81,13 @@ async def resubmit_unit(
     block: Mapping[str, Any],
     unit: Mapping[str, Any],
     label: str,
+    facets: Mapping[str, str] | None = None,
 ) -> UnitResubmitted | UnitRefused:
     """Resolve the part `block` and `reading` stand for in `unit`, named `label` in a refusal.
+
+    `facets` are the facets the card was drawn with, by axis
+    (`harness.card_unit.UnitCard.facets`). Each but the unit is bound on the
+    identity posted, so the part in the new unit counts what the card counted.
 
     `unit` is `{"currency": "EUR", "prices": "constant", "base_year": 2024}`
     (`unit_identity`). The part is posted with its named sets, so Search names
@@ -95,6 +105,8 @@ async def resubmit_unit(
         base = definition.get("identity") if isinstance(definition, Mapping) else None
         entries = ()
     groups = _groups(reading, block)
+    if isinstance(base, Mapping) and facets:
+        base = _bound(base, {axis: ref for axis, ref in facets.items() if axis != "unit"})
     if not isinstance(base, Mapping) or groups is None:
         return UnitRefused(
             code=None, reason=f"Search's record of {label} could not be read.", retryable=False
@@ -130,3 +142,42 @@ async def resubmit_unit(
             code=None, reason=f"Search holds no data for {label} in that unit.", retryable=False
         )
     return UnitResubmitted(spec_id=str(spec["spec_id"]), part=part, spec=spec)
+
+
+def _bound(identity: Mapping[str, Any], facets: Mapping[str, str]) -> dict[str, Any]:
+    """`identity` with each facet of `facets`, a ref by axis, bound as a value."""
+    return {
+        **identity,
+        "facets": {
+            **(identity.get("facets") or {}),
+            **{axis: {"state": "value", "ref": ref} for axis, ref in facets.items()},
+        },
+    }
+
+
+async def scope_years(
+    surface: ToolSurface, *, block: Mapping[str, Any], entities: Mapping[str, list[str]]
+) -> tuple[int, int, tuple[int, ...]] | None:
+    """The first and last year the spec of `block` holds data over the places
+    `entities` names, by role, and the years between with none, as Search
+    states them for the block's identity with those places
+    (`resolve_definition`, read as `harness.card_unit.years_held` reads a
+    block): one Search read. `None` when Search refuses, or states no years."""
+    definition = block.get("definition")
+    identity = definition.get("identity") if isinstance(definition, Mapping) else None
+    if not isinstance(identity, Mapping):
+        return None
+    scoped = {**identity, "entities": {role: list(refs) for role, refs in entities.items()}}
+    try:
+        part = await resolve_definition(
+            surface, spec_id=spec_id_for(canonicalize(scoped)), identity=scoped
+        )
+    except DefinitionNotResolvedError as exc:
+        logger.info("years over the card's places not read: code=%s: %s", exc.code, exc)
+        return None
+    spec = part.get("spec") if part.get("status") == "definite" else None
+    held = years_held(spec) if isinstance(spec, Mapping) else None
+    if held is None:
+        return None
+    start, end, gaps = held
+    return start, end, tuple(gaps)
