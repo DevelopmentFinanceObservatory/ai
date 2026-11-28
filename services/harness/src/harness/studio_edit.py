@@ -437,7 +437,9 @@ async def change_events(
     lineage names with its identity: the record line and the card's entry
     name that spec with the card's arguments, and the turn keeps its
     identity (`ConversationState.turn_identities`), all written with the
-    card. Once the card has landed and its frames are sent, Search reads that
+    card. A lineage that states no served identity leaves the record naming
+    the card's spec over its scope, with the change's own readings. Once the
+    card has landed and its frames are sent, Search reads that
     identity again within `DRAWN_READ_DEADLINE_S` (`_drawn_readings`), and
     the edit closes only then. A read Search refuses, cannot answer in time,
     or answers otherwise, and a fault reading its answer, leave the change
@@ -1060,7 +1062,7 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
     display_line = f"Change {move.title} to {shown}."
     held = (
         {served[0]: RecordedIdentity(identity=dict(served[1])).model_dump(mode="json")}
-        if served is not None and served[1] is not None
+        if served is not None
         else {}
     )
 
@@ -1102,8 +1104,6 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
     if landed is None or served is None:
         return
     spec_id, identity = served
-    if identity is None:
-        return
     # The card's frames are sent before the read below starts, and a card
     # that never landed is not read.
     if await landed is SwapLanded.GONE:
@@ -1253,15 +1253,13 @@ def _read_again(move: UnitMove, resubmitted: UnitResubmitted) -> list[dict[str, 
     )
 
 
-def _served_retrieval(
-    lineage: CardLineage | None,
-) -> tuple[str, Mapping[str, Any] | None] | None:
+def _served_retrieval(lineage: CardLineage | None) -> tuple[str, Mapping[str, Any]] | None:
     """The spec_id the one retrieval a written card's `lineage` reads is
     served under, and its identity, as `harness.card_unit.unit_card` reads
     them: the member's served spec_id and its manifest's
-    `definition.identity`, `None` where the manifest states none. `None` for
-    a card on more than one retrieval, and for a member that states no
-    served spec_id."""
+    `definition.identity`. `None` for a card on more than one retrieval, and
+    for a member that states either not at all, since a served spec with no
+    identity on record cannot be read again or resubmitted later."""
     if lineage is None or len(lineage.lineage) != 1:
         return None
     (member,) = lineage.lineage
@@ -1270,8 +1268,10 @@ def _served_retrieval(
         return None
     identity = (member.manifest.get("definition") or {}).get("identity")
     if not isinstance(identity, Mapping):
-        logger.info("the lineage of %s states no identity, so the turn records none", spec_id)
-        return spec_id, None
+        logger.info(
+            "the lineage of %s states no identity, so the turn names the card's own spec", spec_id
+        )
+        return None
     return spec_id, identity
 
 

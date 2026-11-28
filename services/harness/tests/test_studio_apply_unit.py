@@ -1514,6 +1514,87 @@ async def test_a_unit_change_after_a_change_of_places_records_the_retrieval_it_d
     assert in_unit not in record["user"]
 
 
+async def test_a_unit_change_whose_served_retrieval_states_no_identity_records_its_own_reading(
+    pg_engine: AsyncEngine,
+) -> None:
+    """After the card moves to Uganda, a unit change whose retrieval's lineage
+    names a served spec but no identity has no retrieval Search could read
+    again: the turn records the unit change's own reading, and its line and
+    the card's `fetched_with` name the card's spec over its scope."""
+    search = _Search()
+    app = _app(
+        *_first_turn(),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(_first_results()),
+        tool_surface=search,  # ty: ignore[invalid-argument-type] -- the one tool a change reads
+        engine=pg_engine,
+    )
+    app.state.studio.place_options = _Places()
+    # It knows the identity of the first card's spec only, so the unit
+    # change's retrieval is served with none.
+    changer = _Changer()
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        moved = await _stream(
+            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)
+        )
+        posted = len(search.posted)
+        frames = await _stream(
+            client, "/api/studio/turn", _unit_step(_frame(moved, "component.created"))
+        )
+
+    _, fetched = changer.fetched()
+    in_unit = fetched["spec_id"]
+    asked = [p["spec_id"] for p in search.posted[posted:]]
+    assert in_unit in asked
+    # The retrieval it drew is served under a spec of its own, never read.
+    assert changer.redrawn[-1] != in_unit
+    assert changer.redrawn[-1] not in asked
+    created = _frame(frames, "component.created")
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    record = conversation.turns[-1]
+    assert [r["spec_id"] for r in record["readings"]] == [in_unit]
+    assert f"(get_data {json.dumps(fetched, sort_keys=True)})" in record["user"]
+    assert conversation.components[created["component_id"]][FETCHED_KEY] == fetched
+    assert changer.redrawn[-1] not in (record.get("identities") or {})
+    assert changer.redrawn[-1] not in record["user"]
+
+
+async def test_a_change_of_places_whose_card_write_fails_ends_the_turn_once(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The canvas write of a card a change of places redrew fails: no card is
+    published, the turn ends once on the error a failed write ends any card
+    change on, Search is not asked to read the retrieval again, and nothing
+    else is logged as a fault."""
+    app, changer, search = _resubmit_app(pg_engine, "held")
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+
+        async def unavailable(*_: Any, **__: Any) -> Any:
+            raise DatabaseUnavailable("the canvas could not be written")
+
+        app.state.studio.store.change_canvas = unavailable
+        with caplog.at_level(logging.WARNING):
+            frames = await asyncio.wait_for(
+                _stream(client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)),
+                timeout=5,
+            )
+
+    events = [frame["event"] for frame in frames]
+    assert "component.created" not in events
+    assert [e for e in events if e in {"done", "error"}] == ["error"]
+    assert search.resubmitted == []
+    assert _second_endings(caplog) == []
+    said = " ".join(
+        f"{r.getMessage()} {r.exc_text or ''} {r.exc_info or ''}" for r in caplog.records
+    )
+    for fault in ("InvalidStateError", "never retrieved", "was destroyed but it is pending"):
+        assert fault not in said
+
+
 class _ResubmitSearch(_Search):
     """Search's resolve, answering the resubmit of a retrieval a card
     `changer` redrew was drawn on as `answer` says. Every other identity it
