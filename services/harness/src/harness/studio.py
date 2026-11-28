@@ -130,6 +130,7 @@ from harness.seeds import seeds_slot
 from harness.settings import HistorySettings, Settings
 from harness.studio_edit import (
     CardSwap,
+    ChangeRecorded,
     EditClosed,
     EditEvent,
     EditFailed,
@@ -1443,7 +1444,9 @@ class _EditWork:
     work too, `events` giving its events in place of the edit's.
 
     The edit ends on its reply and `done`, a card swap
-    (`harness.studio_edit.CardSwap`) carrying its reply, or on a stream-fatal `error`
+    (`harness.studio_edit.CardSwap`) carrying its reply, the
+    `harness.studio_edit.ChangeRecorded` that follows a swap that does not
+    close it, or on a stream-fatal `error`
     frame that records the turn failed, and the work ends `done` or
     `failed`. A heartbeat that reads a Stop first cancels the edit and the
     work ends `cancelled`. One that finds the lease another's, or cannot
@@ -1482,7 +1485,9 @@ class _EditWork:
             nonlocal ended
             async for event in self._events():
                 emit(event)
-                if isinstance(event, (EditClosed, EditFailed, CardSwap)):
+                if isinstance(event, (EditClosed, EditFailed, ChangeRecorded)) or (
+                    isinstance(event, CardSwap) and event.closes
+                ):
                     ended = event
 
         editing = asyncio.create_task(edit())

@@ -1402,7 +1402,8 @@ class ConversationState:
         # card the turn drew or redrew reads when its unit can change
         # (`harness.card_unit`), which a later turn's unit change reads. A block
         # can run to about 120 KB and the record is kept for the whole
-        # conversation, so no other is kept.
+        # conversation, so no other is kept but the block of each retrieval a
+        # card change read (`_card_change_specs`).
         identities = _turn_identities(self.turn_specs, plans)
         copied = _copied_sources(
             [source for plan in plans for source in plan.sources],
@@ -1417,6 +1418,7 @@ class ConversationState:
             }
             | copied
             | self._unit_card_specs()
+            | self._card_change_specs()
         )
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
@@ -1438,6 +1440,19 @@ class ConversationState:
             if isinstance(stored, dict) and isinstance(stored.get("spec_id"), str):
                 specs.add(stored["spec_id"])
         return specs
+
+    def _card_change_specs(self) -> set[str]:
+        """The spec_id of each reading a turn that changed a card in place
+        (`turn_card_change`) read: the retrieval the changed card drew
+        (`harness.studio_edit.change_events`), which a later turn pins or
+        fetches. None for any other turn."""
+        if not self.turn_card_change:
+            return set()
+        return {
+            reading["spec_id"]
+            for reading in self.turn_readings
+            if isinstance(reading, dict) and isinstance(reading.get("spec_id"), str)
+        }
 
     def take_identity(
         self,

@@ -46,6 +46,12 @@ from typing import Any
 from common.mcp_telemetry import WRITE_TOKEN_KEY
 from compiler.surface import ToolId, ToolSurface, ToolSurfaceUnavailableError
 from pydantic import BaseModel
+from translator.discovery import (
+    DefinitionNotResolvedError,
+    PartNotResolvedError,
+    resolve_definition,
+    resolved_spec,
+)
 
 from harness.card_unit import (
     CARD_UNIT_KEY,
@@ -68,6 +74,7 @@ from harness.card_unit import (
     scope_needs_years,
     select_entry,
     stored_block,
+    stored_reading,
     strayed_facets,
     unit_card,
     unit_pattern,
@@ -98,7 +105,7 @@ from harness.studio_translate import (
     failure_detail,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal, resolver_digest
-from harness.turn_records import TURN_CARD_RUNS, held_back_line
+from harness.turn_records import TURN_CARD_RUNS, SearchReading, held_back_line
 from harness.unit_offer import served_unit, unit_words
 from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit, scope_years
 from harness.wire import (
@@ -194,15 +201,16 @@ class SwapLanded(Enum):
 
 @dataclass(frozen=True)
 class CardSwap:
-    """A card written to take card `replaces`' slot, the last event of the
-    edit that wrote it. `swap` runs on the canvas as stored and makes the
-    write (`StudioStore.change_canvas`), with `lineage` and `specs` as
-    `CanvasChange` has them. Only once it commits are `step`, the step that
-    produced the card, and `created`, its `component.created`, published,
-    `created` naming `replaces` when the card took its slot, and the edit
-    ends on `closed`. A swap that finds the slot gone, when `gone` is given,
-    writes nothing and the edit ends on `gone`, a failed step and its
-    closing, with nothing published."""
+    """A card written to take card `replaces`' slot. `swap` runs on the
+    canvas as stored and makes the write (`StudioStore.change_canvas`), with
+    `lineage` and `specs` as `CanvasChange` has them. Only once it commits are
+    `step`, the step that produced the card, and `created`, its
+    `component.created`, published, `created` naming `replaces` when the card
+    took its slot, and the edit ends on `closed`. A swap that does not
+    `closes` is followed by the `ChangeRecorded` that ends the edit on
+    `closed`. A swap that finds the slot gone, when `gone` is given, writes
+    nothing and the edit ends on `gone`, a failed step and its closing, with
+    nothing published."""
 
     step: ActivityStep
     created: ComponentCreated
@@ -212,10 +220,25 @@ class CardSwap:
     specs: Mapping[str, Any] | None
     closed: EditClosed
     gone: tuple[ActivityStep, EditClosed] | None = None
+    closes: bool = True
+
+
+@dataclass(frozen=True)
+class ChangeRecorded:
+    """The end of a card change whose `CardSwap` did not close the edit:
+    `change`, when given, writes what the turn's record keeps of the
+    retrieval the card drew as the canvas write `CanvasChange` makes, `specs`
+    joins the turn's blocks once it commits, and the edit ends on `closed`. A
+    turn its swap already closed, on finding the card's slot gone, writes and
+    sends nothing more."""
+
+    closed: EditClosed
+    change: Callable[[ConversationState], bool] | None = None
+    specs: Mapping[str, Any] | None = None
 
 
 # An edit emits a frame to number or one of the events above.
-type EditEvent = BaseModel | EditClosed | EditFailed | CanvasChange | CardSwap
+type EditEvent = BaseModel | EditClosed | EditFailed | CanvasChange | CardSwap | ChangeRecorded
 
 
 async def edit_events(
@@ -248,7 +271,7 @@ async def edit_events(
         yield EditFailed(exc)
 
 
-async def edit_event_frames(
+async def edit_event_frames(  # noqa: PLR0911 -- one ending per kind of event
     event: EditEvent, *, conversation: ConversationState, store: StudioStore
 ) -> list[BaseModel]:
     """The frames of `event`, numbered, with what it changes written: the
@@ -278,6 +301,8 @@ async def edit_event_frames(
             ]
         case CardSwap():
             return await _swap_frames(event, conversation=c, store=store)
+        case ChangeRecorded():
+            return await _recorded_frames(event, conversation=c, store=store)
         case _:
             return [event.model_copy(update={"seq": c.next_seq()})]
 
@@ -314,7 +339,24 @@ async def _swap_frames(
                 event="composition.updated", seq=c.next_seq(), manifest=c.composition
             )
         )
-    return [*frames, *_closed_frames(c, event.closed)]
+    return [*frames, *(_closed_frames(c, event.closed) if event.closes else ())]
+
+
+async def _recorded_frames(
+    event: ChangeRecorded, *, conversation: ConversationState, store: StudioStore
+) -> list[BaseModel]:
+    """The frames that end a card change on `event`, once its write commits:
+    none for a turn already closed, as one whose swap found the slot gone is."""
+    c = conversation
+    if c.turn_recorded:
+        return []
+    if event.change is not None:
+        key = current_conversation_key.get()
+        assert key is not None, "an edit runs only inside a conversation's stream"
+        await store.change_canvas(*key, event.change)
+        if event.specs:
+            c.turn_specs = {**c.turn_specs, **event.specs}
+    return _closed_frames(c, event.closed)
 
 
 def _closed_frames(conversation: ConversationState, closed: EditClosed) -> list[BaseModel]:
@@ -369,10 +411,18 @@ async def change_events(
     change as a refused fetch does.
 
     The turn's record (`ConversationState.turn_user_message`) names the
-    change and the spec_id, with the scope a change of years or places
-    fetched over, which the new card's entry keeps too (`FETCHED_KEY`). A
-    unit change's new reading joins the turn's readings with its block, so
-    the next turn's model reads the card as it is. A step Search or the
+    change and the `get_data` arguments that draw the new card, which its
+    entry keeps too (`FETCHED_KEY`), and the reading of the retrieval it drew
+    joins the turn's readings with its block, so the next turn's model and
+    planner read the card as it is. A unit change of a card with no scope
+    reads that retrieval from Search before the fetch (`resubmit_unit`). A
+    card fetched over a scope is served under a spec of its own, whose
+    identity its lineage states: Search reads that identity again once the
+    card is drawn (`_drawn_part`), and the edit closes only then. A read
+    Search refuses, cannot answer in time, or answers under another spec
+    leaves the change made, with a warning: the record then names the card's
+    spec over its scope and holds no reading of it, and the card's entry names
+    the same arguments. A step Search or the
     platform refuses, and a retrieval that holds no figures, ends the turn on
     its sentence, the card unchanged. Failures serialise as `edit_events`'
     do."""
@@ -391,9 +441,9 @@ async def change_events(
         yield EditFailed(exc)
 
 
-# The key of a card's digest entry naming the `get_data` arguments a change
-# fetched it with, which the model reads, so a follow-up fetch draws what the
-# card shows.
+# The key of a card's digest entry naming the `get_data` arguments that draw
+# a card a change fetched over a scope, which the model reads, so a follow-up
+# fetch draws what the card shows.
 FETCHED_KEY = "fetched_with"
 
 # The key of the digest entry of a card on a sum naming the analysis step that
@@ -955,31 +1005,45 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
             yield event
         return
     shown = read.phrase.removeprefix("in ").removeprefix("for ")
-    # A change of years or places names the scope the card now shows, so the
-    # next turn's model fetches what the card draws.
+    # The record names the arguments that draw the card, so the next turn's
+    # model fetches what the card draws.
     summed_with = (
         ""
         if card.total is None
         else f", then aggregate {json.dumps(card.total.parameters, sort_keys=True)}"
     )
+
+    def line(fetch_args: Mapping[str, Any]) -> str:
+        return (
+            f"Changed {move.title} to {shown} "
+            f"(get_data {json.dumps(fetch_args, sort_keys=True)}{summed_with})."
+        )
+
     record_line = (
         f"Changed {move.title} to {shown} ({read.spec_id})."
         if read.scope is None
-        else f"Changed {move.title} to {shown} "
-        "(get_data "
-        f"{json.dumps(card.fetch_args(read.spec_id, read.scope, facets=facets), sort_keys=True)}"
-        f"{summed_with})."
+        else line(card.fetch_args(read.spec_id, read.scope, facets=facets))
     )
     display_line = f"Change {move.title} to {shown}."
+    # A card fetched over a scope is served under a spec of its own, which the
+    # turn records once Search reads it again (`_drawn_part`), with the card
+    # drawn meanwhile. Until then the record keeps the read's own line and no
+    # reading, which a read Search refuses leaves standing.
+    served = (
+        _served_retrieval(recorder.card_lineage(written["component"]))
+        if read.scope is not None
+        else None
+    )
 
     def record(work: ConversationState) -> None:
         work.turn_user_message = record_line
-        work.turn_readings = [*work.turn_readings, *read.readings]
+        if served is None:
+            work.turn_readings = [*work.turn_readings, *read.readings]
 
     # The card shows the change. The record keeps the sentence and the
     # spec_id for the next turn's model, and a state read shows neither.
     closed = EditClosed(f"The card now shows {shown}.", shown=False, user_display=display_line)
-    yield _swapped(
+    swap = _swapped(
         recorder,
         conversation,
         component=written["component"],
@@ -996,7 +1060,57 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         gone=gone,
         card=card,
         intent=intent,
+        closes=served is None,
     )
+    if served is None:
+        yield swap
+        return
+    spec_id, identity = served
+    drawn = asyncio.create_task(_drawn_part(surface, spec_id=spec_id, identity=identity))
+    try:
+        yield swap
+        try:
+            part = await drawn
+        # The card has landed, so any fault reading its retrieval again ends
+        # the change as a read Search refuses does.
+        except Exception:
+            logger.warning(
+                "the retrieval %s a changed card drew was not read again, so the turn "
+                "records none of it",
+                spec_id,
+                exc_info=True,
+            )
+            part = None
+    finally:
+        drawn.cancel()
+    if part is None:
+
+        def unread(work: ConversationState) -> bool:
+            work.turn_readings = [*work.turn_readings, *read.readings]
+            return False
+
+        yield ChangeRecorded(closed=swap.closed, change=unread if read.readings else None)
+        return
+    fetched_with = card.fetch_args(spec_id, None)
+    title = intent.get("title")
+    readings = _part_readings(
+        part,
+        reading=move.reading
+        if isinstance(move, UnitMove)
+        else stored_reading(conversation.turn_readings, conversation.turns, move.card.spec_id),
+        variable=title if isinstance(title, str) and title else move.title,
+    )
+    component_id = swap.created.component_id
+
+    def recorded(work: ConversationState) -> bool:
+        work.turn_user_message = line(fetched_with)
+        work.turn_readings = [*work.turn_readings, *readings]
+        entry = work.components.get(component_id)
+        if entry is not None:
+            work.components[component_id] = {**entry, FETCHED_KEY: fetched_with}
+        return False
+
+    yield ChangeRecorded(closed=swap.closed, change=recorded, specs={spec_id: dict(part["spec"])})
 
 
 async def _summed_again(  # noqa: PLR0911 -- one sentence per way the sum fails
@@ -1111,10 +1225,73 @@ async def _with_years(
 def _read_again(move: UnitMove, resubmitted: UnitResubmitted) -> list[dict[str, Any]]:
     """The readings, as JSON, of the part Search answered for the card's spec
     in the new unit, named and asked as the reading it replaces."""
-    digest = resolver_digest({"parts": [dict(resubmitted.part)]})
     reading = move.reading
+    return _part_readings(
+        resubmitted.part,
+        reading=reading,
+        variable=(reading.text if reading is not None else None) or move.title,
+    )
+
+
+def _served_retrieval(lineage: CardLineage | None) -> tuple[str, Mapping[str, Any]] | None:
+    """The spec_id and identity the one retrieval a written card's `lineage`
+    reads is served under, as `harness.card_unit.unit_card` reads them: the
+    member's served spec_id and its manifest's `definition.identity`. `None`
+    for a card on more than one retrieval, and for a manifest that states
+    either not at all."""
+    if lineage is None or len(lineage.lineage) != 1:
+        return None
+    (member,) = lineage.lineage
+    spec_id = member.served_ref["spec_id"]
+    identity = (member.manifest.get("definition") or {}).get("identity")
+    if not isinstance(spec_id, str) or not spec_id or not isinstance(identity, Mapping):
+        logger.info("a changed card's lineage states no served identity, so none is recorded")
+        return None
+    return spec_id, identity
+
+
+async def _drawn_part(
+    surface: ToolSurface, *, spec_id: str, identity: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    """The part Search answers for `identity`, the one a changed card's
+    retrieval is served under as `spec_id`: one `resolve_definition` call,
+    bounded by the surface's timeout for it as every Search read of a card
+    change is. `None`, with a warning naming `spec_id` and the reason, when
+    Search refuses it, cannot be reached in time, or answers a part that is
+    not `definite` under `spec_id` with its identity (`resolved_spec`)."""
+    try:
+        part = await resolve_definition(surface, spec_id=spec_id, identity=identity)
+        resolved_spec(part, spec_id=spec_id)
+    except DefinitionNotResolvedError as exc:
+        logger.warning(
+            "the retrieval %s a changed card drew was not read again (code=%s, retryable=%s): "
+            "%s; the turn records none of it",
+            spec_id,
+            exc.code,
+            exc.retryable,
+            exc,
+        )
+        return None
+    except PartNotResolvedError as exc:
+        logger.warning(
+            "Search answered the retrieval %s a changed card drew as %s (spec_id %s); "
+            "the turn records none of it",
+            spec_id,
+            exc.fault.value,
+            exc.answered,
+        )
+        return None
+    return part
+
+
+def _part_readings(
+    part: Mapping[str, Any], *, reading: SearchReading | None, variable: str
+) -> list[dict[str, Any]]:
+    """The readings, as JSON, of `part`, a part Search answered, named
+    `variable` and asked as `reading` was, when given."""
+    digest = resolver_digest({"parts": [dict(part)]})
     for read in digest.get("part_digests") or ():
-        read["variable"] = (reading.text if reading is not None else None) or move.title
+        read["variable"] = variable
     if reading is not None:
         mark_planner_axes(digest, reading.planner_axes)
     state: dict[str, Any] = {}
@@ -1326,6 +1503,7 @@ def _swapped(
     reframed: bool = False,
     card: UnitCard | None = None,
     intent: Mapping[str, Any] | None = None,
+    closes: bool = True,
 ) -> CardSwap:
     """The swap of `component`, a card written to take card
     `old_component_id`'s slot, ending the edit on `closed`: the step
@@ -1355,7 +1533,8 @@ def _swapped(
     conversation keeps the card it wrote off the canvas, and the edit ends on
     `gone`. A `closed` that is shown carries the held line (`_held_line`),
     `reframed` saying whether the new card draws another window or frame than
-    the old."""
+    the old. A swap that does not `closes` leaves the edit open for the
+    `ChangeRecorded` that ends it on `closed`."""
     plan = (conversation.components.get(old_component_id) or {}).get(PLAN_LINK_KEY)
     created = component_created(component, step_id=step_id, plan=plan)
     token = recorder.write_token(component)
@@ -1449,6 +1628,7 @@ def _swapped(
         specs=specs,
         closed=closed,
         gone=gone,
+        closes=closes,
     )
 
 

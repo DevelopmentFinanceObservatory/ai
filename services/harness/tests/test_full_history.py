@@ -92,8 +92,10 @@ from .test_studio_apply_unit import (
     _Changer,
     _first_results,
     _first_turn,
+    _Places,
     _Search,
 )
+from .test_studio_apply_unit import _UGANDA as _UGANDA_CHANGE
 from .test_studio_resume import _leave_once, _resume_body
 
 pytestmark = pytest.mark.usefixtures("hydrogen_studio")
@@ -779,7 +781,8 @@ async def test_a_forced_digest_opens_a_full_arm_conversation_from_the_digest_and
 
 def _card_change_app(engine: AsyncEngine, body: dict[str, Any]) -> tuple[Any, Any, Any, Any]:
     """A first turn that draws card `cmp_01unit0001`, a card change `body` on
-    it answered by a `_Changer`, and a third turn that answers in text."""
+    it answered by a `_Changer`, and a third turn that answers in text. The
+    card offers its places."""
     *calls, answer = _first_turn()
     app, model = orchestrator_app(
         *calls,
@@ -791,6 +794,7 @@ def _card_change_app(engine: AsyncEngine, body: dict[str, Any]) -> tuple[Any, An
         engine=engine,
         history=_split(),
     )
+    app.state.studio.place_options = _Places()
     return app, model, {**body, "conversation_id": _FULL_ID}, _Changer()
 
 
@@ -832,13 +836,23 @@ def _edit_card_app(engine: AsyncEngine) -> tuple[Any, Any, Any, Any]:
 
 
 @pytest.mark.parametrize(
-    ("build", "roles", "reason"),
+    ("build", "roles", "reason", "place"),
     [
         pytest.param(
             lambda engine: _card_change_app(engine, _change_body("cmp_01unit0001", _SPEC, _YEARS)),
             [],
             "previous_turn_card_change",
+            None,
             id="apply-change-years",
+        ),
+        pytest.param(
+            lambda engine: _card_change_app(
+                engine, _change_body("cmp_01unit0001", _SPEC, _UGANDA_CHANGE)
+            ),
+            [],
+            "previous_turn_card_change",
+            "country/UGA",
+            id="apply-change-places",
         ),
         pytest.param(
             lambda engine: _card_change_app(
@@ -846,9 +860,10 @@ def _edit_card_app(engine: AsyncEngine) -> tuple[Any, Any, Any, Any]:
             ),
             [],
             "previous_turn_card_change",
+            None,
             id="apply-unit",
         ),
-        pytest.param(_edit_card_app, ["edit"], "previous_turn_carried_none", id="edit-card"),
+        pytest.param(_edit_card_app, ["edit"], "previous_turn_carried_none", None, id="edit-card"),
     ],
 )
 async def test_a_question_after_a_card_change_or_an_edit_card_on_the_full_arm_opens_from_the_digest(
@@ -857,13 +872,16 @@ async def test_a_question_after_a_card_change_or_an_edit_card_on_the_full_arm_op
     build: Any,
     roles: list[str],
     reason: str,
+    place: str | None,
 ) -> None:
     """A card change in place and an Edit Card run no orchestrator, so they
     carry no conversation: the question after one opens a fresh chain from
     the whole digest, `previous_turn_card_change` after a card change and
     `previous_turn_carried_none` after an Edit Card, and the arm the first
     turn assigned stays stored. Only the Edit Card's model call writes a
-    `studio.model_call` line for the middle turn."""
+    `studio.model_call` line for the middle turn. After a change of places,
+    the ledger the next turn's planner pins from offers the retrieval the
+    changed card drew, over its new `place`."""
     app, model, middle, changer = build(pg_engine)
     with caplog.at_level(logging.INFO, logger="harness.studio_store"):
         await _turns(app, "Aid to Kenya", conversation_id=_FULL_ID)
@@ -893,6 +911,15 @@ async def test_a_question_after_a_card_change_or_an_edit_card_on_the_full_arm_op
         and fields.get("event") == "studio.model_call"
     ]
     assert [call["role"] for call in calls if call["trace_id"] == lines[1]["trace_id"]] == roles
+    if place is not None:
+        conversation = app.state.studio.store.current(_PRINCIPAL, _FULL_ID)
+        ledger = conversation.prior_ledger_state()
+        assert ledger is not None
+        newest = ledger["readings"][-1]["spec_id"]
+        assert newest != _SPEC
+        recorded = conversation.recorded_identity(newest)
+        assert recorded is not None
+        assert recorded.identity["entities"]["destination"] == [place]
 
 
 async def test_each_turn_s_spans_and_line_name_its_own_conversation_s_arm(
