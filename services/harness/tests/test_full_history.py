@@ -832,11 +832,12 @@ def _edit_card_app(engine: AsyncEngine) -> tuple[Any, Any, Any, Any]:
 
 
 @pytest.mark.parametrize(
-    ("build", "roles"),
+    ("build", "roles", "reason"),
     [
         pytest.param(
             lambda engine: _card_change_app(engine, _change_body("cmp_01unit0001", _SPEC, _YEARS)),
             [],
+            "previous_turn_card_change",
             id="apply-change-years",
         ),
         pytest.param(
@@ -844,17 +845,23 @@ def _edit_card_app(engine: AsyncEngine) -> tuple[Any, Any, Any, Any]:
                 engine, _apply_body("cmp_01unit0001", _SPEC, _CONSTANT_2023)
             ),
             [],
+            "previous_turn_card_change",
             id="apply-unit",
         ),
-        pytest.param(_edit_card_app, ["edit"], id="edit-card"),
+        pytest.param(_edit_card_app, ["edit"], "previous_turn_carried_none", id="edit-card"),
     ],
 )
 async def test_a_question_after_a_card_change_or_an_edit_card_on_the_full_arm_opens_from_the_digest(
-    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, build: Any, roles: list[str]
+    pg_engine: AsyncEngine,
+    caplog: pytest.LogCaptureFixture,
+    build: Any,
+    roles: list[str],
+    reason: str,
 ) -> None:
     """A card change in place and an Edit Card run no orchestrator, so they
     carry no conversation: the question after one opens a fresh chain from
-    the whole digest, `previous_turn_carried_none`, and the arm the first
+    the whole digest, `previous_turn_card_change` after a card change and
+    `previous_turn_carried_none` after an Edit Card, and the arm the first
     turn assigned stays stored. Only the Edit Card's model call writes a
     `studio.model_call` line for the middle turn."""
     app, model, middle, changer = build(pg_engine)
@@ -876,7 +883,7 @@ async def test_a_question_after_a_card_change_or_an_edit_card_on_the_full_arm_op
     assert [_history_fields(line) for line in lines] == [
         (1, "full", "full", "split", 1, "fresh"),
         (2, "full", "full", "split", 1, None),
-        (3, "full", "full", "split", 1, "reset:previous_turn_carried_none"),
+        (3, "full", "full", "split", 1, f"reset:{reason}"),
     ]
     assert await _stored(pg_engine, _FULL_ID, "history_assignment") == {"arm": "full", "turn": 1}
     calls = [
@@ -1269,6 +1276,42 @@ def test_an_unknown_history_setting_is_refused(
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):
         HistorySettings()
+
+
+_CARD_CHANGE_TURN = {"card_change": {"component_id": "cmp_01unit0001", "kind": "window"}}
+
+
+@pytest.mark.parametrize(
+    ("turns", "reason"),
+    [
+        pytest.param([{}, _CARD_CHANGE_TURN], "previous_turn_card_change", id="card-change"),
+        pytest.param(
+            [{}, {**_CARD_CHANGE_TURN, "error": "change_failed"}],
+            "previous_turn_card_change",
+            id="card-change-that-failed",
+        ),
+        pytest.param(
+            [_CARD_CHANGE_TURN, {}], "previous_turn_carried_none", id="card-change-then-another"
+        ),
+    ],
+)
+def test_only_the_turn_right_after_a_card_change_names_it_as_its_reset(
+    turns: list[dict[str, Any]], reason: str
+) -> None:
+    """A turn that follows a card change and carries no conversation resets
+    with `previous_turn_card_change`, whether the change succeeded or closed
+    with an error. The reason comes from the previous turn's record only. When
+    another turn whose record holds no card change mark follows the change
+    and carries nothing, the turn after it resets with
+    `previous_turn_carried_none`."""
+    conversation = ConversationState(conversation_id="conv-card-change")
+    conversation.turns = [
+        {"turn": number, "user": "", "assistant": "", **record}
+        for number, record in enumerate(turns, start=1)
+    ]
+
+    assert conversation.carried_opening(model_name="gemini-test") is None
+    assert conversation.turn_usage.history_chain == f"reset:{reason}"
 
 
 @pytest.mark.parametrize(("carried", "marked"), [(True, True), (False, False)])

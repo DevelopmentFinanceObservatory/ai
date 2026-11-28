@@ -1039,18 +1039,20 @@ class ConversationState:
         runs `model_name`, opens from: the previous turn's conversation as
         `StoredHistory` JSON text and the conversation digest's tail, its
         `total_turns` without the `turns` list. None opens a fresh chain from
-        the whole digest: on a first turn, or, logged with its reason, when
-        the previous turn closed with no conversation to carry
-        (`previous_turn_carried_none`), as after an error, a Stop, a pause
-        left unanswered, an Edit Card or card change (`apply_change`,
-        `apply_unit`) turn, a reply the harness wrote or a `digest` turn,
-        when the turn closed `done` and its closing write failed
-        (`close_failed`, `mark_carry_lost`), when another
-        model wrote it (`model_changed`), since its thought signatures are
-        that model's, when no call in it reported usage (`no_usage`), when
-        its largest call reported more than `CARRIED_HISTORY_TOKEN_CAP`
-        tokens (`token_cap`), or when it no longer loads as a
-        `StoredHistory` (`unloadable`), as after a deploy that changed the
+        the whole digest. A first turn opens it as `fresh`. Every other
+        reset is logged with its reason. The previous turn may have closed
+        with no conversation to carry. After a card change (`apply_change`,
+        `apply_unit`), whose record names it as `card_change`, the reason is
+        `previous_turn_card_change`, whatever the change's outcome. After any
+        other such turn, as after an error, a Stop, a pause left unanswered,
+        an Edit Card, a reply the harness wrote or a `digest` turn, it is
+        `previous_turn_carried_none`. The reason is `close_failed` when the
+        turn closed `done` and its closing write failed (`mark_carry_lost`),
+        `model_changed` when another model wrote it, since its thought
+        signatures are that model's, `no_usage` when no call in it reported
+        usage, `token_cap` when its largest call reported more than
+        `CARRIED_HISTORY_TOKEN_CAP` tokens, and `unloadable` when it no longer
+        loads as a `StoredHistory`, as after a deploy that changed the
         message schema. The outcome is kept on the turn's usage as
         `history_chain`, and the carried tokens as `carried_tokens`. The
         `orchestrate` node checks the conversation again as it opens, on the
@@ -1063,7 +1065,11 @@ class ConversationState:
         carried = self.carried_history
         reason: str | None = None
         if carried is None or carried.get("turn") != len(self.turns):
-            reason = "previous_turn_carried_none"
+            reason = (
+                "previous_turn_card_change"
+                if self.turns[-1].get("card_change")
+                else "previous_turn_carried_none"
+            )
         elif isinstance(lost := carried.get("reset"), str):
             reason = lost
         elif carried.get("model") != model_name:
