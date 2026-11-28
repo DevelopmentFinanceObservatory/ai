@@ -45,7 +45,11 @@ its scope. Each change carries the scope on, so a change of one axis keeps
 what an earlier change set on another. No model reads it. A card on a sum is
 stored with its `get_data` arguments under `summed`, beside the sum it
 replays, so a release that reads no sum finds no arguments and offers the card
-no change.
+no change. Any other card with a scope, whether a change set it or the card's
+retrieval named it, is stored with its arguments under `scoped` for the same
+reason: a release that reads no scope would fetch a unit change without it.
+`UnitCard.from_json` also reads a record whose arguments sit at the top level
+beside its scope.
 """
 
 from __future__ import annotations
@@ -369,6 +373,8 @@ class UnitCard:
             stored["continued"] = True
         if self.total is not None:
             stored["summed"] = {"args": stored.pop("args"), **self.total.as_json()}
+        elif self.scope:
+            stored["scoped"] = {"args": stored.pop("args")}
         return stored
 
     @classmethod
@@ -381,6 +387,8 @@ class UnitCard:
         total = SummedFrame.from_json(summed)
         if summed is not None:
             args = summed.get("args") if total is not None else None
+        elif isinstance(scoped := stored.get("scoped"), Mapping):
+            args = scoped.get("args")
         if not isinstance(spec_id, str) or not spec_id or not isinstance(args, Mapping):
             return None
         scope, labels, roles = stored.get("scope"), stored.get("labels"), stored.get("roles")

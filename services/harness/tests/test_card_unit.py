@@ -1044,6 +1044,97 @@ async def test_only_one_sum_by_year_of_one_retrieval_can_change(
         assert card_unit.UnitCard.from_json(stored) == card
 
 
+def _f91b184f_from_json(stored: Any) -> tuple[str, dict[str, Any]] | None:
+    """A frozen copy of `UnitCard.from_json` at commit f91b184f, the release a
+    rollback returns to, giving the `spec_id` and `args` of the card it reads.
+    That release fetches a unit change with `args` and ignores every other
+    key."""
+    if not isinstance(stored, Mapping):
+        return None
+    spec_id, args = stored.get("spec_id"), stored.get("args")
+    if not isinstance(spec_id, str) or not spec_id or not isinstance(args, Mapping):
+        return None
+    return spec_id, dict(args)
+
+
+_ARGS = {"breakdown": {"code_system": "crsPurpose", "level": 0}}
+_YEARS_SCOPE = {"window": {"kind": "range", "start_year": 2015, "end_year": 2020}}
+_PLACES_SCOPE = {"entities": {"destination": ["dcid:country/UGA", "dcid:country/KEN"]}}
+
+
+def _drawn_on_a_scoped_retrieval() -> card_unit.UnitCard:
+    """A card as first drawn from a retrieval that named a scope over its
+    Search block (`_retrieval_card`)."""
+    lineage = _lineage((_SPEC, _CV))
+    (member,) = lineage.lineage
+    member.manifest["definition"]["identity"] = {
+        **_BASE_IDENTITY,
+        "entities": {"destination": ["country/UGA"], "origin": ["country/FRA"]},
+    }
+    blocks = {_BASE: {"definition": {"spec_id": _BASE, "identity": _BASE_IDENTITY}}}
+    card = unit_card(_component(), lineage, blocks)
+    assert card is not None
+    assert card.scope
+    return card
+
+
+def _summed_and_scoped() -> card_unit.UnitCard:
+    """A card on a sum whose years changed."""
+    return card_unit.UnitCard(
+        spec_id=_SPEC,
+        args=_ARGS,
+        scope=_YEARS_SCOPE,
+        total=card_unit.SummedFrame(
+            frame=_OPS, root=(_SPEC, _CV), served=(_SPEC, _CV), parameters=_SUM
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("build", "offered"),
+    [
+        (lambda: card_unit.UnitCard(spec_id=_SPEC, args=_ARGS, scope=_YEARS_SCOPE), False),
+        (lambda: card_unit.UnitCard(spec_id=_SPEC, args=_ARGS, scope=_PLACES_SCOPE), False),
+        (_drawn_on_a_scoped_retrieval, False),
+        (_summed_and_scoped, False),
+        (lambda: card_unit.UnitCard(spec_id=_SPEC, args=_ARGS), True),
+    ],
+    ids=["years-change", "places-change", "drawn-scoped", "summed-and-scoped", "unscoped"],
+)
+def test_the_rolled_back_release_offers_no_unit_change_on_a_card_with_a_scope(
+    build: Any, offered: bool
+) -> None:
+    """A card with a scope, whether a change set it or its retrieval named
+    it, is stored where the f91b184f reader finds no arguments, so that
+    release, which fetches a unit change without the scope, offers the card
+    none. A card on a sum is stored under `summed` whatever its scope. An
+    unscoped card keeps the shape that release reads. This harness reads
+    each record back as the card it stored."""
+    card = build()
+    stored = json.loads(json.dumps(card.as_json()))
+
+    assert _f91b184f_from_json(stored) == ((card.spec_id, card.args) if offered else None)
+    if card.total is not None:
+        assert "args" not in stored
+        assert "scoped" not in stored
+    assert card_unit.UnitCard.from_json(stored) == card
+
+
+@pytest.mark.parametrize(
+    "scope", [_YEARS_SCOPE, _PLACES_SCOPE], ids=["years-change", "places-change"]
+)
+def test_a_scoped_card_stored_with_its_arguments_at_the_top_level_reads_back(
+    scope: dict[str, Any],
+) -> None:
+    """A record of a scoped card whose arguments sit at the top level beside
+    `scope` reads as the same card."""
+    stored = {"spec_id": _SPEC, "args": _ARGS, "scope": scope}
+
+    assert card_unit.UnitCard.from_json(stored) == card_unit.UnitCard(
+        spec_id=_SPEC, args=_ARGS, scope=scope
+    )
+
+
 _RECORDED_SUM = json.loads(
     (Path(__file__).parent / "fixtures" / "recorded_summed_manifest.json").read_text()
 )
