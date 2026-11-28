@@ -25,10 +25,11 @@ from typing import Any
 import pytest
 from common.live_apis import LiveApisError
 from common.mcp_telemetry import WRITE_TOKEN_KEY
+from common.place_type import IDENTITY_KEY_AXES
 from compiler.surface import ProgressCallback, ToolCallResult, ToolId, ToolSurfaceUnavailableError
 from data_mcp.definition_store import canonicalize, spec_id_for
 from data_mcp.search_result import SEARCH_ENVELOPE_META_KEY
-from harness import card_unit
+from harness import card_unit, studio_edit
 from harness.card_unit import UNIT_GONE_NOTE, ChangeMove, UnitCard
 from harness.chart_binding import LINE_CHART_MAX_VALUES
 from harness.conversation import current_conversation_id
@@ -36,7 +37,7 @@ from harness.graph.state import frame_id_for
 from harness.place_options import PLACE_OPTIONS_TTL_S, ApisPlaceOptions, PlacesNotServedError
 from harness.provenance import CARD_LINEAGE_KEY, CardLineage, ProvenanceInput, ProvenanceStore
 from harness.studio_edit import FETCHED_KEY, _changed_title, _composed_title, _redrawn_intent
-from harness.studio_state import PLAN_LINK_KEY, DatabaseUnavailable
+from harness.studio_state import PLAN_LINK_KEY, ConversationState, DatabaseUnavailable
 from harness.studio_store import StudioStore
 from harness.wire import (
     CardChanges,
@@ -45,6 +46,7 @@ from harness.wire import (
     PlacesChange,
     PlacesOffer,
     PlanLink,
+    TurnRequest,
     WindowChange,
     WindowOffer,
 )
@@ -65,9 +67,12 @@ from .test_studio import (
     _frame,
     _france_kenya_converted,
     _interrupt_body,
+    _leave,
     _mutation_body,
+    _post_stop,
     _stream,
     _turn_body,
+    _turn_endpoint,
 )
 from .turn_driver import CONVERSATION
 
@@ -172,9 +177,37 @@ def _described(
     }
 
 
+# The name of each place the fakes serve, by ref.
+_PLACE_NAMES = {
+    "country/KEN": "Kenya",
+    "country/UGA": "Uganda",
+    "country/FRA": "France",
+    "country/DEU": "Germany",
+}
+
+
+def _part_for(identity: Mapping[str, Any], spec_id: str) -> dict[str, Any]:
+    """The France to Kenya part under `identity` and `spec_id`, its places
+    renamed to the ones `identity` binds on each side where it binds one other
+    place, so its text and refs name the places it is asked for."""
+    part = copy.deepcopy(_ENVELOPE["parts"][0])
+    said = json.dumps(part)
+    base = {"destination": "country/KEN", "origin": "country/FRA"}
+    for key, refs in (identity.get("entities") or {}).items():
+        old = base.get(IDENTITY_KEY_AXES.get(key, key))
+        if old is None or len(refs) != 1 or refs[0] == old or refs[0] not in _PLACE_NAMES:
+            continue
+        said = said.replace(old, refs[0]).replace(_PLACE_NAMES[old], _PLACE_NAMES[refs[0]])
+    part = json.loads(said)
+    part["spec"]["spec_id"] = spec_id
+    part["spec"]["definition"] = {"schema_version": 1, "spec_id": spec_id, "identity": identity}
+    return part
+
+
 class _Search:
     """Search's resolve: the France to Kenya part again, under the identity it
-    is posted and that identity's spec_id."""
+    is posted and that identity's spec_id, naming the places it binds
+    (`_part_for`)."""
 
     def __init__(self) -> None:
         self.posted: list[dict[str, Any]] = []
@@ -187,13 +220,7 @@ class _Search:
     ) -> ToolCallResult:
         del tool, on_progress
         self.posted.append(dict(arguments))
-        part = copy.deepcopy(_ENVELOPE["parts"][0])
-        part["spec"]["spec_id"] = arguments["spec_id"]
-        part["spec"]["definition"] = {
-            "schema_version": 1,
-            "spec_id": arguments["spec_id"],
-            "identity": arguments["identity"],
-        }
+        part = _part_for(arguments["identity"], arguments["spec_id"])
         envelope = {**_ENVELOPE, "parts": [part]}
         return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
 
@@ -923,14 +950,17 @@ def _served_identity(
     """The identity data-mcp serves a `get_data` of `identity`'s spec over
     `scope` under, as a recorded mint manifest states it in
     `definition.identity` (`fixtures/mint_manifest_recent_years.json`): the
-    spec's identity with the scope's places, window and facets bound."""
+    spec's identity with the scope's places, window and facets bound, its
+    places keyed by the frame column each role is served in. With no scope
+    it is the spec's own identity."""
     served = copy.deepcopy(dict(identity))
-    scope = scope or {}
-    if "entities" in scope:
-        served["entities"] = {
-            role: [ref.removeprefix("dcid:") for ref in refs]
-            for role, refs in scope["entities"].items()
-        }
+    if not scope:
+        return served
+    entities = scope.get("entities") or served.get("entities") or {}
+    served["entities"] = {
+        card_unit.role_column(role): [ref.removeprefix("dcid:") for ref in refs]
+        for role, refs in entities.items()
+    }
     if "window" in scope:
         served["requested_window"] = dict(scope["window"])
     for axis, binding in (scope.get("facets") or {}).items():
@@ -1398,32 +1428,46 @@ async def test_a_card_offers_its_places_and_a_change_swaps_one(pg_engine: AsyncE
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
     drawn_spec = write["args"]["intent"]["frame_ref"]["spec_id"]
     _assert_records_drawn(conversation, created["component_id"], drawn_spec, {"country/UGA"})
+    # The reading is of Search's part for Uganda.
+    assert "Kenya" not in json.dumps(conversation.turns[-1]["readings"])
     # The change itself is kept as it was asked, over the card's own spec.
     stored = conversation.components[created["component_id"]][card_unit.CARD_UNIT_KEY]
     assert stored["spec_id"] == _SPEC
     assert stored["scope"]["entities"]["destination"] == ["dcid:country/UGA"]
 
 
-def _assert_records_drawn(
+def _assert_names_served(
     conversation: Any, component_id: str, spec_id: str, places: set[str]
-) -> None:
-    """The change turn's record holds the retrieval card `component_id` drew,
-    `spec_id`, as its one reading, with its block and an identity naming the
-    destination `places`, and the record line and the card's `fetched_with`
-    name it with the card's arguments. Neither names the spec the card was
-    changed from."""
+) -> dict[str, Any]:
+    """The change turn's record line and card `component_id`'s
+    `fetched_with` name `spec_id`, the spec the card's retrieval was served
+    under, with the card's arguments, and the turn records its identity,
+    which names the recipients `places`. Neither names the spec the card was
+    changed from. Returns the turn's record."""
     record = conversation.turns[-1]
     assert spec_id != _SPEC
-    assert [r["spec_id"] for r in record["readings"]] == [spec_id]
-    assert spec_id in record["specs"]
-    recorded = conversation.recorded_identity(spec_id)
-    assert recorded is not None
-    assert set(recorded.identity["entities"]["destination"]) == places
     fetched = conversation.components[component_id][FETCHED_KEY]
     assert fetched == {"spec_id": spec_id, "stat_vars": "sum"}
     assert f"(get_data {json.dumps(fetched, sort_keys=True)})" in record["user"]
-    for said in (record["user"], json.dumps(fetched), json.dumps(record["readings"])):
-        assert _SPEC not in said
+    assert _SPEC not in record["user"]
+    identity = record["identities"][spec_id]["identity"]
+    assert set(identity["entities"]["financingRecipient"]) == places
+    recorded = conversation.recorded_identity(spec_id)
+    assert recorded is not None
+    assert recorded.identity == identity
+    return record
+
+
+def _assert_records_drawn(
+    conversation: Any, component_id: str, spec_id: str, places: set[str]
+) -> None:
+    """`_assert_names_served`, and the turn's one reading is of the part
+    Search answered for `spec_id`, naming the recipients `places`, with its
+    block. It names the spec the card was changed from nowhere."""
+    record = _assert_names_served(conversation, component_id, spec_id, places)
+    assert [r["spec_id"] for r in record["readings"]] == [spec_id]
+    assert spec_id in record["specs"]
+    assert _SPEC not in json.dumps(record["readings"])
 
 
 async def test_a_unit_change_after_a_change_of_places_records_the_retrieval_it_drew(
@@ -1470,14 +1514,100 @@ async def test_a_unit_change_after_a_change_of_places_records_the_retrieval_it_d
     assert in_unit not in record["user"]
 
 
-async def test_a_card_removed_while_a_change_of_places_redraws_it_ends_the_turn_once(
-    pg_engine: AsyncEngine,
+class _ResubmitSearch(_Search):
+    """Search's resolve, answering the resubmit of a retrieval a card
+    `changer` redrew was drawn on as `answer` says. Every other identity it
+    answers as `_Search` does, the years read over the card's new places
+    among them, which runs before the card is redrawn.
+
+    `refused` is a refusal as data-mcp relays one, `other` a part under
+    another spec_id, `pending` a part that is not `definite`, `timeout` a
+    call that timed out on the surface, `raises` a fault of any other kind,
+    and `held` a call that waits until `release` is set, marking
+    `cancelled` when it is cancelled first. `entered` is set once the
+    resubmit arrives."""
+
+    def __init__(self, changer: _Changer, answer: str) -> None:
+        super().__init__()
+        self.changer = changer
+        self.answer = answer
+        self.resubmitted: list[str] = []
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = False
+
+    async def call_tool(
+        self, *, tool: ToolId, arguments: Any, on_progress: ProgressCallback | None = None
+    ) -> ToolCallResult:
+        if arguments["spec_id"] not in self.changer.redrawn:
+            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        self.resubmitted.append(arguments["spec_id"])
+        self.entered.set()
+        match self.answer:
+            case "refused":
+                return ToolCallResult(is_error=True, structured_content=dict(_NOT_RESOLVED))
+            case "timeout":
+                raise ToolSurfaceUnavailableError(
+                    "resolve_definition timed out after 110 s", retryable=True
+                )
+            case "raises":
+                raise RuntimeError("the answer could not be read")
+            case "held":
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+            case "other":
+                arguments = {**arguments, "spec_id": "spec_" + "9" * 32}
+        result = await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
+        if self.answer == "pending":
+            envelope = copy.deepcopy((result.meta or {})[SEARCH_ENVELOPE_META_KEY])
+            envelope["parts"][0]["status"] = "ambiguous"
+            return ToolCallResult(is_error=False, meta={SEARCH_ENVELOPE_META_KEY: envelope})
+        return result
+
+
+# A resubmit Search refuses, as data-mcp relays one (`basis_alignment.PART_IS_WHOLE`).
+_NOT_RESOLVED: Mapping[str, Any] = {
+    "code": "upstream_error",
+    "retry_mode": "do_not_retry",
+    "message": "The identity cannot be resolved: identity_not_resolvable.",
+    "upstream_code": "identity_not_resolvable",
+}
+
+
+def _resubmit_app(
+    pg_engine: AsyncEngine, answer: str, **kwargs: Any
+) -> tuple[Any, _Changer, _ResubmitSearch]:
+    """A first turn drawing France's aid to Kenya, whose card a `_Changer`
+    redraws and whose drawn retrieval Search answers as `answer` says."""
+    changer = _Changer()
+    search = _ResubmitSearch(changer, answer)
+    app = _app(
+        *_first_turn(),
+        resolver=CannedSearch(_ENVELOPE),
+        executor=ScriptedExecutor(_first_results()),
+        tool_surface=search,  # ty: ignore[invalid-argument-type] -- the one tool a change reads
+        engine=pg_engine,
+        **kwargs,
+    )
+    app.state.studio.place_options = _Places()
+    return app, changer, search
+
+
+def _second_endings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The owner's log lines for an ending frame it dropped as a second one."""
+    return [r.getMessage() for r in caplog.records if "second ending frame" in r.getMessage()]
+
+
+async def test_a_card_removed_while_a_change_of_places_redraws_it_is_not_read_again(
+    pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The user removes the card while its change of places is written: the
     swap finds no slot, the turn ends once on the stale refusal's sentence,
-    and it records no reading of the retrieval the card would have drawn."""
-    app = _changes_app(pg_engine)
-    app.state.studio.place_options = _Places()
+    and Search is not asked to read the retrieval the card would have drawn."""
+    app, _, search = _resubmit_app(pg_engine, "held")
     store: StudioStore = app.state.studio.store
 
     class _Removing(_Changer):
@@ -1493,80 +1623,40 @@ async def test_a_card_removed_while_a_change_of_places_redraws_it_ends_the_turn_
                 await store.mutate_composition(PRINCIPAL, CONVERSATION, without)
             return await super().__call__(tool=tool, args=args, **kw)
 
+    removing = _Removing()
+    search.changer = removing
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
-        app.state.studio.recorder._executor = _Removing()
-        frames = await _stream(
-            client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)
+        app.state.studio.recorder._executor = removing
+        frames = await asyncio.wait_for(
+            _stream(client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)),
+            timeout=5,
         )
 
     events = [frame["event"] for frame in frames]
     assert "component.created" not in events
-    assert events.count("done") == 1
+    assert events[-1] == "done"
     assert _frame(frames, "message.complete")["text"] == UNIT_GONE_NOTE
+    assert search.resubmitted == []
+    assert _second_endings(caplog) == []
     conversation = store.current(PRINCIPAL, CONVERSATION)
     assert conversation is not None
     assert len(conversation.turns) == 2
+    assert "error" not in conversation.turns[-1]
     assert "readings" not in conversation.turns[-1]
 
 
-class _ResubmitSearch(_Search):
-    """Search's resolve, answering the resubmit of a retrieval a card
-    `changer` redrew was drawn on as `answer` says: a refusal, a part under
-    another spec_id, or a call that timed out. Every other identity it answers
-    as `_Search` does, the years read over the card's new places among them,
-    which can post the same identity before the card is redrawn."""
-
-    def __init__(self, changer: _Changer, answer: str) -> None:
-        super().__init__()
-        self.changer = changer
-        self.answer = answer
-        self.resubmitted: list[str] = []
-
-    async def call_tool(
-        self, *, tool: ToolId, arguments: Any, on_progress: ProgressCallback | None = None
-    ) -> ToolCallResult:
-        if arguments["spec_id"] not in self.changer.redrawn:
-            return await super().call_tool(tool=tool, arguments=arguments, on_progress=on_progress)
-        self.resubmitted.append(arguments["spec_id"])
-        if self.answer == "refused":
-            return ToolCallResult(is_error=True, structured_content=dict(_NOT_RESOLVED))
-        if self.answer == "timeout":
-            raise ToolSurfaceUnavailableError(
-                "resolve_definition timed out after 110 s", retryable=True
-            )
-        other = {**arguments, "spec_id": "spec_" + "9" * 32}
-        return await super().call_tool(tool=tool, arguments=other, on_progress=on_progress)
-
-
-# A resubmit Search refuses, as data-mcp relays one (`basis_alignment.PART_IS_WHOLE`).
-_NOT_RESOLVED: Mapping[str, Any] = {
-    "code": "upstream_error",
-    "retry_mode": "do_not_retry",
-    "message": "The identity cannot be resolved: identity_not_resolvable.",
-    "upstream_code": "identity_not_resolvable",
-}
-
-
-@pytest.mark.parametrize("answer", ["refused", "other", "timeout"])
-async def test_a_change_whose_retrieval_cannot_be_read_again_records_none(
+@pytest.mark.parametrize("answer", ["refused", "other", "pending", "timeout", "raises"])
+async def test_a_change_whose_retrieval_cannot_be_read_again_names_it_without_a_reading(
     pg_engine: AsyncEngine, caplog: pytest.LogCaptureFixture, answer: str
 ) -> None:
     """A resubmit of the retrieval a changed card drew that Search refuses,
-    answers under another spec_id, or that times out leaves the change made:
-    the card is redrawn in its slot, a warning names the retrieval, and the
-    turn records no reading of it, its line naming the card's spec over its
-    new scope."""
-    changer = _Changer()
-    search = _ResubmitSearch(changer, answer)
-    app = _app(
-        *_first_turn(),
-        resolver=CannedSearch(_ENVELOPE),
-        executor=ScriptedExecutor(_first_results()),
-        tool_surface=search,  # ty: ignore[invalid-argument-type] -- the one tool a change reads
-        engine=pg_engine,
-    )
-    app.state.studio.place_options = _Places()
+    answers under another spec_id or not as `definite`, that times out, or
+    that raises leaves the change made: the card is redrawn in its slot, one
+    warning names the retrieval, and the turn's line, the card's
+    `fetched_with` and its identities name the served spec, with no reading
+    or block of it."""
+    app, changer, search = _resubmit_app(pg_engine, answer)
     async with _client(app) as client:
         await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
         app.state.studio.recorder._executor = changer
@@ -1580,7 +1670,6 @@ async def test_a_change_whose_retrieval_cannot_be_read_again_records_none(
     created = _frame(frames, "component.created")
     assert created["replaces"] == "cmp_01unit0001"
     assert frames[-1]["event"] == "done"
-    assert "error" not in [f["event"] for f in frames]
     warned = [
         r
         for r in caplog.records
@@ -1588,13 +1677,126 @@ async def test_a_change_whose_retrieval_cannot_be_read_again_records_none(
     ]
     assert [served in r.getMessage() for r in warned] == [True]
     conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
-    record = conversation.turns[-1]
+    record = _assert_names_served(conversation, created["component_id"], served, {"country/UGA"})
+    assert "error" not in record
     assert "readings" not in record
     assert served not in (record.get("specs") or {})
-    assert _SPEC in record["user"]
-    assert served not in record["user"]
-    fetched = conversation.components[created["component_id"]][FETCHED_KEY]
-    assert fetched["spec_id"] == _SPEC
+
+
+async def test_a_changed_card_is_sent_before_its_retrieval_is_read_again_and_a_client_that_leaves_keeps_the_change(
+    pg_engine: AsyncEngine,
+) -> None:
+    """The card's frames reach the client while Search has not answered the
+    read of its retrieval. The client leaves then: the read is cancelled,
+    and the turn, closed `abandoned` when the next one opens, keeps the
+    change with the served spec's line and identity."""
+    app, changer, search = _resubmit_app(pg_engine, "held")
+    studio = app.state.studio
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+    studio.recorder._executor = changer
+    response = await _turn_endpoint(studio)(
+        TurnRequest.model_validate(_change_body("cmp_01unit0001", _SPEC, _UGANDA)),
+        authorization=AUTH["Authorization"],
+    )
+    frames = await _leave(
+        response, lambda frames: any(f["event"] == "component.created" for f in frames)
+    )
+
+    assert search.entered.is_set()
+    assert not search.release.is_set()
+    assert search.cancelled
+    assert "done" not in [frame["event"] for frame in frames]
+    (served,) = changer.redrawn
+    stored = await StudioStore(pg_engine).load(PRINCIPAL, CONVERSATION)
+    assert stored is not None
+    assert not stored.turn_recorded
+    stored.begin_turn()
+    record = _assert_names_served(
+        stored, _frame(frames, "component.created")["component_id"], served, {"country/UGA"}
+    )
+    assert record["error"] == "abandoned"
+    assert "readings" not in record
+
+
+async def test_a_stop_while_a_changed_cards_retrieval_is_read_again_keeps_the_change(
+    pg_engine: AsyncEngine,
+) -> None:
+    """A Stop while Search reads the retrieval a changed card drew cancels the
+    read and ends the turn `cancelled`, and the turn keeps the change with
+    the served spec's line and identity."""
+    app, changer, search = _resubmit_app(pg_engine, "held", heartbeat_seconds=0.1)
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        stream = asyncio.ensure_future(
+            _stream(client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA))
+        )
+        await asyncio.wait_for(search.entered.wait(), timeout=5)
+        stopped = await _post_stop(client)
+        frames = await asyncio.wait_for(stream, timeout=5)
+
+    assert stopped.status_code == 204
+    assert search.cancelled
+    assert _frame(frames, "error")["error"]["error"] == "cancelled"
+    created = _frame(frames, "component.created")
+    (served,) = changer.redrawn
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    record = _assert_names_served(conversation, created["component_id"], served, {"country/UGA"})
+    assert record["error"] == "cancelled"
+    assert "readings" not in record
+
+
+async def test_a_read_again_that_outlasts_its_deadline_ends_the_change_without_a_reading(
+    pg_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Search holds the read of a changed card's retrieval past
+    `DRAWN_READ_DEADLINE_S`: the read is cut off, and the change closes as
+    done, naming the served spec with no reading of it."""
+    monkeypatch.setattr(studio_edit, "DRAWN_READ_DEADLINE_S", 0.05)
+    app, changer, search = _resubmit_app(pg_engine, "held")
+    async with _client(app) as client:
+        await _stream(client, "/api/studio/turn", _turn_body("France's aid to Kenya"))
+        app.state.studio.recorder._executor = changer
+        frames = await asyncio.wait_for(
+            _stream(client, "/api/studio/turn", _change_body("cmp_01unit0001", _SPEC, _UGANDA)),
+            timeout=5,
+        )
+
+    assert search.cancelled
+    assert frames[-1]["event"] == "done"
+    (served,) = changer.redrawn
+    conversation = app.state.studio.store.current(PRINCIPAL, CONVERSATION)
+    record = _assert_names_served(
+        conversation, _frame(frames, "component.created")["component_id"], served, {"country/UGA"}
+    )
+    assert "readings" not in record
+
+
+_BLOCK = _ENVELOPE["parts"][0]["spec"]
+
+
+@pytest.mark.parametrize(
+    ("served", "kept"), [(False, False), (True, True)], ids=["unit-change", "drawn-retrieval"]
+)
+def test_a_card_change_keeps_only_the_blocks_of_the_retrievals_it_drew(
+    served: bool, kept: bool
+) -> None:
+    """A unit change of a card with no scope reads its spec in the new unit,
+    and keeps that block only for a redrawn card that can change
+    (`CARD_UNIT_KEY`), so with none it keeps no block. The block of a
+    retrieval a card change drew over a scope (`turn_identities`) is kept."""
+    conversation = ConversationState(conversation_id="conv-blocks")
+    conversation.begin_turn()
+    conversation.turn_card_change = {"component_id": "cmp_01unit0001", "kind": "unit"}
+    conversation.turn_readings = [{"spec_id": _SPEC, "variable": "aid"}]
+    conversation.turn_specs = {_SPEC: copy.deepcopy(_BLOCK)}
+    if served:
+        identity = _BLOCK["definition"]["identity"]
+        conversation.turn_identities = {_SPEC: {"identity": identity}}
+    conversation.close_turn(final_text="The card now shows it.")
+
+    assert (_SPEC in (conversation.turns[-1].get("specs") or {})) is kept
 
 
 class _Asked(_Places):

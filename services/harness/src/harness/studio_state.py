@@ -776,6 +776,13 @@ class ConversationState:
     turn_projection_asked: bool = False
     turn_readings: list[dict[str, Any]] = field(default_factory=list)
     turn_specs: dict[str, Any] = field(default_factory=dict)
+    # The `RecordedIdentity` JSON of each retrieval a card change drew, by the
+    # spec_id it is served under, as the written card's lineage states it
+    # (`harness.studio_edit.change_events`). Written with the card, so a turn
+    # cut before Search reads it again keeps it. `close_turn` keeps each one
+    # that resolves under `identities`, and the block of each one Search read
+    # again (`turn_specs`).
+    turn_identities: dict[str, dict[str, Any]] = field(default_factory=dict)
     # The chip the turn was asked to apply, `{"choice_id", "option_id"}`, set
     # by `harness.studio`; once the graph's `seed` node applied it, as that
     # node wrote it, with `from_option_id` and `spec_id`
@@ -1403,8 +1410,8 @@ class ConversationState:
         # (`harness.card_unit`), which a later turn's unit change reads. A block
         # can run to about 120 KB and the record is kept for the whole
         # conversation, so no other is kept but the block of each retrieval a
-        # card change read (`_card_change_specs`).
-        identities = _turn_identities(self.turn_specs, plans)
+        # card change drew (`turn_identities`).
+        identities = _turn_identities(self.turn_specs, plans, held=self._held_identities())
         copied = _copied_sources(
             [source for plan in plans for source in plan.sources],
             {**self._earlier_identities(), **identities},
@@ -1418,7 +1425,7 @@ class ConversationState:
             }
             | copied
             | self._unit_card_specs()
-            | self._card_change_specs()
+            | set(self.turn_identities)
         )
         specs = {spec_id: block for spec_id, block in self.turn_specs.items() if spec_id in used}
         if specs:
@@ -1441,18 +1448,15 @@ class ConversationState:
                 specs.add(stored["spec_id"])
         return specs
 
-    def _card_change_specs(self) -> set[str]:
-        """The spec_id of each reading a turn that changed a card in place
-        (`turn_card_change`) read: the retrieval the changed card drew
-        (`harness.studio_edit.change_events`), which a later turn pins or
-        fetches. None for any other turn."""
-        if not self.turn_card_change:
-            return set()
-        return {
-            reading["spec_id"]
-            for reading in self.turn_readings
-            if isinstance(reading, dict) and isinstance(reading.get("spec_id"), str)
-        }
+    def _held_identities(self) -> dict[str, RecordedIdentity]:
+        """The open turn's `turn_identities` that validate, by spec_id."""
+        held: dict[str, RecordedIdentity] = {}
+        for spec_id, stored in self.turn_identities.items():
+            try:
+                held[spec_id] = RecordedIdentity.model_validate(stored)
+            except ValidationError:
+                logger.warning("skipping the stored identity of %s", spec_id, exc_info=True)
+        return held
 
     def take_identity(
         self,
@@ -1493,7 +1497,9 @@ class ConversationState:
         change it.
         """
         plans = _validated(PlanRecord, self.turn_plans, reader="identity", what="plan record")
-        recorded = _turn_identities(self.turn_specs, plans).get(spec_id)
+        recorded = _turn_identities(self.turn_specs, plans, held=self._held_identities()).get(
+            spec_id
+        )
         if recorded is not None:
             return recorded
         for turn in reversed(self.turns):
@@ -1650,6 +1656,7 @@ class ConversationState:
         self.turn_projection_asked = False
         self.turn_readings = []
         self.turn_specs = {}
+        self.turn_identities = {}
         self.turn_applied_choice = None
         self.turn_card_change = None
         self.turn_approved = []
@@ -2068,10 +2075,13 @@ def _history_turn(
 
 
 def _turn_identities(
-    specs: dict[str, Any], plans: Iterable[PlanRecord]
+    specs: dict[str, Any],
+    plans: Iterable[PlanRecord],
+    *,
+    held: Mapping[str, RecordedIdentity] | None = None,
 ) -> dict[str, RecordedIdentity]:
-    """The identity of each spec block in `specs` and of each source of
-    `plans`, by spec_id.
+    """The identity of each spec block in `specs`, of each source of `plans`,
+    and each of `held`, identities the turn holds with no block, by spec_id.
 
     A block is read as a source (`source_from_spec_block`) for its
     `definition.identity`, and for the identity of each measure it offers
@@ -2126,7 +2136,7 @@ def _turn_identities(
                                 resolved_sources=source.resolved_sources,
                             ),
                         )
-    found = {**offered, **found}
+    found = {**offered, **(held or {}), **found}
     identities: dict[str, RecordedIdentity] = {}
     for spec_id, recorded in found.items():
         try:

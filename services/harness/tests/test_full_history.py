@@ -919,7 +919,7 @@ async def test_a_question_after_a_card_change_or_an_edit_card_on_the_full_arm_op
         assert newest != _SPEC
         recorded = conversation.recorded_identity(newest)
         assert recorded is not None
-        assert recorded.identity["entities"]["destination"] == [place]
+        assert recorded.identity["entities"]["financingRecipient"] == [place]
 
 
 async def test_each_turn_s_spans_and_line_name_its_own_conversation_s_arm(

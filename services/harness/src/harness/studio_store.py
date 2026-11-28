@@ -230,6 +230,7 @@ _KEY_TURN_PROJECTION_ASKED = "turn_projection_asked"
 _KEY_TURN_READINGS = "turn_readings"
 _KEY_TURN_APPLIED_CHOICE = "turn_applied_choice"
 _KEY_TURN_CARD_CHANGE = "turn_card_change"
+_KEY_TURN_IDENTITIES = "turn_identities"
 _KEY_TURN_CHOICE_BASELINE = "turn_choice_baseline"
 _KEY_TURN_APPROVED = "turn_approved"
 _KEY_TURN_PLAN_FRAMES = "turn_plan_frames"
@@ -261,6 +262,7 @@ _SCALAR_KEYS = frozenset(
         _KEY_TURN_READINGS,
         _KEY_TURN_APPLIED_CHOICE,
         _KEY_TURN_CARD_CHANGE,
+        _KEY_TURN_IDENTITIES,
         _KEY_TURN_CHOICE_BASELINE,
         _KEY_TURN_APPROVED,
         *(f"{_KEY_TURN_APPROVED}_{layer}" for layer in _ADDED_MEMBERS),
@@ -916,6 +918,7 @@ def _serialize_durable(state: ConversationState) -> Snapshot:
         _KEY_TURN_READINGS: state.turn_readings,
         _KEY_TURN_APPLIED_CHOICE: state.turn_applied_choice,
         _KEY_TURN_CARD_CHANGE: _card_change_stamped(state),
+        _KEY_TURN_IDENTITIES: _identities_stamped(state),
         _KEY_TURN_CHOICE_BASELINE: state.turn_choice_baseline,
         # The approved plans' added members are stored beside them
         # (`_approved_apart`), as a pause's are.
@@ -1022,7 +1025,7 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
             state.turn_readings = list(value)
         elif key == _KEY_TURN_APPLIED_CHOICE:
             state.turn_applied_choice = dict(value) if value else None
-        elif key == _KEY_TURN_CARD_CHANGE:
+        elif key in {_KEY_TURN_CARD_CHANGE, _KEY_TURN_IDENTITIES}:
             pass  # after the loop, against the turn index this delta leaves
         elif key == _KEY_TURN_CHOICE_BASELINE:
             state.turn_choice_baseline = dict(value or {})
@@ -1062,6 +1065,12 @@ def _apply_delta(state: ConversationState, delta: dict[str, Any]) -> None:
         # the stored mark as it was, so the mark held here is an earlier
         # turn's.
         state.turn_card_change = None
+    if _KEY_TURN_IDENTITIES in delta:
+        state.turn_identities = _identities_back(
+            delta[_KEY_TURN_IDENTITIES], turn_index=state.turn_index
+        )
+    elif state.turn_index != turn_before:
+        state.turn_identities = {}
     if _KEY_TURN_PLAN_FRAMES in delta:
         state.turn_plan_frames = _plan_frames_of(
             delta[_KEY_TURN_PLAN_FRAMES], turn_index=state.turn_index
@@ -1096,6 +1105,27 @@ def _card_change_back(value: Any, *, turn_index: int) -> dict[str, Any] | None:
         return None
     mark = value.get("mark")
     return dict(mark) if isinstance(mark, dict) and mark else None
+
+
+def _identities_stamped(state: ConversationState) -> dict[str, Any] | None:
+    """The stored form of the open turn's `turn_identities`: `{"turn_index",
+    "identities"}`, stamped with the turn they belong to as the card change
+    mark is (`_card_change_stamped`), or `None` for none."""
+    if not state.turn_identities:
+        return None
+    return {"turn_index": state.turn_index, "identities": state.turn_identities}
+
+
+def _identities_back(value: Any, *, turn_index: int) -> dict[str, dict[str, Any]]:
+    """The identities a stored `turn_identities` holds for turn `turn_index`:
+    none for one stamped for another turn, which a release that does not
+    know the key left in place, or for an unstamped one."""
+    if not isinstance(value, dict) or value.get("turn_index") != turn_index:
+        return {}
+    held = value.get("identities")
+    if not isinstance(held, dict):
+        return {}
+    return {str(k): dict(v) for k, v in held.items() if isinstance(v, dict)}
 
 
 def _history_assignment(value: Any) -> dict[str, Any] | None:

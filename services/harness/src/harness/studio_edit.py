@@ -105,7 +105,12 @@ from harness.studio_translate import (
     failure_detail,
 )
 from harness.tool_contracts import HarnessCode, harness_refusal, resolver_digest
-from harness.turn_records import TURN_CARD_RUNS, SearchReading, held_back_line
+from harness.turn_records import (
+    TURN_CARD_RUNS,
+    RecordedIdentity,
+    SearchReading,
+    held_back_line,
+)
 from harness.unit_offer import served_unit, unit_words
 from harness.unit_switch import UnitRefused, UnitResubmitted, resubmit_unit, scope_years
 from harness.wire import (
@@ -208,9 +213,10 @@ class CardSwap:
     `component.created`, published, `created` naming `replaces` when the card
     took its slot, and the edit ends on `closed`. A swap that does not
     `closes` is followed by the `ChangeRecorded` that ends the edit on
-    `closed`. A swap that finds the slot gone, when `gone` is given, writes
-    nothing and the edit ends on `gone`, a failed step and its closing, with
-    nothing published."""
+    `closed`, and sets `landed`, when given, to where the card landed once
+    its write commits; a write that raises cancels it. A swap that finds the
+    slot gone, when `gone` is given, writes nothing and the edit ends on
+    `gone`, a failed step and its closing, with nothing published."""
 
     step: ActivityStep
     created: ComponentCreated
@@ -221,16 +227,20 @@ class CardSwap:
     closed: EditClosed
     gone: tuple[ActivityStep, EditClosed] | None = None
     closes: bool = True
+    landed: asyncio.Future[SwapLanded] | None = None
 
 
 @dataclass(frozen=True)
 class ChangeRecorded:
-    """The end of a card change whose `CardSwap` did not close the edit:
-    `change`, when given, writes what the turn's record keeps of the
-    retrieval the card drew as the canvas write `CanvasChange` makes, `specs`
-    joins the turn's blocks once it commits, and the edit ends on `closed`. A
-    turn its swap already closed, on finding the card's slot gone, writes and
-    sends nothing more."""
+    """The end of a card change whose `CardSwap` did not close the edit.
+    Its swap wrote the record line and the served identity of the retrieval
+    the card drew. `change`, given when Search read that identity again,
+    adds the reading of the part it answered to the turn's readings as the
+    canvas write `CanvasChange` makes, `specs` joins that part's block to the
+    turn's blocks once it commits, and the edit ends on `closed`. Without
+    `change` the turn keeps no reading or block of it. A turn its swap
+    already closed, on finding the card's slot gone, writes and sends nothing
+    more."""
 
     closed: EditClosed
     change: Callable[[ConversationState], bool] | None = None
@@ -316,12 +326,19 @@ async def _swap_frames(
     c = conversation
     key = current_conversation_key.get()
     assert key is not None, "an edit runs only inside a conversation's stream"
-    landed = await store.change_canvas(
-        *key,
-        event.swap,
-        lineage=event.lineage,
-        landed=lambda landed: landed is SwapLanded.SWAPPED,
-    )
+    try:
+        landed = await store.change_canvas(
+            *key,
+            event.swap,
+            lineage=event.lineage,
+            landed=lambda landed: landed is SwapLanded.SWAPPED,
+        )
+    except BaseException:
+        if event.landed is not None:
+            event.landed.cancel()
+        raise
+    if event.landed is not None and not event.landed.done():
+        event.landed.set_result(landed)
     if landed is SwapLanded.GONE:
         assert event.gone is not None, "only a swap that needs its slot finds it gone"
         step, closed = event.gone
@@ -416,13 +433,18 @@ async def change_events(
     joins the turn's readings with its block, so the next turn's model and
     planner read the card as it is. A unit change of a card with no scope
     reads that retrieval from Search before the fetch (`resubmit_unit`). A
-    card fetched over a scope is served under a spec of its own, whose
-    identity its lineage states: Search reads that identity again once the
-    card is drawn (`_drawn_part`), and the edit closes only then. A read
-    Search refuses, cannot answer in time, or answers under another spec
-    leaves the change made, with a warning: the record then names the card's
-    spec over its scope and holds no reading of it, and the card's entry names
-    the same arguments. A step Search or the
+    card fetched over a scope is served under a spec of its own, which its
+    lineage names with its identity: the record line and the card's entry
+    name that spec with the card's arguments, and the turn keeps its
+    identity (`ConversationState.turn_identities`), all written with the
+    card. Once the card has landed and its frames are sent, Search reads that
+    identity again within `DRAWN_READ_DEADLINE_S` (`_drawn_readings`), and
+    the edit closes only then. A read Search refuses, cannot answer in time,
+    or answers otherwise, and a fault reading its answer, leave the change
+    made, with a warning and no reading or block of it. A card whose slot was
+    gone is not read. A Stop or a client leaving during the read ends the
+    turn as it ends any edit stopped or left, with the change, its line and
+    its identity recorded. A step Search or the
     platform refuses, and a retrieval that holds no figures, ends the turn on
     its sentence, the card unchanged. Failures serialise as `edit_events`'
     do."""
@@ -1019,30 +1041,42 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
             f"(get_data {json.dumps(fetch_args, sort_keys=True)}{summed_with})."
         )
 
-    record_line = (
-        f"Changed {move.title} to {shown} ({read.spec_id})."
-        if read.scope is None
-        else line(card.fetch_args(read.spec_id, read.scope, facets=facets))
-    )
-    display_line = f"Change {move.title} to {shown}."
-    # A card fetched over a scope is served under a spec of its own, which the
-    # turn records once Search reads it again (`_drawn_part`), with the card
-    # drawn meanwhile. Until then the record keeps the read's own line and no
-    # reading, which a read Search refuses leaves standing.
+    # A card fetched over a scope is served under a spec of its own, which its
+    # lineage names. The record and the card's entry name that spec with the
+    # card's arguments, and the turn keeps its identity, as the card is
+    # written, so a turn cut after the card lands still names it.
     served = (
         _served_retrieval(recorder.card_lineage(written["component"]))
         if read.scope is not None
         else None
+    )
+    fetched_with = card.fetch_args(served[0], None) if served is not None else None
+    if fetched_with is not None:
+        record_line = line(fetched_with)
+    elif read.scope is None:
+        record_line = f"Changed {move.title} to {shown} ({read.spec_id})."
+    else:
+        record_line = line(card.fetch_args(read.spec_id, read.scope, facets=facets))
+    display_line = f"Change {move.title} to {shown}."
+    held = (
+        {served[0]: RecordedIdentity(identity=dict(served[1])).model_dump(mode="json")}
+        if served is not None and served[1] is not None
+        else {}
     )
 
     def record(work: ConversationState) -> None:
         work.turn_user_message = record_line
         if served is None:
             work.turn_readings = [*work.turn_readings, *read.readings]
+        if held:
+            work.turn_identities = {**work.turn_identities, **held}
 
     # The card shows the change. The record keeps the sentence and the
     # spec_id for the next turn's model, and a state read shows neither.
     closed = EditClosed(f"The card now shows {shown}.", shown=False, user_display=display_line)
+    landed: asyncio.Future[SwapLanded] | None = (
+        asyncio.get_running_loop().create_future() if held else None
+    )
     swap = _swapped(
         recorder,
         conversation,
@@ -1060,57 +1094,43 @@ async def _change_flow(  # noqa: PLR0911 -- one ending per step that can refuse 
         gone=gone,
         card=card,
         intent=intent,
-        closes=served is None,
+        closes=landed is None,
+        landed=landed,
+        fetched=fetched_with,
     )
-    if served is None:
-        yield swap
+    yield swap
+    if landed is None or served is None:
         return
     spec_id, identity = served
-    drawn = asyncio.create_task(_drawn_part(surface, spec_id=spec_id, identity=identity))
-    try:
-        yield swap
-        try:
-            part = await drawn
-        # The card has landed, so any fault reading its retrieval again ends
-        # the change as a read Search refuses does.
-        except Exception:
-            logger.warning(
-                "the retrieval %s a changed card drew was not read again, so the turn "
-                "records none of it",
-                spec_id,
-                exc_info=True,
-            )
-            part = None
-    finally:
-        drawn.cancel()
-    if part is None:
-
-        def unread(work: ConversationState) -> bool:
-            work.turn_readings = [*work.turn_readings, *read.readings]
-            return False
-
-        yield ChangeRecorded(closed=swap.closed, change=unread if read.readings else None)
+    if identity is None:
         return
-    fetched_with = card.fetch_args(spec_id, None)
+    # The card's frames are sent before the read below starts, and a card
+    # that never landed is not read.
+    if await landed is SwapLanded.GONE:
+        yield ChangeRecorded(closed=swap.closed)
+        return
     title = intent.get("title")
-    readings = _part_readings(
-        part,
-        reading=move.reading
-        if isinstance(move, UnitMove)
-        else stored_reading(conversation.turn_readings, conversation.turns, move.card.spec_id),
+    drawn = await _drawn_readings(
+        surface,
+        spec_id=spec_id,
+        identity=identity,
+        reading=lambda: (
+            move.reading
+            if isinstance(move, UnitMove)
+            else stored_reading(conversation.turn_readings, conversation.turns, move.card.spec_id)
+        ),
         variable=title if isinstance(title, str) and title else move.title,
     )
-    component_id = swap.created.component_id
+    if drawn is None:
+        yield ChangeRecorded(closed=swap.closed)
+        return
+    readings, block = drawn
 
     def recorded(work: ConversationState) -> bool:
-        work.turn_user_message = line(fetched_with)
         work.turn_readings = [*work.turn_readings, *readings]
-        entry = work.components.get(component_id)
-        if entry is not None:
-            work.components[component_id] = {**entry, FETCHED_KEY: fetched_with}
         return False
 
-    yield ChangeRecorded(closed=swap.closed, change=recorded, specs={spec_id: dict(part["spec"])})
+    yield ChangeRecorded(closed=swap.closed, change=recorded, specs={spec_id: block})
 
 
 async def _summed_again(  # noqa: PLR0911 -- one sentence per way the sum fails
@@ -1233,55 +1253,88 @@ def _read_again(move: UnitMove, resubmitted: UnitResubmitted) -> list[dict[str, 
     )
 
 
-def _served_retrieval(lineage: CardLineage | None) -> tuple[str, Mapping[str, Any]] | None:
-    """The spec_id and identity the one retrieval a written card's `lineage`
-    reads is served under, as `harness.card_unit.unit_card` reads them: the
-    member's served spec_id and its manifest's `definition.identity`. `None`
-    for a card on more than one retrieval, and for a manifest that states
-    either not at all."""
+def _served_retrieval(
+    lineage: CardLineage | None,
+) -> tuple[str, Mapping[str, Any] | None] | None:
+    """The spec_id the one retrieval a written card's `lineage` reads is
+    served under, and its identity, as `harness.card_unit.unit_card` reads
+    them: the member's served spec_id and its manifest's
+    `definition.identity`, `None` where the manifest states none. `None` for
+    a card on more than one retrieval, and for a member that states no
+    served spec_id."""
     if lineage is None or len(lineage.lineage) != 1:
         return None
     (member,) = lineage.lineage
     spec_id = member.served_ref["spec_id"]
-    identity = (member.manifest.get("definition") or {}).get("identity")
-    if not isinstance(spec_id, str) or not spec_id or not isinstance(identity, Mapping):
-        logger.info("a changed card's lineage states no served identity, so none is recorded")
+    if not isinstance(spec_id, str) or not spec_id:
         return None
+    identity = (member.manifest.get("definition") or {}).get("identity")
+    if not isinstance(identity, Mapping):
+        logger.info("the lineage of %s states no identity, so the turn records none", spec_id)
+        return spec_id, None
     return spec_id, identity
 
 
-async def _drawn_part(
-    surface: ToolSurface, *, spec_id: str, identity: Mapping[str, Any]
-) -> Mapping[str, Any] | None:
-    """The part Search answers for `identity`, the one a changed card's
-    retrieval is served under as `spec_id`: one `resolve_definition` call,
-    bounded by the surface's timeout for it as every Search read of a card
-    change is. `None`, with a warning naming `spec_id` and the reason, when
-    Search refuses it, cannot be reached in time, or answers a part that is
-    not `definite` under `spec_id` with its identity (`resolved_spec`)."""
+# How long the read again of a changed card's retrieval may take. The card has
+# landed, and the read only adds a reading to the turn's record, so it must not
+# hold the turn open for long.
+DRAWN_READ_DEADLINE_S = 10.0
+
+
+async def _drawn_readings(
+    surface: ToolSurface,
+    *,
+    spec_id: str,
+    identity: Mapping[str, Any],
+    reading: Callable[[], SearchReading | None],
+    variable: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    """The readings, as JSON, and the block of the part Search answers for
+    `identity`, the one a changed card's retrieval is served under as
+    `spec_id`: one `resolve_definition` call within
+    `DRAWN_READ_DEADLINE_S`, its part read as `_part_readings` reads one,
+    named `variable` and asked as `reading` gives. `None`, with a warning
+    naming `spec_id` and the reason, when Search refuses it, cannot answer in
+    time, or answers a part that is not `definite` under `spec_id` with its
+    identity (`resolved_spec`), or when anything else raises: the card has
+    landed, so no fault here fails the turn."""
     try:
-        part = await resolve_definition(surface, spec_id=spec_id, identity=identity)
-        resolved_spec(part, spec_id=spec_id)
+        async with asyncio.timeout(DRAWN_READ_DEADLINE_S):
+            part = await resolve_definition(surface, spec_id=spec_id, identity=identity)
+        resolved = resolved_spec(part, spec_id=spec_id)
+        return _part_readings(part, reading=reading(), variable=variable), dict(resolved)
+    except TimeoutError:
+        logger.warning(
+            "the retrieval %s a changed card drew was not read again within %s s; "
+            "the turn records no reading of it",
+            spec_id,
+            DRAWN_READ_DEADLINE_S,
+        )
     except DefinitionNotResolvedError as exc:
         logger.warning(
             "the retrieval %s a changed card drew was not read again (code=%s, retryable=%s): "
-            "%s; the turn records none of it",
+            "%s; the turn records no reading of it",
             spec_id,
             exc.code,
             exc.retryable,
             exc,
         )
-        return None
     except PartNotResolvedError as exc:
         logger.warning(
             "Search answered the retrieval %s a changed card drew as %s (spec_id %s); "
-            "the turn records none of it",
+            "the turn records no reading of it",
             spec_id,
             exc.fault.value,
             exc.answered,
         )
-        return None
-    return part
+    except Exception:
+        logger.warning(
+            "the retrieval %s a changed card drew was not read again; "
+            "the turn records no reading of it",
+            spec_id,
+            exc_info=True,
+        )
+    return None
 
 
 def _part_readings(
@@ -1504,6 +1557,8 @@ def _swapped(
     card: UnitCard | None = None,
     intent: Mapping[str, Any] | None = None,
     closes: bool = True,
+    landed: asyncio.Future[SwapLanded] | None = None,
+    fetched: Mapping[str, Any] | None = None,
 ) -> CardSwap:
     """The swap of `component`, a card written to take card
     `old_component_id`'s slot, ending the edit on `closed`: the step
@@ -1534,7 +1589,9 @@ def _swapped(
     `gone`. A `closed` that is shown carries the held line (`_held_line`),
     `reframed` saying whether the new card draws another window or frame than
     the old. A swap that does not `closes` leaves the edit open for the
-    `ChangeRecorded` that ends it on `closed`."""
+    `ChangeRecorded` that ends it on `closed`, and sets `landed` once its
+    write commits. `fetched`, when given, is the card's `FETCHED_KEY` in
+    place of its spec over its scope."""
     plan = (conversation.components.get(old_component_id) or {}).get(PLAN_LINK_KEY)
     created = component_created(component, step_id=step_id, plan=plan)
     token = recorder.write_token(component)
@@ -1584,7 +1641,9 @@ def _swapped(
         entry = _digest_entry(component)
         if kept is not None:
             entry[CARD_UNIT_KEY] = kept
-        if card is not None and card.scope:
+        if fetched is not None:
+            entry[FETCHED_KEY] = dict(fetched)
+        elif card is not None and card.scope:
             entry[FETCHED_KEY] = card.fetch_args(card.spec_id, card.scope, facets=fetched_facets)
         if card is not None and card.total is not None:
             entry[SUMMED_KEY] = {"tool": "aggregate", "arguments": dict(card.total.parameters)}
@@ -1629,6 +1688,7 @@ def _swapped(
         closed=closed,
         gone=gone,
         closes=closes,
+        landed=landed,
     )
 
 
